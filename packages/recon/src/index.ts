@@ -1,30 +1,55 @@
 /**
  * @pingdev/recon — Reconnaissance engine for PingDev.
  *
- * Phase 2+ will implement:
- * - UIMapper: Crawl a site, discover interactive elements, generate selectors
- * - DocScraper: Find and parse site documentation
- * - LLMAnalyzer: Use LLM to infer actions, states, and flows
- *
- * For now, this is a scaffold with interfaces defined.
+ * Analyzes any website and generates a complete PingApp config.
+ * Pipeline: snapshot → analyze → generate
  */
 
-export type { UIMapResult, DiscoveredElement, PageStructure, DocScrapeResult, SiteBlueprint } from './types.js';
+// ─── Pipeline ─────────────────────────────────────────────────────
+export { runRecon } from './pipeline.js';
 
-/** UI Mapper — discovers interactive elements on a page. */
-export interface UIMapper {
-  map(url: string): Promise<import('./types.js').UIMapResult>;
-}
+// ─── Snapshot Engine ──────────────────────────────────────────────
+export { SnapshotEngine, type SnapshotOptions } from './snapshot/index.js';
+export { discoverElements } from './snapshot/elements.js';
+export { discoverRegions } from './snapshot/regions.js';
+export { detectDynamicAreas } from './snapshot/dynamic.js';
+export { captureAriaTree } from './snapshot/aria.js';
+export { captureScreenshots } from './snapshot/screenshots.js';
 
-/** Documentation Scraper — finds and parses site docs. */
-export interface DocScraper {
-  scrape(url: string): Promise<import('./types.js').DocScrapeResult>;
-}
+// ─── Analyzer ─────────────────────────────────────────────────────
+export { SiteAnalyzer } from './analyzer/analyzer.js';
+export { LLMClient, type LLMClientOptions, type ChatMessage } from './analyzer/llm-client.js';
+export { DocScraper } from './analyzer/doc-scraper.js';
+export { buildAnalysisPrompt } from './analyzer/prompts.js';
 
-/** LLM Analyzer — uses AI to infer site behavior. */
-export interface LLMAnalyzer {
-  analyze(
-    uiMap: import('./types.js').UIMapResult,
-    docs: import('./types.js').DocScrapeResult,
-  ): Promise<import('./types.js').SiteBlueprint>;
-}
+// ─── Generator ────────────────────────────────────────────────────
+export { PingAppGenerator } from './generator/generator.js';
+export { SelfTester, type SelfTestResult } from './generator/self-test.js';
+
+// ─── Types ────────────────────────────────────────────────────────
+export type {
+  // Snapshot types
+  SiteSnapshot,
+  SnapshotElement,
+  PageRegion,
+  DynamicArea,
+  ScreenshotData,
+  AriaNode,
+  // Analyzer types
+  DocScrapeResult,
+  SiteDefinitionResult,
+  InferredAction,
+  InferredState,
+  InferredFeature,
+  // Generator types
+  GeneratorConfig,
+  GeneratorResult,
+  // Pipeline types
+  ReconOptions,
+  ReconResult,
+  // Legacy types
+  UIMapResult,
+  DiscoveredElement,
+  PageStructure,
+  SiteBlueprint,
+} from './types.js';

@@ -9,6 +9,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@pingdev/core": "^0.1.0"
+    "@pingdev/core": "^0.1.0",
+    "playwright": "^1.58.2"
   }
 }
