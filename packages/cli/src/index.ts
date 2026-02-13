@@ -39,7 +39,7 @@ async function runReconCommand(argv: string[]) {
     console.error('  --snapshot-only    Just capture a snapshot, no analysis');
     console.error('  --analyze-only     Snapshot + analyze, no code generation');
     console.error('  --dry-run          Show what would be generated');
-    console.error('  --output-dir <dir> Override output directory');
+    console.error('  --output <dir>     Override output directory (alias: --output-dir)');
     console.error('  --llm-endpoint <u> LLM API endpoint URL');
     console.error('  --llm-model <m>    LLM model name');
     console.error('  --no-self-test     Skip build verification');
@@ -56,7 +56,7 @@ async function runReconCommand(argv: string[]) {
     snapshotOnly: flags['snapshot-only'] === true,
     analyzeOnly: flags['analyze-only'] === true,
     dryRun: flags['dry-run'] === true,
-    outputDir: typeof flags['output-dir'] === 'string' ? flags['output-dir'] : undefined,
+    outputDir: typeof flags['output'] === 'string' ? flags['output'] : typeof flags['output-dir'] === 'string' ? flags['output-dir'] : undefined,
     llmEndpoint: typeof flags['llm-endpoint'] === 'string' ? flags['llm-endpoint'] : undefined,
     llmModel: typeof flags['llm-model'] === 'string' ? flags['llm-model'] : undefined,
     selfTest: flags['no-self-test'] !== true,
