@@ -10,7 +10,7 @@ import type {
 } from './types.js';
 
 const DEFAULTS: Required<ValidatorOptions> = {
-  cdpUrl: 'http://127.0.0.1:18800',
+  cdpUrl: process.env.PINGDEV_CDP_URL ?? 'http://127.0.0.1:9222',
   timeout: 15_000,
   screenshot: true,
 };

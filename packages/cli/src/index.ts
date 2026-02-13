@@ -104,7 +104,7 @@ async function runValidateCommand(argv: string[]) {
     console.error('Usage: pingdev validate <app-dir> [options]');
     console.error('');
     console.error('Options:');
-    console.error('  --cdp-url <url>   CDP endpoint URL (default: http://127.0.0.1:18800)');
+    console.error('  --cdp-url <url>   CDP endpoint URL (default: PINGDEV_CDP_URL or http://127.0.0.1:9222)');
     console.error('  --timeout <ms>    Per-action timeout in ms (default: 15000)');
     process.exit(1);
   }
@@ -123,6 +123,10 @@ async function runValidateCommand(argv: string[]) {
   const loader = new PingAppLoader(resolvedDir);
   const config = loader.load();
 
+  const cdpUrl = typeof flags['cdp-url'] === 'string' ? flags['cdp-url'] : (process.env.PINGDEV_CDP_URL ?? undefined);
+  if (cdpUrl) {
+    console.log(`[validate] CDP: ${cdpUrl}`);
+  }
   console.log(`[validate] App: ${config.name} (${config.url})`);
   console.log(`[validate] Selectors: ${Object.keys(config.selectors).length}`);
   console.log('');
@@ -186,7 +190,7 @@ async function runHealCommand(argv: string[]) {
     console.error('Usage: pingdev heal <app-dir> [options]');
     console.error('');
     console.error('Options:');
-    console.error('  --cdp-url <url>       CDP endpoint URL (default: http://127.0.0.1:18800)');
+    console.error('  --cdp-url <url>       CDP endpoint URL (default: PINGDEV_CDP_URL or http://127.0.0.1:9222)');
     console.error('  --llm-endpoint <url>  LLM API endpoint URL');
     console.error('  --llm-model <model>   LLM model name');
     console.error('  --max-retries <n>     Max healing retries per action (default: 3)');
@@ -214,7 +218,7 @@ async function runHealCommand(argv: string[]) {
   console.log(`[heal] App: ${config.name} (${config.url})`);
   console.log('[heal] Running validation first...');
 
-  const cdpUrl = typeof flags['cdp-url'] === 'string' ? flags['cdp-url'] : undefined;
+  const cdpUrl = typeof flags['cdp-url'] === 'string' ? flags['cdp-url'] : (process.env.PINGDEV_CDP_URL ?? undefined);
 
   const validator = new ActionValidator(config.selectors, config.url, { cdpUrl });
   const validationReport = await validator.validate();
