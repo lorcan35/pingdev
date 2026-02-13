@@ -300,7 +300,7 @@ async function processJob(
       });
     }
 
-    log.error({ error: shimErr }, 'Job failed');
+    log.error({ error: shimErr.message, code: shimErr.code }, 'Job failed');
     return result;
   }
 }

@@ -135,7 +135,8 @@ export class ActionValidator {
       }, page));
 
     } catch (err) {
-      this.log.error({ err }, 'Validation encountered a fatal error');
+      const error = err instanceof Error ? err.message : String(err);
+      this.log.error({ error }, 'Validation encountered a fatal error');
     } finally {
       await adapter.disconnect();
     }

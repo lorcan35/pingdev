@@ -112,7 +112,8 @@ export class PingAppLoader {
     try {
       return readFileSync(fullPath, 'utf-8');
     } catch (err) {
-      log.error({ path: fullPath, err }, 'Failed to read PingApp file');
+      const error = err instanceof Error ? err.message : String(err);
+      log.error({ path: fullPath, error }, 'Failed to read PingApp file');
       throw new Error(`Cannot read PingApp file: ${fullPath}`);
     }
   }
