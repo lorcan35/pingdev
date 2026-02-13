@@ -66,7 +66,7 @@ export class SiteAnalyzer {
     try {
       raw = await this.llm.chatJSON<LLMAnalysisResponse>(messages, {
         temperature: 0.2,
-        maxTokens: 4096,
+        maxTokens: 8192,
       });
     } catch (err) {
       throw new Error(`LLM analysis failed: ${(err as Error).message}`);

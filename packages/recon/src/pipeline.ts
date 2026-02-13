@@ -41,6 +41,7 @@ export async function runRecon(options: ReconOptions): Promise<ReconResult> {
   // ── Stage 1: Snapshot ──────────────────────────────────────────
   console.log(`\n[recon] Snapshotting ${url} ...`);
   const snapshotEngine = new SnapshotEngine({
+    cdpUrl: options.cdpUrl ?? process.env.PINGDEV_CDP_URL ?? 'http://127.0.0.1:9222',
     screenshots: true,
     captureAriaTree: true,
   });

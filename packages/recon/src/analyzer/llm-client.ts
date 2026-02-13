@@ -144,14 +144,27 @@ export class LLMClient {
     let content: string;
 
     if (this.backend === 'anthropic') {
-      // Anthropic doesn't have JSON mode — add instruction to the prompt
       const augmented = this.addJsonInstruction(messages);
       content = await this.anthropicChat(augmented, options);
     } else {
-      const body = this.buildOpenAIBody(messages, options);
-      body.response_format = { type: 'json_object' };
-      const data = await this.postOpenAI(body);
-      content = this.extractOpenAIContent(data);
+      // Try with response_format first; fall back to prompt-based JSON if unsupported
+      try {
+        const body = this.buildOpenAIBody(messages, options);
+        body.response_format = { type: 'json_object' };
+        const data = await this.postOpenAI(body);
+        content = this.extractOpenAIContent(data);
+      } catch (err) {
+        const msg = (err as Error).message ?? '';
+        if (msg.includes('400') || msg.includes('response_format')) {
+          // Server doesn't support json_object mode — retry with prompt instruction
+          const augmented = this.addJsonInstruction(messages);
+          const body = this.buildOpenAIBody(augmented, options);
+          const data = await this.postOpenAI(body);
+          content = this.extractOpenAIContent(data);
+        } else {
+          throw err;
+        }
+      }
     }
 
     return this.parseJSON<T>(content);
@@ -275,23 +288,26 @@ export class LLMClient {
     });
   }
 
-  /** Parse JSON from LLM response, handling markdown fences. */
+  /** Parse JSON from LLM response, handling markdown fences and thinking tags. */
   private parseJSON<T>(content: string): T {
+    // Strip <think>...</think> blocks (Qwen3, DeepSeek, etc.)
+    let cleaned = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
     // Try direct parse first
     try {
-      return JSON.parse(content) as T;
+      return JSON.parse(cleaned) as T;
     } catch {
       // Try extracting from markdown fences
-      const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (fenceMatch) {
         return JSON.parse(fenceMatch[1].trim()) as T;
       }
       // Try finding a JSON object in the text
-      const objMatch = content.match(/(\{[\s\S]*\})/);
+      const objMatch = cleaned.match(/(\{[\s\S]*\})/);
       if (objMatch) {
         return JSON.parse(objMatch[1].trim()) as T;
       }
-      throw new Error(`Failed to parse LLM JSON response. Raw content starts with: ${content.slice(0, 200)}`);
+      throw new Error(`Failed to parse LLM JSON response. Raw content starts with: ${cleaned.slice(0, 200)}`);
     }
   }
 }

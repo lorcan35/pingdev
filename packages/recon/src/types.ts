@@ -278,6 +278,8 @@ export interface GeneratorResult {
 export interface ReconOptions {
   /** URL to analyze. */
   url: string;
+  /** CDP URL for browser connection. */
+  cdpUrl?: string;
   /** Stop after snapshot. */
   snapshotOnly?: boolean;
   /** Stop after analysis (no code gen). */

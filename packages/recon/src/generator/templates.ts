@@ -216,6 +216,22 @@ export function generateMainIndex(
     'extractResponse',
   ];
 
+  // Optional action slots that SiteDefinition accepts
+  const optionalSlots = [
+    'preflight',
+    'extractPartialResponse',
+    'extractThinking',
+    'extractProgressText',
+    'dismissOverlays',
+    'activateTool',
+    'deactivateTool',
+    'switchMode',
+    'newConversation',
+    'getCurrentUrl',
+  ];
+
+  const allKnownSlots = new Set([...requiredSlots, ...optionalSlots]);
+
   for (const slot of requiredSlots) {
     const camelSlot = toCamel(slot);
     if (actionMap.has(slot) || actionMap.has(camelSlot)) {
@@ -226,12 +242,12 @@ export function generateMainIndex(
     }
   }
 
-  // Add any extra custom actions as optional slots
+  // Add optional slots only if they match a known SiteDefinition key
   for (const action of actions) {
     const camelName = toCamel(action.name);
-    if (!requiredSlots.includes(action.name) && !requiredSlots.includes(camelName)) {
-      lines.push(`    ${camelName}: actions['${camelName}'],`);
-    }
+    if (allKnownSlots.has(camelName)) continue; // already handled above
+    // Custom actions that don't map to SiteDefinition slots — skip them
+    // They're still available via the actions barrel export for direct use
   }
 
   lines.push('  },');
