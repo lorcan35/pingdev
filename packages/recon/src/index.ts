@@ -26,6 +26,10 @@ export { buildAnalysisPrompt } from './analyzer/prompts.js';
 export { PingAppGenerator } from './generator/generator.js';
 export { SelfTester, type SelfTestResult } from './generator/self-test.js';
 
+// ─── Healer ──────────────────────────────────────────────────────
+export { Healer, buildHealingPrompt, readSelectorsFile, writeSelectorsFile, applyPatches } from './healer/index.js';
+export type { HealingPatch, HealingAttempt, HealingReport, HealingResult, HealerOptions } from './healer/index.js';
+
 // ─── Types ────────────────────────────────────────────────────────
 export type {
   // Snapshot types

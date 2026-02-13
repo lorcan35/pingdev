@@ -1,0 +1,37 @@
+/** Types for the self-healing module. */
+
+export interface HealingPatch {
+  selectorName: string;
+  oldTiers: string[];
+  newTiers: string[];
+  reason: string;
+}
+
+export interface HealingAttempt {
+  attemptNumber: number;
+  patches: HealingPatch[];
+  validationPassed: boolean;
+  error?: string;
+}
+
+export interface HealingReport {
+  actionName: string;
+  attempts: HealingAttempt[];
+  fixed: boolean;
+  finalPatches: HealingPatch[];
+}
+
+export interface HealingResult {
+  appDir: string;
+  reports: HealingReport[];
+  totalFixed: number;
+  totalFailed: number;
+  duration_ms: number;
+}
+
+export interface HealerOptions {
+  cdpUrl?: string;        // default http://127.0.0.1:18800
+  maxRetries?: number;    // default 3
+  llmEndpoint?: string;
+  llmModel?: string;
+}

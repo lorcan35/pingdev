@@ -28,3 +28,23 @@ export { withRetry, type RetryOptions } from './worker/retry.js';
 export { Errors, createError } from './errors/index.js';
 export { createLogger } from './logger.js';
 export * as jobStateStore from './worker/job-state-store.js';
+
+// Validator module
+export { PingAppLoader, ActionValidator } from './validator/index.js';
+export type {
+  ActionValidationResult, ValidationReport, ValidatorOptions, PingAppConfig,
+} from './validator/index.js';
+
+// Scoring module
+export * as scoring from './scoring/index.js';
+
+// Runtime self-healing
+export {
+  SelectorRegistry,
+  HealingLog,
+  RuntimeHealer,
+  TestCaseGenerator,
+  type HealingLogEntry,
+  type RuntimeConfig,
+  type TestCase,
+} from './runtime/index.js';
