@@ -18,7 +18,7 @@ describe('PingAppLoader', () => {
     expect(selectors['promptInput']).toBeDefined();
     expect(selectors['promptInput']!.name).toBe('promptInput');
     expect(selectors['promptInput']!.tiers.length).toBeGreaterThan(0);
-    expect(selectors['messageOutput']).toBeDefined();
+    expect(selectors['outputContainer']).toBeDefined();
   });
 
   it('loads the ChatGPT PingApp state config', () => {
