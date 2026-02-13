@@ -17,6 +17,52 @@ export async function detectDynamicAreas(
       const results: DynamicArea[] = [];
       const mutationCounts = new Map<Element, { count: number; types: Set<string> }>();
 
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const role = el.getAttribute('role');
+        if (role) return `[role="${role}"]`;
+        const testId = el.getAttribute('data-testid');
+        if (testId) return `[data-testid="${testId}"]`;
+        const tag = el.tagName.toLowerCase();
+        const cls = el.classList[0];
+        return cls ? `${tag}.${cls}` : tag;
+      };
+
+      const describeDynamicArea = (el: Element): string => {
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel) return ariaLabel;
+        const role = el.getAttribute('role');
+        if (role) return role;
+        const id = el.id;
+        if (id) return id;
+        return el.tagName.toLowerCase() + '-dynamic';
+      };
+
+      const classifyDynamic = (el: Element, types: Set<string>): string => {
+        const role = el.getAttribute('role');
+        if (role === 'log' || role === 'status') return 'response-output';
+        if (role === 'alert') return 'notification';
+        const ariaLive = el.getAttribute('aria-live');
+        if (ariaLive === 'polite' || ariaLive === 'assertive') return 'live-update';
+        if (el.classList.contains('loading') || el.classList.contains('spinner')) return 'loading-indicator';
+        if (types.has('childList') && types.has('characterData')) return 'response-output';
+        if (types.has('childList')) return 'live-update';
+        return 'live-update';
+      };
+
+      const classifyStaticPattern = (el: Element): string => {
+        const role = el.getAttribute('role');
+        if (role === 'log') return 'response-output';
+        if (role === 'status') return 'response-output';
+        if (role === 'alert') return 'notification';
+        if (role === 'progressbar') return 'loading-indicator';
+        if (el.getAttribute('aria-busy') === 'true' || el.hasAttribute('data-loading')) return 'loading-indicator';
+        if (el.classList.contains('loading') || el.classList.contains('spinner')) return 'loading-indicator';
+        const ariaLive = el.getAttribute('aria-live');
+        if (ariaLive) return 'live-update';
+        return 'live-update';
+      };
+
       // Track mutations on the document
       const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
@@ -86,52 +132,6 @@ export async function detectDynamicAreas(
 
         resolve(results);
       }, durationMs);
-
-      function buildSelector(el: Element): string {
-        if (el.id) return `#${el.id}`;
-        const role = el.getAttribute('role');
-        if (role) return `[role="${role}"]`;
-        const testId = el.getAttribute('data-testid');
-        if (testId) return `[data-testid="${testId}"]`;
-        const tag = el.tagName.toLowerCase();
-        const cls = el.classList[0];
-        return cls ? `${tag}.${cls}` : tag;
-      }
-
-      function describeDynamicArea(el: Element): string {
-        const ariaLabel = el.getAttribute('aria-label');
-        if (ariaLabel) return ariaLabel;
-        const role = el.getAttribute('role');
-        if (role) return role;
-        const id = el.id;
-        if (id) return id;
-        return el.tagName.toLowerCase() + '-dynamic';
-      }
-
-      function classifyDynamic(el: Element, types: Set<string>): string {
-        const role = el.getAttribute('role');
-        if (role === 'log' || role === 'status') return 'response-output';
-        if (role === 'alert') return 'notification';
-        const ariaLive = el.getAttribute('aria-live');
-        if (ariaLive === 'polite' || ariaLive === 'assertive') return 'live-update';
-        if (el.classList.contains('loading') || el.classList.contains('spinner')) return 'loading-indicator';
-        if (types.has('childList') && types.has('characterData')) return 'response-output';
-        if (types.has('childList')) return 'live-update';
-        return 'live-update';
-      }
-
-      function classifyStaticPattern(el: Element): string {
-        const role = el.getAttribute('role');
-        if (role === 'log') return 'response-output';
-        if (role === 'status') return 'response-output';
-        if (role === 'alert') return 'notification';
-        if (role === 'progressbar') return 'loading-indicator';
-        if (el.getAttribute('aria-busy') === 'true' || el.hasAttribute('data-loading')) return 'loading-indicator';
-        if (el.classList.contains('loading') || el.classList.contains('spinner')) return 'loading-indicator';
-        const ariaLive = el.getAttribute('aria-live');
-        if (ariaLive) return 'live-update';
-        return 'live-update';
-      }
     });
   }, observeDurationMs);
 

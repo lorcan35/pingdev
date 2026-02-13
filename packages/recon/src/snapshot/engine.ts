@@ -74,7 +74,7 @@ export class SnapshotEngine {
         document.body,
         NodeFilter.SHOW_TEXT,
         {
-          acceptNode(node) {
+          acceptNode: (node: Node) => {
             const el = node.parentElement;
             if (!el) return NodeFilter.FILTER_REJECT;
             const style = window.getComputedStyle(el);

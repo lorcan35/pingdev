@@ -54,6 +54,14 @@ export async function discoverRegions(
     const regions: RawRegion[] = [];
     const seen = new Set<Element>();
 
+    const buildSelectorFor = (el: Element): string => {
+      if (el.id) return `#${el.id}`;
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute('role');
+      if (role) return `[role="${role}"]`;
+      return tag;
+    };
+
     // 1. Landmark roles
     const ROLE_MAP: Record<string, string> = {
       banner: 'header', navigation: 'nav', main: 'main',
@@ -119,14 +127,6 @@ export async function discoverRegions(
           });
         });
       } catch { /* invalid selector, skip */ }
-    }
-
-    function buildSelectorFor(el: Element): string {
-      if (el.id) return `#${el.id}`;
-      const tag = el.tagName.toLowerCase();
-      const role = el.getAttribute('role');
-      if (role) return `[role="${role}"]`;
-      return tag;
     }
 
     return regions;
