@@ -1,0 +1,30 @@
+/** @pingdev/core — Framework for building PingApps (local API shims for websites). */
+
+// Main API
+export { createShimApp, type ShimApp } from './app.js';
+export { defineSite } from './site.js';
+
+// Types (everything)
+export type {
+  SelectorDef, UIState, JobStatus, Priority, ErrorCode, ShimError,
+  JobRequest, JobResult, EnhancedJobResult, HealthStatus,
+  StateTransition, JobTiming, UISubstate, LiveJobState,
+  SSEEventType, SSEEvent,
+  CompletionConfig, BrowserConfig, ActionHandler, ActionContext,
+  StateMachineConfig, RateLimitConfig, RedisConfig, QueueConfig,
+  RetryConfig, IdempotencyConfig, ConversationConfig,
+  SiteDefinition, ShimAppOptions,
+} from './types.js';
+
+// Individual modules for advanced usage
+export { BrowserAdapter } from './browser/adapter.js';
+export { resolveSelector, resolveSelectorOrThrow } from './browser/selector-resolver.js';
+export { UIStateMachine } from './state-machine/index.js';
+export { ArtifactLogger } from './artifacts/index.js';
+export { RateLimiter } from './api/rate-limiter.js';
+export { IdempotencyStore } from './api/idempotency.js';
+export { ConversationStore } from './worker/conversation-store.js';
+export { withRetry, type RetryOptions } from './worker/retry.js';
+export { Errors, createError } from './errors/index.js';
+export { createLogger } from './logger.js';
+export * as jobStateStore from './worker/job-state-store.js';
