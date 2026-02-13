@@ -1,0 +1,17 @@
+{
+  "name": "pingdev",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PingDev — zero-config tool that turns any website into a local REST API",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "vitest run",
+    "clean": "rm -rf packages/*/dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18",
+    "@types/node": "^25.2.3"
+  }
+}

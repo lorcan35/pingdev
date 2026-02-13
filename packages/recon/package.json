@@ -1,0 +1,14 @@
+{
+  "name": "@pingdev/recon",
+  "version": "0.1.0",
+  "description": "Reconnaissance engine for PingDev — analyzes websites to generate PingApp configs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@pingdev/core": "^0.1.0"
+  }
+}
