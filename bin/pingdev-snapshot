@@ -1,0 +1,10 @@
+#!/bin/bash
+# Convenience wrapper for the snapshot CLI.
+# Sets DISPLAY and CDP URL defaults for headless environments.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+DISPLAY="${DISPLAY:-:1}" \
+PINGDEV_CDP_URL="${PINGDEV_CDP_URL:-http://127.0.0.1:18800}" \
+  exec npx tsx "$SCRIPT_DIR/packages/recon/src/snapshot-cli.ts" "$@"

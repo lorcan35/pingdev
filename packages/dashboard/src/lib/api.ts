@@ -61,8 +61,12 @@ export interface ChatResponse extends JobResponse {
   cached?: boolean;
 }
 
+export interface ToolsResponse {
+  tools: Array<{ name: string; description?: string }>;
+}
+
 function baseUrl(port: number): string {
-  return `http://localhost:${port}`;
+  return `/api/${port}`;
 }
 
 export async function fetchHealth(port: number): Promise<HealthResponse> {
@@ -109,6 +113,12 @@ export async function sendChat(port: number, prompt: string, opts?: { tool?: str
   return res.json();
 }
 
+export async function fetchTools(port: number): Promise<ToolsResponse> {
+  const res = await fetch(`${baseUrl(port)}/v1/tools`);
+  if (!res.ok) throw new Error(`Tools fetch failed: ${res.status}`);
+  return res.json();
+}
+
 /** Subscribe to SSE job stream. Returns a cleanup function. */
 export function subscribeJobStream(
   port: number,
@@ -139,19 +149,37 @@ export function subscribeJobStream(
   return () => source.close();
 }
 
-/** Default PingApp registry — loaded from localStorage. */
+/** Default PingApp registry — loaded from localStorage, seeded with known apps. */
 const STORAGE_KEY = 'pingdev-apps';
+
+const DEFAULT_APPS: PingAppConfig[] = [
+  { name: 'Gemini', url: 'http://localhost:3456', port: 3456 },
+  { name: 'AI Studio', url: 'http://localhost:3457', port: 3457 },
+  { name: 'ChatGPT', url: 'http://localhost:3458', port: 3458 },
+];
 
 export function loadApps(): PingAppConfig[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const stored: PingAppConfig[] = JSON.parse(raw);
+      // Merge defaults that aren't already registered (by port)
+      const storedPorts = new Set(stored.map(a => a.port));
+      for (const def of DEFAULT_APPS) {
+        if (!storedPorts.has(def.port)) stored.push(def);
+      }
+      return stored;
+    }
   } catch { /* ignore */ }
-  return [];
+  // First load — seed with defaults
+  saveApps(DEFAULT_APPS);
+  return [...DEFAULT_APPS];
 }
 
 export function saveApps(apps: PingAppConfig[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(apps));
+  // Same-tab notification for UI (storage event does not fire in same document).
+  window.dispatchEvent(new Event('pingdev-apps-changed'));
 }
 
 export function addApp(app: PingAppConfig): PingAppConfig[] {

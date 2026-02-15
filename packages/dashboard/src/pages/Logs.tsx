@@ -1,16 +1,21 @@
-import { useState, useEffect } from 'react';
-import { loadApps, fetchJob, fetchJobStatus, type PingAppConfig, type JobResponse, type JobStatusResponse } from '../lib/api';
+import { useMemo, useState } from 'react';
+import { fetchJob, fetchJobStatus, type JobResponse, type JobStatusResponse } from '../lib/api';
+import { useApps } from '../hooks/useApps';
+import { useToast } from '../components/Toasts';
 
 export function LogsPage() {
-  const [apps] = useState<PingAppConfig[]>(loadApps);
-  const [selectedApp, setSelectedApp] = useState<PingAppConfig | null>(apps[0] ?? null);
+  const { apps } = useApps();
+  const { toast } = useToast();
+  const [selectedPort, setSelectedPort] = useState<number>(apps[0]?.port ?? 3456);
+  const selectedApp = useMemo(() => apps.find(a => a.port === selectedPort) ?? null, [apps, selectedPort]);
+
   const [jobId, setJobId] = useState('');
   const [job, setJob] = useState<JobResponse | null>(null);
   const [status, setStatus] = useState<JobStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  async function handleLookup() {
+  async function lookup() {
     if (!selectedApp || !jobId.trim()) return;
     setLoading(true);
     setError(null);
@@ -27,178 +32,127 @@ export function LogsPage() {
       else setError(String(jobData.reason));
 
       if (statusData.status === 'fulfilled') setStatus(statusData.value);
-    } catch (err) {
-      setError(String(err));
+
+      toast({ intent: 'info', title: 'Lookup complete', message: `${selectedApp.name} ${jobId.trim().slice(0, 8)}…` });
+    } catch (e) {
+      setError(String(e));
+      toast({ intent: 'bad', title: 'Lookup failed', message: String(e) });
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="gap-16">
-      <div className="page-header">
-        <h1>Logs</h1>
-        <p>Artifact timeline viewer and state transition inspector</p>
+    <div className="page">
+      <div className="hero">
+        <div className="hero-main">
+          <div className="h1">Logs</div>
+          <div className="hsub">Inspect state transitions, timing, and artifacts for a job.</div>
+        </div>
       </div>
 
-      <div className="card">
-        <div className="card-title" style={{ marginBottom: 12 }}>Job Lookup</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-          <div style={{ width: 200 }}>
-            <label className="text-sm muted" style={{ display: 'block', marginBottom: 4 }}>PingApp</label>
-            <select
-              style={{
-                width: '100%',
-                padding: '8px 12px',
-                background: 'var(--bg-input)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius)',
-                color: 'var(--text-primary)',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 12,
-              }}
-              value={selectedApp?.port ?? ''}
-              onChange={e => {
-                const p = parseInt(e.target.value, 10);
-                setSelectedApp(apps.find(a => a.port === p) ?? null);
-              }}
-            >
-              {apps.map(a => (
-                <option key={a.port} value={a.port}>{a.name} :{a.port}</option>
-              ))}
-              {apps.length === 0 && <option value="">No apps registered</option>}
-            </select>
+      <div className="logs-grid">
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Job Lookup</div>
+            <div className="panel-sub">Enter a job id and fetch its timeline.</div>
           </div>
-          <div style={{ flex: 1 }}>
-            <label className="text-sm muted" style={{ display: 'block', marginBottom: 4 }}>Job ID</label>
-            <input
-              type="text"
-              placeholder="Enter job UUID..."
-              value={jobId}
-              onChange={e => setJobId(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleLookup(); }}
-            />
+
+          <div className="form">
+            <label>
+              <div className="label">PingApp</div>
+              <select value={selectedPort} onChange={e => setSelectedPort(parseInt(e.target.value, 10))}>
+                {apps.map(a => (
+                  <option key={a.port} value={a.port}>{a.name} :{a.port}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <div className="label">Job ID</div>
+              <input
+                value={jobId}
+                onChange={e => setJobId(e.target.value)}
+                placeholder="UUID"
+                onKeyDown={e => { if (e.key === 'Enter') lookup(); }}
+              />
+            </label>
           </div>
-          <button className="btn btn-primary" onClick={handleLookup} disabled={loading || !jobId.trim() || !selectedApp}>
-            {loading ? 'Loading...' : 'Lookup'}
-          </button>
+
+          <div className="row">
+            <button className="btn primary" disabled={loading || !jobId.trim() || !selectedApp} onClick={lookup}>
+              {loading ? 'Loading…' : 'Lookup'}
+            </button>
+            {selectedApp && (
+              <button
+                className="btn subtle"
+                onClick={async () => {
+                  await navigator.clipboard.writeText(jobId.trim());
+                  toast({ intent: 'good', title: 'Copied', message: 'Job ID copied to clipboard' });
+                }}
+                disabled={!jobId.trim()}
+              >
+                Copy Job ID
+              </button>
+            )}
+          </div>
+
+          {error && <div className="callout bad">{error}</div>}
+          {!error && !job && <div className="empty mini"><div className="empty-title">Awaiting job id</div><div className="empty-sub">Paste one from App console "Recent" list.</div></div>}
         </div>
 
-        {error && (
-          <div style={{ marginTop: 8, color: 'var(--red)', fontSize: 12 }}>{error}</div>
-        )}
-      </div>
-
-      {job && (
-        <>
-          <JobSummary job={job} />
-          {(job.state_history || status?.state_history) && (
-            <TimelineViewer transitions={job.state_history ?? status?.state_history ?? []} />
+        <div className="stack">
+          {job && <JobSummary job={job} />}
+          {(job?.state_history || status?.state_history) && (
+            <Timeline transitions={job?.state_history ?? status?.state_history ?? []} />
           )}
-          {job.timing && <TimingViewer timing={job.timing} />}
-          {job.response && <ResponseViewer response={job.response} thinking={job.thinking} />}
-        </>
-      )}
-
-      {!job && !error && (
-        <div className="empty-state">
-          <h3>Enter a Job ID to inspect</h3>
-          <p className="text-sm">View state transitions, timing, artifacts, and response details</p>
+          {(job?.timing || status?.timing) && <Timing timing={(job?.timing ?? status?.timing)!} />}
+          {job?.response && <Response response={job.response} thinking={job.thinking} />}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
 function JobSummary({ job }: { job: JobResponse }) {
   return (
-    <div className="card">
-      <div className="card-header">
-        <span className="card-title">Job Summary</span>
-        <span className={`badge ${job.status === 'done' ? 'green' : job.status === 'failed' ? 'red' : 'yellow'}`}>
-          {job.status}
-        </span>
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">Summary</div>
+        <div className="panel-sub">Result envelope</div>
       </div>
-      <table>
-        <tbody>
-          <tr>
-            <td className="muted" style={{ width: 140 }}>Job ID</td>
-            <td className="accent">{job.job_id}</td>
-          </tr>
-          <tr>
-            <td className="muted">Prompt</td>
-            <td>{job.prompt}</td>
-          </tr>
-          <tr>
-            <td className="muted">Created</td>
-            <td>{new Date(job.created_at).toLocaleString()}</td>
-          </tr>
-          {job.timing?.total_ms != null && (
-            <tr>
-              <td className="muted">Duration</td>
-              <td>{(job.timing.total_ms / 1000).toFixed(2)}s</td>
-            </tr>
-          )}
-          {job.tool_used && (
-            <tr>
-              <td className="muted">Tool</td>
-              <td><span className="badge blue">{job.tool_used}</span></td>
-            </tr>
-          )}
-          {job.mode && (
-            <tr>
-              <td className="muted">Mode</td>
-              <td><span className="badge blue">{job.mode}</span></td>
-            </tr>
-          )}
-          {job.conversation_id && (
-            <tr>
-              <td className="muted">Conversation</td>
-              <td className="text-sm">{job.conversation_id}</td>
-            </tr>
-          )}
-          {job.artifact_path && (
-            <tr>
-              <td className="muted">Artifacts</td>
-              <td className="text-sm">{job.artifact_path}</td>
-            </tr>
-          )}
-          {job.error && (
-            <tr>
-              <td className="muted">Error</td>
-              <td>
-                <span className="badge red">{job.error.code}</span>
-                <span style={{ marginLeft: 8 }}>{job.error.message}</span>
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+      <div className="kv">
+        <div className="kv-row"><div className="k">Job</div><div className="v mono acc">{job.job_id}</div></div>
+        <div className="kv-row"><div className="k">Status</div><div className="v"><span className={`badge ${job.status === 'done' ? 'good' : job.status === 'failed' ? 'bad' : 'warn'}`}>{job.status}</span></div></div>
+        <div className="kv-row"><div className="k">Created</div><div className="v">{new Date(job.created_at).toLocaleString()}</div></div>
+        <div className="kv-row"><div className="k">Prompt</div><div className="v">{job.prompt}</div></div>
+        {job.tool_used && <div className="kv-row"><div className="k">Tool</div><div className="v"><span className="badge info">{job.tool_used}</span></div></div>}
+        {job.mode && <div className="kv-row"><div className="k">Mode</div><div className="v"><span className="badge info">{job.mode}</span></div></div>}
+        {job.artifact_path && <div className="kv-row"><div className="k">Artifacts</div><div className="v mono dim">{job.artifact_path}</div></div>}
+        {job.error && <div className="kv-row"><div className="k">Error</div><div className="v"><span className="badge bad">{job.error.code}</span> <span className="dim">{job.error.message}</span></div></div>}
+      </div>
     </div>
   );
 }
 
-function TimelineViewer({ transitions }: { transitions: Array<{ timestamp: string; from: string; to: string; trigger: string; details?: string }> }) {
+function Timeline({ transitions }: { transitions: Array<{ timestamp: string; from: string; to: string; trigger: string; details?: string }> }) {
   if (transitions.length === 0) return null;
-
   return (
-    <div className="card">
-      <div className="card-title" style={{ marginBottom: 12 }}>State Timeline</div>
-      <div className="timeline">
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">Timeline</div>
+        <div className="panel-sub">State transitions</div>
+      </div>
+      <div className="timeline2">
         {transitions.map((t, i) => (
-          <div key={i} className="timeline-item">
-            <div className="timeline-time">
-              {new Date(t.timestamp).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 })}
+          <div key={i} className="tl-item">
+            <div className="tl-ts">{new Date(t.timestamp).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 })}</div>
+            <div className="tl-main">
+              <span className="badge muted">{t.from}</span>
+              <span className="dim">→</span>
+              <span className={`badge ${t.to === 'DONE' ? 'good' : t.to === 'FAILED' ? 'bad' : t.to === 'GENERATING' ? 'info' : 'warn'}`}>{t.to}</span>
+              <span className="dim">({t.trigger})</span>
             </div>
-            <div className="timeline-label">
-              <span className="badge muted" style={{ marginRight: 4 }}>{t.from}</span>
-              <span className="muted" style={{ margin: '0 4px' }}>&rarr;</span>
-              <span className={`badge ${t.to === 'DONE' ? 'green' : t.to === 'FAILED' ? 'red' : t.to === 'GENERATING' ? 'blue' : 'yellow'}`}>
-                {t.to}
-              </span>
-              <span className="muted text-sm" style={{ marginLeft: 8 }}>({t.trigger})</span>
-            </div>
-            {t.details && <div className="timeline-detail">{t.details}</div>}
+            {t.details && <div className="tl-det dim">{t.details}</div>}
           </div>
         ))}
       </div>
@@ -206,34 +160,32 @@ function TimelineViewer({ transitions }: { transitions: Array<{ timestamp: strin
   );
 }
 
-function TimingViewer({ timing }: { timing: NonNullable<JobResponse['timing']> }) {
+function Timing({ timing }: { timing: NonNullable<JobResponse['timing']> }) {
   const entries = [
     { label: 'Queued', time: timing.queued_at },
     { label: 'Started', time: timing.started_at },
-    { label: 'First Token', time: timing.first_token_at },
+    { label: 'First token', time: timing.first_token_at },
     { label: 'Completed', time: timing.completed_at },
   ].filter(e => e.time);
 
   if (entries.length === 0) return null;
-
   return (
-    <div className="card">
-      <div className="card-title" style={{ marginBottom: 12 }}>Timing</div>
-      <div style={{ display: 'flex', gap: 24 }}>
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">Timing</div>
+        <div className="panel-sub">Latencies</div>
+      </div>
+      <div className="timing">
         {entries.map((e, i) => (
-          <div key={i}>
-            <div className="text-sm muted">{e.label}</div>
-            <div style={{ fontSize: 12 }}>
-              {new Date(e.time!).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 })}
-            </div>
+          <div key={i} className="tcell">
+            <div className="dim">{e.label}</div>
+            <div className="mono">{new Date(e.time!).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 })}</div>
           </div>
         ))}
         {timing.total_ms != null && (
-          <div>
-            <div className="text-sm muted">Total</div>
-            <div className="accent" style={{ fontSize: 14, fontWeight: 600 }}>
-              {(timing.total_ms / 1000).toFixed(2)}s
-            </div>
+          <div className="tcell">
+            <div className="dim">Total</div>
+            <div className="mono acc">{(timing.total_ms / 1000).toFixed(2)}s</div>
           </div>
         )}
       </div>
@@ -241,34 +193,24 @@ function TimingViewer({ timing }: { timing: NonNullable<JobResponse['timing']> }
   );
 }
 
-function ResponseViewer({ response, thinking }: { response: string; thinking?: string }) {
+function Response({ response, thinking }: { response: string; thinking?: string }) {
   const [showThinking, setShowThinking] = useState(false);
-
   return (
-    <div className="card">
-      <div className="card-header">
-        <span className="card-title">Response</span>
-        <span className="text-sm muted">{response.length} chars</span>
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">Response</div>
+        <div className="panel-sub">{response.length} chars</div>
       </div>
       {thinking && (
-        <div style={{ marginBottom: 8 }}>
-          <button
-            className="btn"
-            style={{ padding: '4px 8px', fontSize: 11 }}
-            onClick={() => setShowThinking(!showThinking)}
-          >
-            {showThinking ? 'Hide' : 'Show'} Thinking ({thinking.length} chars)
+        <div className="row" style={{ marginBottom: 8 }}>
+          <button className="btn subtle" onClick={() => setShowThinking(v => !v)}>
+            {showThinking ? 'Hide' : 'Show'} thinking
           </button>
-          {showThinking && (
-            <div className="stream-viewer" style={{ marginTop: 8, maxHeight: 200, color: 'var(--yellow)' }}>
-              {thinking}
-            </div>
-          )}
         </div>
       )}
-      <div className="stream-viewer" style={{ maxHeight: 400 }}>
-        {response}
-      </div>
+      {showThinking && thinking && <div className="codebox warn"><pre>{thinking}</pre></div>}
+      <div className="codebox"><pre>{response}</pre></div>
     </div>
   );
 }
+

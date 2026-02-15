@@ -1,0 +1,30 @@
+{
+  "name": "@pingdev/std",
+  "version": "0.1.0",
+  "description": "PingOS standard library — shared types, errors, and config for the POSIX device layer",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "fastify": "^5.7.4",
+    "ioredis": "^5.6.1"
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "keywords": [
+    "pingdev",
+    "pingos",
+    "posix",
+    "types",
+    "std"
+  ],
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,5 +1,9 @@
 node_modules/
 dist/
 *.tgz
+*.log
 .env
+.env.*
 artifacts/
+.DS_Store
+*.tsbuildinfo

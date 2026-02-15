@@ -1,155 +1,232 @@
-import { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { loadApps, submitJob, fetchJob, type PingAppConfig, type JobResponse } from '../lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { fetchJob, fetchTools, sendChat, submitJob, type JobResponse, type PingAppConfig } from '../lib/api';
+import { useApps } from '../hooks/useApps';
 import { useHealth } from '../hooks/useHealth';
 import { useSSE } from '../hooks/useSSE';
+import { useActivity } from '../components/Activity';
+import { useToast } from '../components/Toasts';
+import { HealthPulse, QueueFlow } from '../components/AppViz';
 
 export function AppDetailPage() {
   const { port: portStr } = useParams<{ port: string }>();
   const port = parseInt(portStr ?? '0', 10);
-  const [app, setApp] = useState<PingAppConfig | null>(null);
-
-  useEffect(() => {
-    const apps = loadApps();
-    setApp(apps.find(a => a.port === port) ?? null);
-  }, [port]);
+  const { apps } = useApps();
+  const app = apps.find(a => a.port === port) ?? null;
 
   if (!app) {
     return (
-      <div className="empty-state">
-        <h3>App not found</h3>
-        <p>No PingApp registered on port {port}</p>
-        <Link to="/" className="btn" style={{ marginTop: 16, display: 'inline-flex' }}>Back to Apps</Link>
-      </div>
-    );
-  }
-
-  return (
-    <div className="gap-16">
-      <div className="page-header">
-        <div className="flex-row">
-          <Link to="/" style={{ color: 'var(--text-muted)', fontSize: 12 }}>Apps</Link>
-          <span className="muted">/</span>
-          <h1>{app.name} <span className="muted" style={{ fontSize: 14, fontWeight: 400 }}>:{app.port}</span></h1>
-        </div>
-        <p>{app.url}</p>
-      </div>
-
-      <HealthSection port={port} />
-      <PromptSection port={port} />
-      <RecentJobsSection port={port} />
-    </div>
-  );
-}
-
-function HealthSection({ port }: { port: number }) {
-  const { health, error, loading, refresh } = useHealth(port, 10_000);
-
-  if (loading) return <div className="card"><span className="muted">Checking health...</span></div>;
-  if (error) {
-    return (
-      <div className="card">
-        <div className="card-header">
-          <span className="card-title">Health</span>
-          <button className="btn" style={{ padding: '4px 8px', fontSize: 11 }} onClick={refresh}>Refresh</button>
-        </div>
-        <div className="flex-row">
-          <span className="status-dot offline" />
-          <span style={{ color: 'var(--red)' }}>Offline — {error}</span>
+      <div className="page">
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">App not found</div>
+            <div className="panel-sub">No PingApp registered on port {port}.</div>
+          </div>
+          <div className="empty">
+            <div className="empty-title">Missing registry entry</div>
+            <div className="empty-sub">Return to Apps and register it again.</div>
+            <Link className="btn primary" to="/">Back to Apps</Link>
+          </div>
         </div>
       </div>
     );
   }
 
-  if (!health) return null;
+  return <AppDetailInner app={app} />;
+}
+
+function AppDetailInner({ app }: { app: PingAppConfig }) {
+  const { push } = useActivity();
+  const { toast } = useToast();
+  const { health, error, loading, refresh } = useHealth(app.port, 2500);
+  const [tools, setTools] = useState<Array<{ name: string; description?: string }>>([]);
+
+  useEffect(() => {
+    fetchTools(app.port)
+      .then(r => setTools(r.tools ?? []))
+      .catch(() => setTools([]));
+  }, [app.port]);
+
+  const status = health?.status ?? (error ? 'offline' : loading ? 'loading' : 'offline');
+  const q = health?.queue ?? { waiting: 0, active: 0, completed: 0, failed: 0 };
 
   return (
-    <div className="card">
-      <div className="card-header">
-        <div className="flex-row">
-          <span className={`status-dot ${health.status}`} />
-          <span className="card-title">{health.status}</span>
+    <div className="page">
+      <div className="hero tight">
+        <div className="hero-main">
+          <div className="breadcrumbs">
+            <Link to="/" className="crumb">Apps</Link>
+            <span className="crumb-sep">/</span>
+            <span className="crumb-cur">{app.name}</span>
+            <span className="crumb-port">:{app.port}</span>
+          </div>
+          <div className="hsub mono dim">{app.url}</div>
         </div>
-        <button className="btn" style={{ padding: '4px 8px', fontSize: 11 }} onClick={refresh}>Refresh</button>
-      </div>
-      <div className="grid-4">
-        <div className="stat-card">
-          <div className="stat-value">{health.queue.waiting}</div>
-          <div className="stat-label">Queued</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value" style={{ color: 'var(--blue)' }}>{health.queue.active}</div>
-          <div className="stat-label">Active</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value" style={{ color: 'var(--accent)' }}>{health.queue.completed}</div>
-          <div className="stat-label">Completed</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value" style={{ color: health.queue.failed > 0 ? 'var(--red)' : 'var(--text-muted)' }}>{health.queue.failed}</div>
-          <div className="stat-label">Failed</div>
+        <div className="hero-actions">
+          <button className="btn subtle" onClick={refresh}>Refresh</button>
+          <button
+            className="btn subtle"
+            onClick={async () => {
+              await navigator.clipboard.writeText(app.url);
+              toast({ intent: 'good', title: 'Copied', message: app.url });
+            }}
+          >
+            Copy URL
+          </button>
         </div>
       </div>
-      <div style={{ marginTop: 12, display: 'flex', gap: 12 }}>
-        <span className={`badge ${health.browser.connected ? 'green' : 'red'}`}>
-          Browser: {health.browser.connected ? 'connected' : 'disconnected'}
-        </span>
-        <span className={`badge ${health.worker.running ? 'blue' : 'muted'}`}>
-          Worker: {health.worker.running ? 'running' : 'idle'}
-        </span>
+
+      <div className="detail-grid">
+        <div className="col">
+          <div className="panel">
+            <div className="panel-head">
+              <div className="panel-title">Health</div>
+              <div className="panel-sub">Live status + queue</div>
+            </div>
+
+            <div className="health-row">
+              <HealthPulse status={status as any} />
+              <div className="health-meta">
+                <div className="health-status">
+                  <span className={`badge ${status === 'healthy' ? 'good' : status === 'degraded' ? 'warn' : status === 'unhealthy' ? 'bad' : status === 'loading' ? 'muted' : 'bad'}`}>
+                    {status}
+                  </span>
+                  {error && <span className="mono dim">{error}</span>}
+                </div>
+                <div className="health-flags">
+                  <span className={`badge ${health?.browser?.connected ? 'good' : 'bad'}`}>browser {health?.browser?.connected ? 'up' : 'down'}</span>
+                  <span className={`badge ${health?.worker?.running ? 'info' : 'muted'}`}>worker {health?.worker?.running ? 'running' : 'idle'}</span>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <QueueFlow waiting={q.waiting} active={q.active} completed={q.completed} failed={q.failed} />
+            </div>
+          </div>
+
+          <ToolShelf tools={tools} />
+
+          <JobConsole
+            port={app.port}
+            tools={tools}
+            onSignal={(lvl, msg, meta) => push({ level: lvl, kind: 'job', appName: app.name, appPort: app.port, message: msg, meta })}
+            onToast={(intent, title, message) => toast({ intent, title, message })}
+          />
+        </div>
+
+        <div className="col">
+          <LivePanels port={app.port} />
+        </div>
       </div>
     </div>
   );
 }
 
-function PromptSection({ port }: { port: number }) {
+function ToolShelf({ tools }: { tools: Array<{ name: string; description?: string }> }) {
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">Tools</div>
+        <div className="panel-sub">{tools.length ? `${tools.length} exposed endpoint tools` : 'No tools endpoint or unavailable'}</div>
+      </div>
+      {tools.length === 0 ? (
+        <div className="empty mini">
+          <div className="empty-title">No tool metadata</div>
+          <div className="empty-sub">This PingApp may not expose `/v1/tools` yet.</div>
+        </div>
+      ) : (
+        <div className="tool-grid">
+          {tools.map(t => (
+            <div key={t.name} className="tool">
+              <div className="tool-name">{t.name}</div>
+              <div className="tool-desc">{t.description ?? '—'}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JobConsole({
+  port,
+  tools,
+  onSignal,
+  onToast,
+}: {
+  port: number;
+  tools: Array<{ name: string; description?: string }>;
+  onSignal: (lvl: 'info' | 'good' | 'warn' | 'bad', msg: string, meta?: Record<string, unknown>) => void;
+  onToast: (intent: 'info' | 'good' | 'warn' | 'bad', title: string, message?: string) => void;
+}) {
   const [prompt, setPrompt] = useState('');
+  const [tool, setTool] = useState('');
+  const [mode, setMode] = useState('');
+  const [useSync, setUseSync] = useState(false);
   const [sending, setSending] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<JobResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [recent, setRecent] = useState<Array<{ jobId: string; ts: number; status: string }>>([]);
+
   const { events, connected, connect, disconnect } = useSSE(port, activeJobId);
   const streamRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll stream viewer
   useEffect(() => {
-    if (streamRef.current) {
-      streamRef.current.scrollTop = streamRef.current.scrollHeight;
-    }
+    if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight;
   }, [events]);
 
-  // Poll for result when job completes via SSE
   useEffect(() => {
-    const completeEvent = events.find(e => e.type === 'complete');
-    const errorEvent = events.find(e => e.type === 'error');
-
-    if ((completeEvent || errorEvent) && activeJobId) {
-      fetchJob(port, activeJobId)
-        .then(setResult)
-        .catch(() => {});
-    }
+    const done = events.find(e => e.type === 'complete');
+    const failed = events.find(e => e.type === 'error');
+    if (!activeJobId) return;
+    if (!done && !failed) return;
+    fetchJob(port, activeJobId)
+      .then(r => {
+        setResult(r);
+        setRecent(prev => [{ jobId: activeJobId, ts: Date.now(), status: r.status }, ...prev].slice(0, 12));
+        const intent = r.status === 'done' ? 'good' : r.status === 'failed' ? 'bad' : 'info';
+        onToast(intent as any, `Job ${r.status}`, activeJobId);
+        onSignal(intent as any, `Job ${r.status}`, { job_id: activeJobId });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, activeJobId, port]);
 
-  async function handleSubmit() {
+  async function submit() {
     if (!prompt.trim() || sending) return;
-
     setSending(true);
+    setErr(null);
     setResult(null);
-    setError(null);
+    disconnect();
     setActiveJobId(null);
 
+    const opts: { tool?: string; mode?: string } = {};
+    if (tool.trim()) opts.tool = tool.trim();
+    if (mode.trim()) opts.mode = mode.trim();
+
     try {
-      const { job_id } = await submitJob(port, prompt.trim());
+      if (useSync) {
+        onSignal('info', 'Sending sync chat…');
+        const res = await sendChat(port, prompt.trim(), Object.keys(opts).length ? opts : undefined);
+        setResult(res);
+        setRecent(prev => [{ jobId: res.job_id, ts: Date.now(), status: res.status }, ...prev].slice(0, 12));
+        onToast(res.status === 'done' ? 'good' : 'info', 'Chat complete', `${(res.response ?? '').slice(0, 40)}…`);
+        return;
+      }
+
+      const { job_id } = await submitJob(port, prompt.trim(), Object.keys(opts).length ? opts : undefined);
       setActiveJobId(job_id);
+      setRecent(prev => [{ jobId: job_id, ts: Date.now(), status: 'queued' }, ...prev].slice(0, 12));
+      onSignal('info', 'Job submitted', { job_id });
+      onToast('info', 'Job queued', job_id);
 
-      // Start SSE stream after a brief delay
-      setTimeout(() => {
-        connect();
-      }, 200);
+      window.setTimeout(() => connect(), 200);
 
-      // Poll for final result
-      const pollResult = async () => {
-        for (let i = 0; i < 300; i++) {
+      // Safety poll: if SSE fails, we still converge.
+      (async () => {
+        for (let i = 0; i < 150; i++) {
           await new Promise(r => setTimeout(r, 2000));
           try {
             const job = await fetchJob(port, job_id);
@@ -157,155 +234,178 @@ function PromptSection({ port }: { port: number }) {
               setResult(job);
               return;
             }
-          } catch { /* continue polling */ }
+          } catch {
+            // ignore
+          }
         }
-      };
-      pollResult();
-    } catch (err) {
-      setError(String(err));
+      })();
+    } catch (e) {
+      setErr(String(e));
+      onToast('bad', 'Submit failed', String(e));
+      onSignal('bad', 'Submit failed', { error: String(e) });
     } finally {
       setSending(false);
     }
   }
 
+  const hintedTools = useMemo(() => tools.slice(0, 8), [tools]);
+
   return (
-    <div className="card">
-      <div className="card-title" style={{ marginBottom: 12 }}>Test Prompt</div>
-      <div style={{ display: 'flex', gap: 8 }}>
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">Console</div>
+        <div className="panel-sub">Submit jobs + watch the stream</div>
+      </div>
+
+      <div className="console">
         <textarea
-          placeholder="Enter a prompt to test..."
           value={prompt}
           onChange={e => setPrompt(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && e.metaKey) handleSubmit(); }}
-          style={{ flex: 1, minHeight: 60 }}
+          placeholder="Write a prompt. Cmd/Ctrl+Enter to run."
+          onKeyDown={e => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submit();
+          }}
         />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <button className="btn btn-primary" onClick={handleSubmit} disabled={sending || !prompt.trim()}>
-            {sending ? 'Sending...' : 'Send'}
-          </button>
-          {connected && (
-            <button className="btn" onClick={disconnect} style={{ fontSize: 11, padding: '4px 8px' }}>
-              Stop SSE
-            </button>
-          )}
-        </div>
-      </div>
 
-      {error && (
-        <div style={{ marginTop: 8, color: 'var(--red)', fontSize: 12 }}>
-          {error}
-        </div>
-      )}
-
-      {activeJobId && (
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-          Job: <span className="accent">{activeJobId}</span>
-          {connected && <span className="badge green" style={{ marginLeft: 8 }}>SSE Live</span>}
-        </div>
-      )}
-
-      {events.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <div className="text-sm muted" style={{ marginBottom: 4 }}>Stream Events</div>
-          <div className="stream-viewer" ref={streamRef}>
-            {events.map((evt, i) => (
-              <div key={i} className="stream-event">
-                <span className="stream-event-type">{evt.type}</span>
-                <span className="stream-event-time">
-                  {new Date(evt.receivedAt).toLocaleTimeString()}
-                </span>
-                <div className="stream-event-data">
-                  {evt.type === 'partial_response'
-                    ? truncate(String(evt.data.text ?? ''), 200)
-                    : JSON.stringify(evt.data, null, 0).slice(0, 200)}
-                </div>
-              </div>
+        <div className="console-row">
+          <div className="pillrow">
+            {hintedTools.map(t => (
+              <button
+                key={t.name}
+                className={`pill ${tool === t.name ? 'on' : ''}`}
+                onClick={() => setTool(prev => (prev === t.name ? '' : t.name))}
+                title={t.description ?? t.name}
+              >
+                {t.name}
+              </button>
             ))}
           </div>
-        </div>
-      )}
-
-      {result && (
-        <div style={{ marginTop: 12 }}>
-          <div className="text-sm muted" style={{ marginBottom: 4 }}>
-            Result
-            <span className={`badge ${result.status === 'done' ? 'green' : 'red'}`} style={{ marginLeft: 8 }}>
-              {result.status}
-            </span>
-            {result.timing?.total_ms && (
-              <span className="text-sm muted" style={{ marginLeft: 8 }}>
-                {(result.timing.total_ms / 1000).toFixed(1)}s
-              </span>
+          <div className="console-actions">
+            {connected ? (
+              <button className="btn subtle" onClick={disconnect}>Stop Stream</button>
+            ) : (
+              <span className="badge muted">SSE {activeJobId ? 'ready' : 'idle'}</span>
             )}
-          </div>
-          <div className="stream-viewer" style={{ maxHeight: 300 }}>
-            {result.response ?? result.error?.message ?? 'No response'}
+            <button className="btn primary" disabled={!prompt.trim() || sending} onClick={submit}>
+              {sending ? 'Sending…' : useSync ? 'Chat' : 'Run'}
+            </button>
           </div>
         </div>
-      )}
+
+        <div className="console-row">
+          <label className="check">
+            <input type="checkbox" checked={useSync} onChange={e => setUseSync(e.target.checked)} />
+            <span>Use sync `/v1/chat`</span>
+          </label>
+          <div className="mini-fields">
+            <input value={tool} onChange={e => setTool(e.target.value)} placeholder="tool (optional)" />
+            <input value={mode} onChange={e => setMode(e.target.value)} placeholder="mode (optional)" />
+          </div>
+        </div>
+
+        {err && <div className="callout bad">{err}</div>}
+
+        {(events.length > 0 || activeJobId) && (
+          <div className="stream">
+            <div className="stream-head">
+              <div className="stream-title">Stream</div>
+              <div className="stream-sub mono dim">
+                {activeJobId ? `${activeJobId.slice(0, 8)}…` : '—'}
+                {connected && <span className="badge good" style={{ marginLeft: 8 }}>LIVE</span>}
+              </div>
+            </div>
+            <div className="stream-box" ref={streamRef}>
+              {events.map((evt, i) => (
+                <div key={i} className="evt">
+                  <span className="evt-type">{evt.type}</span>
+                  <span className="evt-ts">{new Date(evt.receivedAt).toLocaleTimeString(undefined, { hour12: false })}</span>
+                  <div className="evt-body">
+                    {evt.type === 'partial_response'
+                      ? String((evt.data as any).text ?? '').slice(0, 400)
+                      : JSON.stringify(evt.data).slice(0, 400)}
+                  </div>
+                </div>
+              ))}
+              {events.length === 0 && <div className="dim">Waiting for events…</div>}
+            </div>
+          </div>
+        )}
+
+        {result && (
+          <div className="result">
+            <div className="result-head">
+              <div className="result-title">Result</div>
+              <div className="result-meta">
+                <span className={`badge ${result.status === 'done' ? 'good' : result.status === 'failed' ? 'bad' : 'warn'}`}>{result.status}</span>
+                {result.timing?.total_ms != null && (
+                  <span className="badge info">{(result.timing.total_ms / 1000).toFixed(1)}s</span>
+                )}
+              </div>
+            </div>
+            <div className="result-box">
+              {result.response ?? result.error?.message ?? 'No response'}
+            </div>
+          </div>
+        )}
+
+        {recent.length > 0 && (
+          <div className="recent">
+            <div className="panel-title" style={{ marginBottom: 8 }}>Recent</div>
+            <div className="recent-list">
+              {recent.map(r => (
+                <button
+                  key={r.jobId}
+                  className="recent-item"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(r.jobId);
+                    onToast('good', 'Copied job id', r.jobId);
+                  }}
+                  title="Click to copy job id"
+                >
+                  <span className="mono acc">{r.jobId.slice(0, 8)}…</span>
+                  <span className="dim">{r.status}</span>
+                  <span className="dim">{new Date(r.ts).toLocaleTimeString(undefined, { hour12: false })}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function RecentJobsSection({ port }: { port: number }) {
-  const [jobs, setJobs] = useState<JobResponse[]>([]);
-  const [jobIds, setJobIds] = useState<string[]>([]);
-
-  // Track job IDs from submitted prompts
-  useEffect(() => {
-    // We can't list all jobs (no list endpoint), so we track from test prompts
-    // This is a placeholder — in production you'd have a list endpoint
-  }, [port]);
-
-  if (jobs.length === 0 && jobIds.length === 0) {
-    return (
-      <div className="card">
-        <div className="card-title" style={{ marginBottom: 8 }}>Recent Jobs</div>
-        <div className="muted text-sm">
-          Jobs submitted via the test prompt above will appear here.
-          A job list API endpoint will be available in a future release.
+function LivePanels({ port }: { port: number }) {
+  // This column is meant to feel like "instruments": quick glance at global activity.
+  return (
+    <div className="stack">
+      <div className="panel">
+        <div className="panel-head">
+          <div className="panel-title">Notes</div>
+          <div className="panel-sub">What this agent exposes today</div>
+        </div>
+        <div className="callout">
+          <div className="mono dim">Endpoints</div>
+          <div className="mono">GET /v1/health</div>
+          <div className="mono">POST /v1/jobs</div>
+          <div className="mono">GET /v1/jobs/:id</div>
+          <div className="mono">GET /v1/jobs/:id/status</div>
+          <div className="mono">GET /v1/jobs/:id/stream</div>
+          <div className="mono">POST /v1/chat</div>
         </div>
       </div>
-    );
-  }
 
-  return (
-    <div className="card">
-      <div className="card-title" style={{ marginBottom: 12 }}>Recent Jobs</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Status</th>
-            <th>Job ID</th>
-            <th>Prompt</th>
-            <th>Duration</th>
-            <th>Created</th>
-          </tr>
-        </thead>
-        <tbody>
-          {jobs.map(job => (
-            <tr key={job.job_id}>
-              <td>
-                <span className={`badge ${job.status === 'done' ? 'green' : job.status === 'failed' ? 'red' : 'yellow'}`}>
-                  {job.status}
-                </span>
-              </td>
-              <td className="accent text-sm">{job.job_id.slice(0, 8)}...</td>
-              <td>{truncate(job.prompt, 60)}</td>
-              <td className="muted">
-                {job.timing?.total_ms ? `${(job.timing.total_ms / 1000).toFixed(1)}s` : '-'}
-              </td>
-              <td className="muted text-sm">
-                {new Date(job.created_at).toLocaleTimeString()}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="panel">
+        <div className="panel-head">
+          <div className="panel-title">Port Proxy</div>
+          <div className="panel-sub">Vite forwards `/api/{port}/*`</div>
+        </div>
+        <div className="callout">
+          <div className="mono dim">Base</div>
+          <div className="mono acc">/api/{port}</div>
+        </div>
+      </div>
     </div>
   );
 }
 
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + '...' : s;
-}

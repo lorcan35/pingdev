@@ -1,80 +1,111 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+
+type Step = 'URL' | 'SNAPSHOT' | 'ANALYZE' | 'GENERATE' | 'DEPLOY';
 
 export function ReconPage() {
   const [url, setUrl] = useState('');
+  const [step, setStep] = useState<Step>('URL');
+
+  const canAdvance = useMemo(() => url.trim().startsWith('http'), [url]);
 
   return (
-    <div className="gap-16">
-      <div className="page-header">
-        <h1>Recon</h1>
-        <p>Automatic site analysis and action mapping (Phase 2)</p>
-      </div>
-
-      <div className="card">
-        <div className="card-title" style={{ marginBottom: 12 }}>Site Scanner</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            type="url"
-            placeholder="https://example.com — Enter a site URL to analyze"
-            value={url}
-            onChange={e => setUrl(e.target.value)}
-            style={{ flex: 1 }}
-          />
-          <button className="btn btn-primary" disabled>
-            Scan
-          </button>
-        </div>
-        <div className="muted text-sm" style={{ marginTop: 8 }}>
-          Coming in Phase 2 — will automatically detect input fields, submit buttons,
-          response containers, and generate a SiteDefinition.
+    <div className="page">
+      <div className="hero">
+        <div className="hero-main">
+          <div className="h1">Recon</div>
+          <div className="hsub">Turn a site into a PingApp definition. Live wizard UI (backend wiring in Phase 2).</div>
         </div>
       </div>
 
-      <div className="grid-2">
-        <div className="card">
-          <div className="card-title" style={{ marginBottom: 12 }}>Element Discovery</div>
-          <div className="empty-state" style={{ padding: 24 }}>
-            <h3>Not yet implemented</h3>
-            <p className="text-sm">
-              Will show: detected input fields, buttons, response containers,
-              overlay elements, and their CSS selectors with confidence scores.
-            </p>
+      <div className="recon">
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Target</div>
+            <div className="panel-sub">Paste a URL, then walk the pipeline.</div>
+          </div>
+
+          <div className="recon-row">
+            <input
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              placeholder="https://example.com"
+            />
+            <button className="btn primary" disabled={!canAdvance} onClick={() => setStep('SNAPSHOT')}>
+              Start
+            </button>
+          </div>
+
+          <div className="callout">
+            <div className="mono dim">Status</div>
+            <div className="mono">
+              {canAdvance ? 'Ready to snapshot.' : 'Enter a valid URL to begin.'}
+            </div>
           </div>
         </div>
 
-        <div className="card">
-          <div className="card-title" style={{ marginBottom: 12 }}>Action Inference</div>
-          <div className="empty-state" style={{ padding: 24 }}>
-            <h3>Not yet implemented</h3>
-            <p className="text-sm">
-              Will show: inferred actions (typePrompt, submit, extractResponse, etc.)
-              mapped to detected elements, with suggested SiteDefinition code.
-            </p>
+        <div className="panel">
+            <div className="panel-head">
+              <div className="panel-title">Pipeline</div>
+              <div className="panel-sub">Snapshot -&gt; Analyze -&gt; Generate -&gt; Deploy</div>
+            </div>
+
+          <div className="steps">
+            {(['URL', 'SNAPSHOT', 'ANALYZE', 'GENERATE', 'DEPLOY'] as Step[]).map(s => (
+              <button
+                key={s}
+                className={`step ${step === s ? 'on' : ''} ${isBefore(step, s) ? 'locked' : ''}`}
+                disabled={s !== 'URL' && !canAdvance}
+                onClick={() => setStep(s)}
+              >
+                <div className="step-title">{s}</div>
+                <div className="step-sub">
+                  {s === 'URL' && 'Set target'}
+                  {s === 'SNAPSHOT' && 'Capture DOM + screenshot'}
+                  {s === 'ANALYZE' && 'Infer selectors + actions'}
+                  {s === 'GENERATE' && 'Emit SiteDefinition'}
+                  {s === 'DEPLOY' && 'Register new port'}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Generated Definition</div>
+            <div className="panel-sub">Preview of what Phase 2 will stream here.</div>
+          </div>
+
+          <div className="codebox">
+            <pre>{renderStub(url)}</pre>
           </div>
         </div>
       </div>
+    </div>
+  );
+}
 
-      <div className="card">
-        <div className="card-title" style={{ marginBottom: 12 }}>Generated SiteDefinition</div>
-        <div className="stream-viewer" style={{ minHeight: 200, color: 'var(--text-muted)' }}>
-{`// Phase 2: Auto-generated SiteDefinition will appear here
+function isBefore(cur: Step, candidate: Step): boolean {
+  const order: Step[] = ['URL', 'SNAPSHOT', 'ANALYZE', 'GENERATE', 'DEPLOY'];
+  return order.indexOf(cur) < order.indexOf(candidate);
+}
+
+function renderStub(url: string): string {
+  const u = url.trim() || 'https://…';
+  return `// Phase 2: Recon engine will stream structured output here.
 //
 // import { defineSite } from '@pingdev/core';
 //
 // export const site = defineSite({
 //   name: 'detected-site',
-//   url: '${url || 'https://...'}',
+//   url: '${u}',
 //   selectors: {
 //     input: { name: 'input', tiers: ['...detected...'] },
 //     submit: { name: 'submit', tiers: ['...detected...'] },
 //     response: { name: 'response', tiers: ['...detected...'] },
 //   },
-//   actions: { ... },
-//   states: { ... },
+//   actions: { /* inferred */ },
+//   states: { transitions: { IDLE: ['TYPING'], TYPING: ['GENERATING'] } },
 //   completion: { method: 'hash_stability', pollMs: 1000, stableCount: 3, maxWaitMs: 120000 },
-// });`}
-        </div>
-      </div>
-    </div>
-  );
+// });`;
 }
