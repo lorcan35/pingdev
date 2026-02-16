@@ -14,7 +14,7 @@ const GATEWAY_URL = 'ws://localhost:3500/ext';
 const CLIENT_ID = crypto.randomUUID();
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
-const BASE_RECONNECT_DELAY = 3000;
+const BASE_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30_000;
 let reconnectAttempt = 0;
 
@@ -80,6 +80,28 @@ function sharedTabsEqual(a: SharedTabsState, b: SharedTabsState): boolean {
   return true;
 }
 
+function safeCloseSocket(reason: string) {
+  if (!ws) return;
+  try {
+    console.warn('[Background] Closing socket:', reason);
+    ws.close();
+  } catch (err) {
+    console.warn('[Background] socket close failed:', err);
+  }
+}
+
+function safeSend(message: unknown): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try {
+    ws.send(JSON.stringify(message));
+    return true;
+  } catch (err) {
+    console.error('[Background] ws.send failed:', err);
+    safeCloseSocket('send-failed');
+    return false;
+  }
+}
+
 let helloDebounceTimer: number | null = null;
 function scheduleHelloSend() {
   if (helloDebounceTimer) return;
@@ -129,36 +151,49 @@ async function syncSharedTabsWithAllTabs(opts?: { inject?: boolean; notify?: boo
 
 // Connect to gateway WebSocket
 function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    console.log('[Background] Already connected');
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    console.log('[Background] Already connected/connecting');
     return;
   }
 
   connState = 'connecting';
   broadcastConnectionStatus();
 
-  console.log('[Background] Connecting to gateway:', GATEWAY_URL);
-  ws = new WebSocket(GATEWAY_URL);
+  try {
+    console.log('[Background] Connecting to gateway:', GATEWAY_URL);
+    ws = new WebSocket(GATEWAY_URL);
+  } catch (err) {
+    console.error('[Background] WebSocket constructor failed:', err);
+    connState = 'disconnected';
+    broadcastConnectionStatus();
+    scheduleReconnect();
+    return;
+  }
 
   ws.onopen = async () => {
-    console.log('[Background] Connected to gateway');
-    connState = 'connected';
-    reconnectAttempt = 0;
-    lastPongAt = Date.now();
-    broadcastConnectionStatus();
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+    try {
+      console.log('[Background] Connected to gateway');
+      connState = 'connected';
+      reconnectAttempt = 0;
+      lastPongAt = Date.now();
+      broadcastConnectionStatus();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+
+      startHeartbeat();
+
+      // Keep shared tabs in sync (default: share all http/https tabs) and ensure
+      // content scripts are present after reconnect/gateway restart.
+      await syncSharedTabsWithAllTabs({ inject: true });
+
+      // Send hello message with current shared tabs
+      await sendHello();
+    } catch (err) {
+      console.error('[Background] onopen setup failed:', err);
+      safeCloseSocket('onopen-failure');
     }
-
-    startHeartbeat();
-
-    // Keep shared tabs in sync (default: share all http/https tabs) and ensure
-    // content scripts are present after reconnect/gateway restart.
-    await syncSharedTabsWithAllTabs({ inject: true });
-
-    // Send hello message with current shared tabs
-    await sendHello();
   };
 
   ws.onmessage = async (event) => {
@@ -183,6 +218,8 @@ function connect() {
 
   ws.onerror = (err) => {
     console.error('[Background] WebSocket error:', err);
+    // Force reconnect path; onclose will schedule backoff reconnect.
+    safeCloseSocket('onerror');
   };
 
   ws.onclose = () => {
@@ -235,15 +272,9 @@ function startHeartbeat() {
       return;
     }
 
-    try {
-      ws.send(JSON.stringify({ type: 'ping', t: Date.now() }));
-    } catch (err) {
-      console.warn('[Background] Heartbeat send failed; closing socket', err);
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
+    const sent = safeSend({ type: 'ping', t: Date.now() });
+    if (!sent) {
+      console.warn('[Background] Heartbeat send failed; reconnecting');
     }
   }, 30_000) as unknown as number;
 }
@@ -358,7 +389,7 @@ function sendDeviceResponse(requestId: string, response: BridgeResponse) {
     error: response.error,
   };
 
-  ws.send(JSON.stringify(message));
+  safeSend(message);
 }
 
 async function sendHello() {
@@ -379,8 +410,9 @@ async function sendHello() {
     tabs,
   };
   
-  ws.send(JSON.stringify(message));
-  console.log('[Background] Sent hello with', tabs.length, 'shared tabs');
+  if (safeSend(message)) {
+    console.log('[Background] Sent hello with', tabs.length, 'shared tabs');
+  }
 }
 
 async function sendShareUpdate() {
