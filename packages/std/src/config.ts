@@ -5,6 +5,10 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { DriverCapabilities, RoutingStrategy } from './types.js';
+import {
+  DEFAULT_SELF_HEAL_CONFIG,
+  type SelfHealConfig,
+} from './self-heal.js';
 
 // ---------------------------------------------------------------------------
 // Config Interfaces
@@ -26,6 +30,7 @@ export interface PingOSConfig {
   drivers: DriverConfig[];
   defaultStrategy: RoutingStrategy;
   healthIntervalMs: number;
+  selfHeal: SelfHealConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +41,7 @@ export const DEFAULT_CONFIG: PingOSConfig = {
   gatewayPort: 3500,
   defaultStrategy: 'best',
   healthIntervalMs: 30_000,
+  selfHeal: DEFAULT_SELF_HEAL_CONFIG,
   drivers: [
     {
       id: 'gemini',
@@ -103,10 +109,27 @@ export async function loadConfig(path?: string): Promise<PingOSConfig> {
   try {
     const raw = await readFile(configPath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<PingOSConfig>;
+
+    // Self-heal is optional in config.json; merge with defaults.
+    // Backwards-compat: older configs may specify `llmModel` at top-level.
+    const selfHealParsed = (parsed as { selfHeal?: Partial<SelfHealConfig> & { llmModel?: string } }).selfHeal;
+    const llmModelCompat = selfHealParsed && 'llmModel' in selfHealParsed ? (selfHealParsed as any).llmModel : undefined;
+
+    const selfHeal: SelfHealConfig = {
+      ...DEFAULT_SELF_HEAL_CONFIG,
+      ...(selfHealParsed ?? {}),
+      llm: {
+        ...DEFAULT_SELF_HEAL_CONFIG.llm,
+        ...((selfHealParsed as any)?.llm ?? {}),
+        model: (llmModelCompat ?? (selfHealParsed as any)?.llm?.model ?? DEFAULT_SELF_HEAL_CONFIG.llm.model) as string,
+      },
+    };
+
     return {
       gatewayPort: parsed.gatewayPort ?? DEFAULT_CONFIG.gatewayPort,
       defaultStrategy: parsed.defaultStrategy ?? DEFAULT_CONFIG.defaultStrategy,
       healthIntervalMs: parsed.healthIntervalMs ?? DEFAULT_CONFIG.healthIntervalMs,
+      selfHeal,
       drivers: parsed.drivers ?? DEFAULT_CONFIG.drivers,
     };
   } catch {

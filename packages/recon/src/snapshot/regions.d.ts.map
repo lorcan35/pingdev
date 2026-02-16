@@ -1,0 +1,1 @@
+{"version":3,"file":"regions.d.ts","sourceRoot":"","sources":["regions.ts"],"names":[],"mappings":"AAAA;;GAEG;AACH,OAAO,KAAK,EAAE,IAAI,EAAE,MAAM,YAAY,CAAC;AACvC,OAAO,KAAK,EAAE,UAAU,EAAE,eAAe,EAAE,MAAM,aAAa,CAAC;AA2C/D,yDAAyD;AACzD,wBAAsB,eAAe,CACnC,IAAI,EAAE,IAAI,EACV,QAAQ,EAAE,eAAe,EAAE,GAC1B,OAAO,CAAC,UAAU,EAAE,CAAC,CAmGvB"}

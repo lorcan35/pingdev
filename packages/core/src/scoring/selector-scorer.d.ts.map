@@ -1,0 +1,1 @@
+{"version":3,"file":"selector-scorer.d.ts","sourceRoot":"","sources":["selector-scorer.ts"],"names":[],"mappings":"AAAA,yEAAyE;AAEzE,OAAO,KAAK,EAAE,WAAW,EAAE,MAAM,aAAa,CAAC;AAC/C,OAAO,KAAK,EAAE,aAAa,EAAgB,MAAM,YAAY,CAAC;AA4B9D,4DAA4D;AAC5D,wBAAgB,iBAAiB,CAAC,QAAQ,EAAE,MAAM,GAAG,aAAa,CA6IjE;AAuBD,+FAA+F;AAC/F,wBAAgB,gBAAgB,CAAC,WAAW,EAAE,WAAW,GAAG,aAAa,EAAE,CAO1E"}

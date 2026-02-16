@@ -4,6 +4,27 @@ All notable changes to PingOS will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-02-15
+
+Phase 2: **Chrome Extension Auth Bridge** — control real authenticated Chrome tabs via PingOS.
+
+### Added
+
+- **Chrome MV3 extension** (`packages/chrome-extension`)
+  - WebSocket client connecting to `ws://localhost:3500/ext`
+  - Tab sharing UX: shared tabs become devices named `chrome-{tabId}`
+  - Content-script executor supporting: `read`, `click`, `type`, `extract`, `eval` (plus internal navigate/screenshot helpers)
+  - Passive recorder to export starter `defineSite()` scaffolds from real user interactions
+
+- **Gateway-side ExtensionBridge** (`packages/std/src/ext-bridge.ts`)
+  - Accepts WebSocket upgrades at `/ext`
+  - Tracks connected extension clients + shared tab ownership
+  - Forwards device operations to the owning extension and awaits `device_response`
+
+- **Generic device operation route** (`packages/std/src/gateway.ts`)
+  - `POST /v1/dev/:device/:op` now forwards to extension-owned devices first
+  - `llm/prompt` + `llm/chat` remain available as built-in device handlers
+
 ## [0.1.0] - 2026-02-15
 
 Phase 1: POSIX Device Layer — initial release of `@pingdev/std`, the standard library for PingOS.
