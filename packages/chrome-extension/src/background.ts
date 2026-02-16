@@ -328,7 +328,7 @@ async function handleDeviceRequest(request: DeviceRequest) {
           expression: code,
           returnByValue: true,
           awaitPromise: true,
-        });
+        }) as Record<string, any>;
 
         // Detach debugger
         await chrome.debugger.detach({ tabId });

@@ -94,6 +94,18 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         }
         break;
       }
+      case 'press':
+        response = await handlePress(command.key, command.modifiers, command.selector, command.stealth);
+        break;
+      case 'dblclick':
+        response = await handleDblClick(command.selector, command.stealth);
+        break;
+      case 'select':
+        response = await handleSelect(command);
+        break;
+      case 'scroll':
+        response = await handleScroll(command);
+        break;
       case 'screenshot':
         response = { success: false, error: 'Screenshot not implemented in content script' };
         break;
@@ -113,14 +125,71 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
 }
 
 function findElement(selector: string): Element | null {
+  // text= prefix: search interactive elements by text content
   if (selector.startsWith('text=')) {
     const text = selector.slice(5);
-    const all = document.querySelectorAll('button, a, [role="button"], [onclick]');
-    for (const el of all) {
+    // Search broadly: interactive elements first, then all elements
+    const interactive = document.querySelectorAll(
+      'button, a, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [onclick], input, select, textarea, [contenteditable], label, summary, details, [tabindex]'
+    );
+    for (const el of Array.from(interactive)) {
       if (el.textContent?.trim().includes(text)) return el;
+    }
+    // Fallback: any element containing the text
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const el = node as Element;
+      if (el.textContent?.trim().includes(text) && el.children.length === 0) return el;
     }
     return null;
   }
+
+  // role= prefix: find by ARIA role
+  if (selector.startsWith('role=')) {
+    const parts = selector.slice(5);
+    const [role, ...rest] = parts.split(':');
+    const filter = rest.join(':');
+    const candidates = document.querySelectorAll(`[role="${role}"]`);
+
+    // nth= modifier
+    if (filter.startsWith('nth=')) {
+      const n = parseInt(filter.slice(4), 10);
+      return candidates[n - 1] ?? null;
+    }
+
+    if (!filter) return candidates[0] ?? null;
+    for (const el of Array.from(candidates)) {
+      const label = el.getAttribute('aria-label') || el.textContent?.trim() || '';
+      if (label.includes(filter)) return el;
+    }
+    return null;
+  }
+
+  // aria= prefix: find by aria-label
+  if (selector.startsWith('aria=')) {
+    const label = selector.slice(5);
+    return document.querySelector(`[aria-label="${label}"]`) ??
+      document.querySelector(`[aria-label*="${label}"]`) ??
+      null;
+  }
+
+  // cell= prefix: find spreadsheet/table cell by coordinates (e.g. cell=A1 or cell=R1C1)
+  if (selector.startsWith('cell=')) {
+    const ref = selector.slice(5).toUpperCase();
+    // Try aria-label match first (Google Sheets uses this)
+    const byLabel = document.querySelector(`[aria-label*="${ref}"]`);
+    if (byLabel) return byLabel;
+    // Try data-cell attribute
+    const byData = document.querySelector(`[data-cell="${ref}"]`);
+    if (byData) return byData;
+    // Try td with matching id
+    const byId = document.querySelector(`td[id*="${ref}"], th[id*="${ref}"]`);
+    if (byId) return byId;
+    return null;
+  }
+
+  // Default: CSS selector
   return document.querySelector(selector);
 }
 
@@ -385,6 +454,57 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
       }));
   }
 
+  // Canvas app detection
+  const canvases = Array.from(document.querySelectorAll('canvas'));
+  const vpArea = window.innerWidth * window.innerHeight;
+  const bigCanvas = canvases.find((c) => {
+    const r = c.getBoundingClientRect();
+    return (r.width * r.height) / vpArea > 0.5;
+  });
+  recon.canvasApp = !!bigCanvas;
+
+  if (recon.canvasApp) {
+    recon.accessibilityOverlay = {
+      grids: document.querySelectorAll('[role="grid"]').length,
+      gridcells: document.querySelectorAll('[role="gridcell"]').length,
+      rows: document.querySelectorAll('[role="row"]').length,
+      columnHeaders: document.querySelectorAll('[role="columnheader"]').length,
+    };
+    // Grid dimensions
+    const grid = document.querySelector('[role="grid"]');
+    if (grid) {
+      recon.gridDimensions = {
+        rows: grid.querySelectorAll('[role="row"]').length,
+        cols: grid.querySelectorAll('[role="row"]:first-of-type [role="gridcell"], [role="columnheader"]').length,
+      };
+    }
+  }
+
+  // ARIA landmarks
+  recon.ariaLandmarks = {
+    toolbars: Array.from(document.querySelectorAll('[role="toolbar"]')).map((el) => ({
+      label: el.getAttribute('aria-label') || '',
+      buttons: el.querySelectorAll('[role="button"], button').length,
+    })),
+    menubars: Array.from(document.querySelectorAll('[role="menubar"]')).map((el) => ({
+      label: el.getAttribute('aria-label') || '',
+      items: el.querySelectorAll('[role="menuitem"]').length,
+    })),
+    tablists: Array.from(document.querySelectorAll('[role="tablist"]')).map((el) => ({
+      label: el.getAttribute('aria-label') || '',
+      tabs: el.querySelectorAll('[role="tab"]').length,
+    })),
+    dialogs: document.querySelectorAll('[role="dialog"]').length,
+  };
+
+  // Menus
+  recon.menus = Array.from(document.querySelectorAll('[role="menubar"] > [role="menuitem"], [role="menubar"] [role="menuitem"]'))
+    .slice(0, 30)
+    .map((el) => ({
+      label: (el.getAttribute('aria-label') || el.textContent?.trim() || '').substring(0, 40),
+      selector: el.id ? `#${el.id}` : `[role="menuitem"][aria-label="${el.getAttribute('aria-label') || ''}"]`,
+    }));
+
   return { success: true, data: recon };
 }
 
@@ -611,6 +731,246 @@ function toJsonSafe(value: unknown): unknown {
 
 async function handleNavigate(url: string): Promise<BridgeResponse> {
   window.location.href = url;
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// Press handler — dispatches keydown → keypress (printable) → keyup
+// ---------------------------------------------------------------------------
+
+/** Map friendly key names to KeyboardEvent.code values. */
+function keyToCode(key: string): string {
+  // Single lowercase letter
+  if (/^[a-z]$/i.test(key)) return `Key${key.toUpperCase()}`;
+  // Single digit
+  if (/^[0-9]$/.test(key)) return `Digit${key}`;
+
+  const map: Record<string, string> = {
+    Enter: 'Enter', Tab: 'Tab', Escape: 'Escape', Space: 'Space',
+    Backspace: 'Backspace', Delete: 'Delete',
+    ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
+    Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+    Insert: 'Insert',
+    F1: 'F1', F2: 'F2', F3: 'F3', F4: 'F4', F5: 'F5', F6: 'F6',
+    F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
+    // Punctuation / symbols
+    '-': 'Minus', '=': 'Equal', '[': 'BracketLeft', ']': 'BracketRight',
+    '\\': 'Backslash', ';': 'Semicolon', "'": 'Quote', ',': 'Comma',
+    '.': 'Period', '/': 'Slash', '`': 'Backquote',
+    ' ': 'Space',
+  };
+  return map[key] ?? key;
+}
+
+/** Returns true for keys that should emit a keypress event. */
+function isPrintableKey(key: string): boolean {
+  // Non-printable keys that must NOT fire keypress
+  const nonPrintable = new Set([
+    'Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'Insert',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'PageUp', 'PageDown',
+    'F1', 'F2', 'F3', 'F4', 'F5', 'F6',
+    'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+    'Control', 'Shift', 'Alt', 'Meta',
+    'CapsLock', 'NumLock', 'ScrollLock',
+  ]);
+  return !nonPrintable.has(key);
+}
+
+async function handlePress(
+  key: string,
+  modifiers?: string[],
+  selector?: string,
+  stealth?: boolean,
+): Promise<BridgeResponse> {
+  // Resolve target element
+  let target: Element | null = null;
+  if (selector) {
+    target = findElement(selector);
+    if (!target) return { success: false, error: `Element not found: ${selector}` };
+  } else {
+    target = document.activeElement;
+  }
+  if (!target) return { success: false, error: 'No active element to send key events to' };
+
+  const mods = new Set((modifiers ?? []).map((m) => m.toLowerCase()));
+  const ctrlKey = mods.has('ctrl') || mods.has('control');
+  const shiftKey = mods.has('shift');
+  const altKey = mods.has('alt');
+  const metaKey = mods.has('meta') || mods.has('cmd') || mods.has('command');
+
+  const code = keyToCode(key);
+  const eventInit: KeyboardEventInit = {
+    key,
+    code,
+    bubbles: true,
+    cancelable: true,
+    ctrlKey,
+    shiftKey,
+    altKey,
+    metaKey,
+  };
+
+  const jitterDelay = () => stealth ? sleep(20 + Math.random() * 60) : Promise.resolve();
+
+  // Focus the element if it's focusable
+  if (target instanceof HTMLElement) target.focus();
+
+  // keydown
+  target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+  await jitterDelay();
+
+  // keypress (only for printable characters, and not when Ctrl/Meta are held)
+  if (isPrintableKey(key) && !ctrlKey && !metaKey) {
+    target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+    await jitterDelay();
+  }
+
+  // keyup
+  target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// DblClick handler
+// ---------------------------------------------------------------------------
+async function handleDblClick(selector: string, stealth?: boolean): Promise<BridgeResponse> {
+  const element = findElement(selector);
+  if (!element) return { success: false, error: `Element not found: ${selector}` };
+
+  try {
+    (element as HTMLElement | undefined)?.scrollIntoView?.({ block: 'center', inline: 'center' });
+  } catch { /* ignore */ }
+
+  if (stealth) {
+    // Human-like double click: two clicks with short delay
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2 + (Math.random() - 0.5) * 4;
+    const y = rect.top + rect.height / 2 + (Math.random() - 0.5) * 4;
+    const baseOpts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
+
+    element.dispatchEvent(new MouseEvent('mousedown', { ...baseOpts, detail: 1 }));
+    element.dispatchEvent(new MouseEvent('mouseup', { ...baseOpts, detail: 1 }));
+    element.dispatchEvent(new MouseEvent('click', { ...baseOpts, detail: 1 }));
+    await sleep(60 + Math.random() * 80);
+    element.dispatchEvent(new MouseEvent('mousedown', { ...baseOpts, detail: 2 }));
+    element.dispatchEvent(new MouseEvent('mouseup', { ...baseOpts, detail: 2 }));
+    element.dispatchEvent(new MouseEvent('click', { ...baseOpts, detail: 2 }));
+    element.dispatchEvent(new MouseEvent('dblclick', { ...baseOpts, detail: 2 }));
+  } else {
+    const event = new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 });
+    element.dispatchEvent(event);
+  }
+
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// Select handler — text selection or range-based selection
+// ---------------------------------------------------------------------------
+async function handleSelect(command: {
+  from?: string; to?: string; selector?: string;
+  startOffset?: number; endOffset?: number; stealth?: boolean;
+}): Promise<BridgeResponse> {
+  const { from, to, selector, startOffset, endOffset, stealth } = command;
+
+  // Range selection: from element to element
+  if (from && to) {
+    const startEl = findElement(from);
+    const endEl = findElement(to);
+    if (!startEl) return { success: false, error: `Start element not found: ${from}` };
+    if (!endEl) return { success: false, error: `End element not found: ${to}` };
+
+    const range = document.createRange();
+    range.setStart(startEl.firstChild || startEl, startOffset ?? 0);
+    range.setEnd(endEl.firstChild || endEl, endOffset ?? (endEl.textContent?.length ?? 0));
+
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    return { success: true };
+  }
+
+  // Single element full-select
+  if (selector) {
+    const el = findElement(selector);
+    if (!el) return { success: false, error: `Element not found: ${selector}` };
+
+    // If it's an input/textarea, use select()
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      el.focus();
+      el.select();
+      if (stealth) await sleep(30 + Math.random() * 50);
+      return { success: true };
+    }
+
+    // Otherwise select all text content
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    return { success: true };
+  }
+
+  // Select all
+  document.execCommand('selectAll');
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// Scroll handler — directional or to-edge scrolling
+// ---------------------------------------------------------------------------
+async function handleScroll(command: {
+  direction?: 'up' | 'down' | 'left' | 'right';
+  amount?: number; selector?: string;
+  to?: 'top' | 'bottom'; stealth?: boolean;
+}): Promise<BridgeResponse> {
+  const { direction = 'down', amount = 300, selector, to: scrollTo, stealth } = command;
+  const target = selector ? findElement(selector) : document.scrollingElement || document.documentElement;
+  if (!target) return { success: false, error: `Scroll target not found: ${selector}` };
+
+  const el = target as HTMLElement;
+
+  // Scroll to edge
+  if (scrollTo) {
+    const top = scrollTo === 'top' ? 0 : el.scrollHeight;
+    if (stealth) {
+      // Smooth scroll in increments for stealth
+      const currentTop = el.scrollTop;
+      const diff = top - currentTop;
+      const steps = Math.min(Math.abs(Math.ceil(diff / 200)), 20);
+      for (let i = 1; i <= steps; i++) {
+        el.scrollTop = currentTop + (diff / steps) * i;
+        await sleep(30 + Math.random() * 40);
+      }
+    } else {
+      el.scrollTo({ top, behavior: 'smooth' });
+    }
+    return { success: true };
+  }
+
+  // Directional scroll
+  const scrollOpts: Record<string, [number, number]> = {
+    down: [0, amount],
+    up: [0, -amount],
+    right: [amount, 0],
+    left: [-amount, 0],
+  };
+  const [dx, dy] = scrollOpts[direction] || [0, amount];
+
+  if (stealth) {
+    // Scroll in small increments
+    const steps = Math.max(3, Math.ceil(Math.abs(dy || dx) / 80));
+    for (let i = 0; i < steps; i++) {
+      el.scrollBy(dx / steps, dy / steps);
+      await sleep(20 + Math.random() * 30);
+    }
+  } else {
+    el.scrollBy({ left: dx, top: dy, behavior: 'smooth' });
+  }
+
   return { success: true };
 }
 

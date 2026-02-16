@@ -10,8 +10,13 @@ export type BridgeCommand =
   | { type: 'waitFor'; selector: string; timeoutMs?: number; stealth?: boolean }
   | { type: 'navigate'; url: string; stealth?: boolean }
   | { type: 'getUrl'; stealth?: boolean }
+  | { type: 'clean'; mode?: 'css' | 'remove' | 'detect' | 'full'; stealth?: boolean }
   | { type: 'recon'; classify?: boolean; stealth?: boolean }
-  | { type: 'screenshot'; stealth?: boolean };
+  | { type: 'screenshot'; stealth?: boolean }
+  | { type: 'press'; key: string; modifiers?: string[]; selector?: string; stealth?: boolean }
+  | { type: 'dblclick'; selector: string; stealth?: boolean }
+  | { type: 'select'; from?: string; to?: string; selector?: string; startOffset?: number; endOffset?: number; stealth?: boolean }
+  | { type: 'scroll'; direction?: 'up' | 'down' | 'left' | 'right'; amount?: number; selector?: string; to?: 'top' | 'bottom'; stealth?: boolean };
 
 export interface BridgeResponse {
   success: boolean;
