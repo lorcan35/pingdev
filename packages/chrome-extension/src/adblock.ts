@@ -2,6 +2,17 @@
 // Traditional: CSS-based hiding of known ad patterns
 // AI: recon-based detection of promotional/clutter elements
 
+// Pages where adblock should be GENTLE (only remove obvious ads, not product elements)
+const TRANSACTIONAL_URL_PATTERNS = [
+  /\/cart/i, /\/shoppingcart/i, /\/checkout/i, /\/order/i,
+  /\/payment/i, /\/wishlist/i, /\/p\/order/i, /\/p\/shoppingcart/i,
+  /\/account/i, /\/address/i, /\/returns/i,
+];
+
+function isTransactionalPage(): boolean {
+  return TRANSACTIONAL_URL_PATTERNS.some(p => p.test(location.href));
+}
+
 // Common ad selectors (EasyList-inspired subset for major sites)
 const TRADITIONAL_AD_SELECTORS = [
   // Generic ad containers
@@ -76,9 +87,28 @@ export function injectAdBlockCSS(): void {
   (document.head || document.documentElement).appendChild(style);
 }
 
+// Safe-only selectors for transactional pages (cart, checkout, orders)
+const SAFE_AD_SELECTORS = [
+  'ins.adsbygoogle, .google-ad, #google_ads_iframe',
+  '[id*="taboola"], [class*="taboola"]',
+  '[id*="outbrain"], [class*="outbrain"]',
+  '[class*="cookie-banner"], [class*="cookie-consent"]',
+  '[id*="cookie"], [class*="gdpr"]',
+  '[class*="newsletter-popup"], [class*="signup-modal"]',
+  '[class*="subscribe-overlay"]',
+  '[class*="app-download"], [class*="download-banner"]',
+  '[class*="floating-bar"], [class*="download-app"]',
+  'iframe[src*="doubleclick"], iframe[src*="googlesyndication"]',
+  'iframe[src*="amazon-adsystem"]',
+  '.ui-newuser, [class*="coupon-popup"], [class*="new-user"]',
+];
+
 /** Remove ad elements from DOM entirely (more aggressive) */
 export function removeAdElements(): { removed: number; selectors: string[] } {
-  const allSelectors = [...TRADITIONAL_AD_SELECTORS, ...SOFT_HIDE_SELECTORS];
+  const transactional = isTransactionalPage();
+  const allSelectors = transactional
+    ? SAFE_AD_SELECTORS
+    : [...TRADITIONAL_AD_SELECTORS, ...SOFT_HIDE_SELECTORS];
   let removed = 0;
   const matched: string[] = [];
   
@@ -86,11 +116,17 @@ export function removeAdElements(): { removed: number; selectors: string[] } {
     try {
       const els = document.querySelectorAll(sel);
       if (els.length > 0) {
-        matched.push(`${sel} (${els.length})`);
-        els.forEach(el => {
-          el.remove();
-          removed++;
-        });
+        // On transactional pages, never remove elements inside product/cart containers
+        const safeEls = transactional
+          ? Array.from(els).filter(el => !el.closest('[class*="cart"], [class*="order"], [class*="product"], [class*="item-card"], [class*="checkout"]'))
+          : Array.from(els);
+        if (safeEls.length > 0) {
+          matched.push(`${sel} (${safeEls.length})`);
+          safeEls.forEach(el => {
+            el.remove();
+            removed++;
+          });
+        }
       }
     } catch { /* invalid selector, skip */ }
   }
@@ -156,27 +192,36 @@ export function detectClutter(): Array<{ selector: string; reason: string; confi
 }
 
 /** Full cleanup: traditional + AI heuristic */
-export function fullCleanup(): { cssInjected: boolean; removed: number; clutterDetected: number } {
-  injectAdBlockCSS();
+export function fullCleanup(): { cssInjected: boolean; removed: number; clutterDetected: number; transactional: boolean } {
+  const transactional = isTransactionalPage();
+  
+  // On transactional pages, skip CSS injection (too broad) — only do targeted removal
+  if (!transactional) {
+    injectAdBlockCSS();
+  }
+  
   const { removed } = removeAdElements();
   const clutter = detectClutter();
   
-  // Remove high-confidence clutter
+  // Remove high-confidence clutter (but not on transactional pages)
   let extraRemoved = 0;
-  for (const item of clutter) {
-    if (item.confidence >= 0.8) {
-      try {
-        document.querySelectorAll(item.selector).forEach(el => {
-          el.remove();
-          extraRemoved++;
-        });
-      } catch { /* skip */ }
+  if (!transactional) {
+    for (const item of clutter) {
+      if (item.confidence >= 0.8) {
+        try {
+          document.querySelectorAll(item.selector).forEach(el => {
+            el.remove();
+            extraRemoved++;
+          });
+        } catch { /* skip */ }
+      }
     }
   }
   
   return {
-    cssInjected: true,
+    cssInjected: !transactional,
     removed: removed + extraRemoved,
     clutterDetected: clutter.length,
+    transactional,
   };
 }
