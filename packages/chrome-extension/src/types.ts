@@ -1,7 +1,7 @@
 // Shared types for PingOS Chrome Extension Bridge
 
 export type BridgeCommand =
-  | { type: 'click'; selector: string; stealth?: boolean }
+  | { type: 'click'; selector: string; x?: number; y?: number; stealth?: boolean }
   | { type: 'type'; selector: string; text: string; stealth?: boolean }
   | { type: 'read'; selector: string; stealth?: boolean }
   | { type: 'extract'; schema: Record<string, string>; stealth?: boolean } // selector map

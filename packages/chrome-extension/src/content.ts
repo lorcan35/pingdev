@@ -46,7 +46,7 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
 
     switch (command.type) {
       case 'click':
-        response = await handleClick(command.selector, command.stealth);
+        response = await handleClick(command.selector, command.stealth, command.x, command.y);
         break;
       case 'type':
         response = await handleType(command.selector, command.text, command.stealth);
@@ -202,7 +202,7 @@ function findElement(selector: string): Element | null {
   return document.querySelector(selector);
 }
 
-async function handleClick(selector: string, stealth?: boolean): Promise<BridgeResponse> {
+async function handleClick(selector: string, stealth?: boolean, x?: number, y?: number): Promise<BridgeResponse> {
   const element = findElement(selector);
   if (!element) return { success: false, error: `Element not found: ${selector}` };
 
@@ -210,6 +210,35 @@ async function handleClick(selector: string, stealth?: boolean): Promise<BridgeR
     (element as HTMLElement | undefined)?.scrollIntoView?.({ block: 'center', inline: 'center' });
   } catch {
     // ignore
+  }
+
+  // Coordinate-based click: dispatch mouse events at specific x,y offset within the element.
+  // Critical for canvas apps (Sheets, Figma, Excalidraw, Maps) where CSS selectors can't
+  // target individual drawn elements.
+  if (x !== undefined && y !== undefined) {
+    const rect = element.getBoundingClientRect();
+    const clientX = rect.left + x;
+    const clientY = rect.top + y;
+    const eventOpts: MouseEventInit = {
+      bubbles: true, cancelable: true, button: 0,
+      clientX, clientY,
+      screenX: clientX, screenY: clientY,
+    };
+
+    if (stealth) {
+      // Full human-like sequence with jitter
+      const jx = (Math.random() - 0.5) * 2;
+      const jy = (Math.random() - 0.5) * 2;
+      eventOpts.clientX! += jx;
+      eventOpts.clientY! += jy;
+      element.dispatchEvent(new MouseEvent('mousemove', eventOpts));
+      await sleep(30 + Math.random() * 50);
+    }
+
+    element.dispatchEvent(new MouseEvent('mousedown', { ...eventOpts, detail: 1 }));
+    element.dispatchEvent(new MouseEvent('mouseup', { ...eventOpts, detail: 1 }));
+    element.dispatchEvent(new MouseEvent('click', { ...eventOpts, detail: 1 }));
+    return { success: true, data: { clickedAt: { x: clientX, y: clientY } } };
   }
 
   if (stealth) {
@@ -244,18 +273,94 @@ async function handleType(selector: string, text: string, stealth?: boolean): Pr
 }
 
 async function handleRead(selector: string): Promise<BridgeResponse> {
-  if (selector.startsWith('text=')) {
+  // Cell range reading: cell=A1:B5 → read a grid block from ARIA overlay
+  const rangeMatch = selector.match(/^cell=([A-Za-z]+\d+):([A-Za-z]+\d+)$/);
+  if (rangeMatch) {
+    return readCellRange(rangeMatch[1].toUpperCase(), rangeMatch[2].toUpperCase());
+  }
+
+  // Prefix selectors (text=, role=, aria=, cell=) route through findElement
+  if (/^(text=|role=|aria=|cell=)/.test(selector)) {
     const el = findElement(selector);
     if (!el) return { success: false, error: `Element not found: ${selector}` };
     return { success: true, data: readText(el) };
   }
 
+  // Standard CSS selectors can match multiple elements
   const nodes = Array.from(document.querySelectorAll(selector));
   if (nodes.length === 0) return { success: false, error: `Element not found: ${selector}` };
 
   const texts = nodes.map((el) => readText(el));
   if (texts.length === 1) return { success: true, data: texts[0] };
   return { success: true, data: texts };
+}
+
+/**
+ * Read a rectangular range of cell values from ARIA grid overlay.
+ * Parses cell references like A1:B5 and extracts text from gridcell elements.
+ */
+function readCellRange(startRef: string, endRef: string): BridgeResponse {
+  // Parse column letters and row numbers
+  const parseRef = (ref: string) => {
+    const match = ref.match(/^([A-Z]+)(\d+)$/);
+    if (!match) return null;
+    const col = match[1].split('').reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0);
+    return { col, row: parseInt(match[2], 10) };
+  };
+
+  const start = parseRef(startRef);
+  const end = parseRef(endRef);
+  if (!start || !end) return { success: false, error: `Invalid cell range: ${startRef}:${endRef}` };
+
+  const minRow = Math.min(start.row, end.row);
+  const maxRow = Math.max(start.row, end.row);
+  const minCol = Math.min(start.col, end.col);
+  const maxCol = Math.max(start.col, end.col);
+
+  // Collect cell values by scanning gridcell elements
+  const grid: Record<string, string> = {};
+  const cells = document.querySelectorAll('[role="gridcell"]');
+  for (const cell of Array.from(cells)) {
+    const label = cell.getAttribute('aria-label') || '';
+    // Try to extract cell ref from aria-label (e.g., "A1", "Cell A1, value 42")
+    const refMatch = label.match(/\b([A-Z]+)(\d+)\b/);
+    if (!refMatch) continue;
+    const cellCol = refMatch[1].split('').reduce((acc: number, c: string) => acc * 26 + c.charCodeAt(0) - 64, 0);
+    const cellRow = parseInt(refMatch[2], 10);
+    if (cellRow >= minRow && cellRow <= maxRow && cellCol >= minCol && cellCol <= maxCol) {
+      const ref = refMatch[1] + refMatch[2];
+      grid[ref] = cell.textContent?.trim() || '';
+    }
+  }
+
+  // Also try reading from accessible name/value pairs
+  if (Object.keys(grid).length === 0) {
+    // Fallback: try row/column index-based approach
+    const rows = document.querySelectorAll('[role="row"]');
+    for (let r = minRow; r <= maxRow && r <= rows.length; r++) {
+      const row = rows[r - 1]; // 1-based to 0-based
+      if (!row) continue;
+      const rowCells = row.querySelectorAll('[role="gridcell"]');
+      for (let c = minCol; c <= maxCol && c <= rowCells.length; c++) {
+        const cell = rowCells[c - 1];
+        if (!cell) continue;
+        // Convert 1-based column number to letter(s): 1→A, 26→Z, 27→AA
+        let colStr = '';
+        let cn = c;
+        while (cn > 0) { colStr = String.fromCharCode(64 + ((cn - 1) % 26) + 1) + colStr; cn = Math.floor((cn - 1) / 26); }
+        grid[`${colStr}${r}`] = cell.textContent?.trim() || '';
+      }
+    }
+  }
+
+  return {
+    success: true,
+    data: {
+      range: `${startRef}:${endRef}`,
+      cells: grid,
+      count: Object.keys(grid).length,
+    },
+  };
 }
 
 async function handleExtract(schema: Record<string, string>): Promise<BridgeResponse> {
@@ -475,21 +580,134 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
   recon.canvasApp = !!bigCanvas;
 
   if (recon.canvasApp) {
+    // Canvas element info
+    const cvs = bigCanvas as HTMLCanvasElement;
+    recon.canvas = {
+      width: cvs.width,
+      height: cvs.height,
+      cssWidth: cvs.getBoundingClientRect().width,
+      cssHeight: cvs.getBoundingClientRect().height,
+      id: cvs.id || undefined,
+      classes: cvs.className || undefined,
+    };
+
+    // Accessibility overlay scan
     recon.accessibilityOverlay = {
       grids: document.querySelectorAll('[role="grid"]').length,
       gridcells: document.querySelectorAll('[role="gridcell"]').length,
       rows: document.querySelectorAll('[role="row"]').length,
       columnHeaders: document.querySelectorAll('[role="columnheader"]').length,
+      hasOverlay: document.querySelectorAll('[role="grid"], [role="gridcell"], [role="treegrid"]').length > 0,
     };
+
     // Grid dimensions
     const grid = document.querySelector('[role="grid"]');
     if (grid) {
+      const gridRows = grid.querySelectorAll('[role="row"]');
+      const firstRowCells = gridRows[0]?.querySelectorAll('[role="gridcell"], [role="columnheader"]');
       recon.gridDimensions = {
-        rows: grid.querySelectorAll('[role="row"]').length,
-        cols: grid.querySelectorAll('[role="row"]:first-of-type [role="gridcell"], [role="columnheader"]').length,
+        rows: gridRows.length,
+        cols: firstRowCells?.length ?? 0,
       };
     }
+
+    // Cell value sampling — read up to 5 rows of gridcell content for automation feasibility
+    const sampleCells: Array<{ ref: string; value: string }> = [];
+    const gridcells = document.querySelectorAll('[role="gridcell"]');
+    let sampled = 0;
+    for (const cell of Array.from(gridcells)) {
+      if (sampled >= 25) break; // 5 rows × 5 cols max
+      const label = cell.getAttribute('aria-label') || '';
+      const value = cell.textContent?.trim() || '';
+      const refMatch = label.match(/\b([A-Z]+\d+)\b/);
+      sampleCells.push({
+        ref: refMatch ? refMatch[1] : `cell-${sampled}`,
+        value: value.substring(0, 100),
+      });
+      sampled++;
+    }
+    if (sampleCells.length > 0) recon.cellSample = sampleCells;
+
+    // Selection state — what's currently selected in the grid
+    const selectedCells = document.querySelectorAll('[role="gridcell"][aria-selected="true"], [aria-current="true"], .cell-selected, [class*="current-cell"]');
+    if (selectedCells.length > 0) {
+      recon.selection = {
+        count: selectedCells.length,
+        cells: Array.from(selectedCells).slice(0, 10).map((el) => {
+          const label = el.getAttribute('aria-label') || '';
+          const refMatch = label.match(/\b([A-Z]+\d+)\b/);
+          return {
+            ref: refMatch ? refMatch[1] : undefined,
+            label: label.substring(0, 60),
+            value: (el.textContent?.trim() || '').substring(0, 100),
+          };
+        }),
+      };
+    }
+
+    // Canvas app fingerprinting — identify which app this is
+    const url = location.href.toLowerCase();
+    const title = document.title.toLowerCase();
+    let appType: string = 'unknown';
+    if (url.includes('docs.google.com/spreadsheets') || title.includes('google sheets')) {
+      appType = 'google-sheets';
+    } else if (url.includes('docs.google.com/document')) {
+      appType = 'google-docs';
+    } else if (url.includes('docs.google.com/presentation')) {
+      appType = 'google-slides';
+    } else if (url.includes('figma.com')) {
+      appType = 'figma';
+    } else if (url.includes('excalidraw')) {
+      appType = 'excalidraw';
+    } else if (url.includes('google.com/maps') || url.includes('maps.google')) {
+      appType = 'google-maps';
+    } else if (url.includes('miro.com')) {
+      appType = 'miro';
+    } else if (url.includes('canva.com')) {
+      appType = 'canva';
+    } else if (document.querySelector('[data-app-name]')) {
+      appType = document.querySelector('[data-app-name]')?.getAttribute('data-app-name') || 'unknown';
+    }
+    recon.canvasAppType = appType;
+
+    // Zoom level detection — look for common zoom indicators
+    const zoomEl = document.querySelector('[aria-label*="zoom" i], [aria-label*="Zoom" i], [class*="zoom-level"], [class*="zoomLevel"], [data-zoom]');
+    if (zoomEl) {
+      const zoomText = zoomEl.textContent?.trim() || zoomEl.getAttribute('aria-valuenow') || zoomEl.getAttribute('data-zoom') || '';
+      const zoomMatch = zoomText.match(/(\d+)\s*%/);
+      recon.zoomLevel = zoomMatch ? parseInt(zoomMatch[1], 10) : zoomText.substring(0, 20);
+    }
+
+    // Vision mode recommendation — flag when ARIA overlay is insufficient
+    const hasGrid = recon.accessibilityOverlay.hasOverlay;
+    const hasSufficientCells = recon.accessibilityOverlay.gridcells > 0;
+    const hasToolbar = document.querySelectorAll('[role="toolbar"]').length > 0;
+    recon.needsVision = !hasGrid && !hasSufficientCells;
+    recon.automationStrategy = hasGrid && hasSufficientCells
+      ? 'aria-overlay'       // Can automate via ARIA gridcells (Sheets, etc.)
+      : hasToolbar
+        ? 'toolbar-only'     // Can automate toolbar but need vision for canvas content (Figma, etc.)
+        : 'vision-required'; // No ARIA overlay, need screenshot + vision model (Maps, games, etc.)
   }
+
+  // Toolbar state — which buttons are active/pressed (works for both canvas and non-canvas apps)
+  const toolbarButtons = document.querySelectorAll('[role="toolbar"] [role="button"], [role="toolbar"] button');
+  const activeButtons: Array<{ label: string; pressed: boolean; selector: string }> = [];
+  for (const btn of Array.from(toolbarButtons)) {
+    const pressed = btn.getAttribute('aria-pressed') === 'true' ||
+      btn.getAttribute('aria-checked') === 'true' ||
+      btn.classList.contains('active') ||
+      btn.classList.contains('selected');
+    if (pressed) {
+      const label = btn.getAttribute('aria-label') || btn.textContent?.trim() || '';
+      activeButtons.push({
+        label: label.substring(0, 40),
+        pressed: true,
+        selector: btn.id ? `#${btn.id}` : `[aria-label="${(btn.getAttribute('aria-label') || '').replace(/"/g, '\\"')}"]`,
+      });
+    }
+  }
+  if (activeButtons.length > 0) recon.toolbarState = activeButtons;
 
   // ARIA landmarks
   recon.ariaLandmarks = {

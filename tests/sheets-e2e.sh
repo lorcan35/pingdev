@@ -103,6 +103,48 @@ assert_ok "click Format menu" "$R"
 R=$(call_op press '{"key":"Escape"}')
 assert_ok "press Escape" "$R"
 
+# ---------- canvas-specific tests ----------
+
+# 13. Recon — verify canvas app detection and automation strategy
+R=$(call_op recon '{}')
+if echo "$R" | jq -e '.ok == true' >/dev/null 2>&1 && \
+   echo "$R" | jq -e '.data.canvasApp == true' >/dev/null 2>&1; then
+  echo "PASS: recon canvasApp detected"
+  ((PASS_COUNT++))
+else
+  echo "FAIL: recon canvasApp — $R"
+  ((FAIL_COUNT++))
+fi
+
+# 14. Verify automation strategy is 'aria-overlay' (Sheets has ARIA grid)
+STRATEGY=$(echo "$R" | jq -r '.data.automationStrategy' 2>/dev/null)
+if [ "$STRATEGY" = "aria-overlay" ]; then
+  echo "PASS: automation strategy = aria-overlay"
+  ((PASS_COUNT++))
+else
+  echo "FAIL: automation strategy = $STRATEGY (expected aria-overlay)"
+  ((FAIL_COUNT++))
+fi
+
+# 15. Read cell via aria= prefix (fixed handleRead routing)
+R=$(call_op read '{"selector":"cell=A1"}')
+assert_ok "read cell=A1 via prefix selector" "$R"
+
+# 16. Read cell range A1:C3
+R=$(call_op read '{"selector":"cell=A1:C3"}')
+assert_ok "read cell range A1:C3" "$R"
+
+# 17. Canvas coordinate click (click at pixel 100,100 on the canvas)
+R=$(call_op click '{"selector":"canvas","x":100,"y":100}')
+assert_ok "canvas coordinate click (100,100)" "$R"
+
+# 18. Arrow key navigation on focused canvas
+R=$(call_op press '{"key":"ArrowRight"}')
+assert_ok "press ArrowRight (canvas navigation)" "$R"
+
+R=$(call_op press '{"key":"ArrowDown"}')
+assert_ok "press ArrowDown (canvas navigation)" "$R"
+
 # ---------- summary ----------
 
 TOTAL=$((PASS_COUNT + FAIL_COUNT))

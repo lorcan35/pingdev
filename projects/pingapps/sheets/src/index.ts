@@ -116,7 +116,33 @@ export async function undo(dev: PingDevice): Promise<void> {
 }
 
 /**
+ * Read a range of cell values from the ARIA accessibility overlay.
+ * Ops: read (with cell range syntax)
+ *
+ * Example: readRange(dev, 'A1', 'C5') → { cells: { A1: '...', A2: '...', B1: '...', ... }, count: 15 }
+ */
+export async function readRange(dev: PingDevice, startRef: string, endRef: string): Promise<Record<string, string>> {
+  const result = await dev.op('read', { selector: `cell=${startRef}:${endRef}` });
+  if (!result.ok) throw new Error(`readRange(${startRef}:${endRef}) failed: ${result.error}`);
+  return result.data?.cells ?? {};
+}
+
+/**
+ * Click at specific pixel coordinates on the canvas grid.
+ * Use when ARIA overlay is unavailable or for precise positioning.
+ * Ops: click (with x,y coordinates)
+ *
+ * Example: clickCanvasAt(dev, 150, 200) → clicks at pixel (150, 200) within the canvas
+ */
+export async function clickCanvasAt(dev: PingDevice, x: number, y: number): Promise<void> {
+  const result = await dev.op('click', { selector: selectors.cellGrid[0], x, y });
+  if (!result.ok) throw new Error(`clickCanvasAt(${x}, ${y}) failed: ${result.error}`);
+}
+
+/**
  * Run a recon scan to detect Sheets structure.
+ * Returns canvas info, ARIA overlay status, grid dimensions, cell samples,
+ * selection state, toolbar state, and automation strategy recommendation.
  * Ops: recon
  */
 export async function reconSheets(dev: PingDevice): Promise<any> {
