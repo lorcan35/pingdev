@@ -359,6 +359,93 @@ async function handleDeviceRequest(request: DeviceRequest) {
     }
   }
 
+  // Special handling for 'press' with cdp:true — use Chrome DevTools Protocol
+  // to dispatch TRUSTED keyboard events (isTrusted: true) that canvas apps accept
+  if (command.type === 'press' && (command as any).cdp) {
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      try {
+        const key = command.key;
+        const mods = new Set(((command as any).modifiers ?? []).map((m: string) => m.toLowerCase()));
+        const modifiers = (mods.has('alt') ? 1 : 0) | (mods.has('ctrl') || mods.has('control') ? 2 : 0) |
+          (mods.has('meta') || mods.has('cmd') || mods.has('command') ? 4 : 0) | (mods.has('shift') ? 8 : 0);
+
+        // Map key name to CDP keyIdentifier and codes
+        const text = key.length === 1 ? key : '';
+        const unmodifiedText = text;
+
+        // keyDown
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key,
+          text,
+          unmodifiedText,
+          modifiers,
+          ...(key.length === 1 ? { } : { }),
+        });
+
+        // char event for printable keys
+        if (text) {
+          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+            type: 'char',
+            key,
+            text,
+            unmodifiedText,
+            modifiers,
+          });
+        }
+
+        // keyUp
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key,
+          text: '',
+          unmodifiedText: '',
+          modifiers,
+        });
+
+        await chrome.debugger.detach({ tabId });
+        sendDeviceResponse(requestId, { success: true });
+        return;
+      } catch (debugErr) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        throw debugErr;
+      }
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : 'CDP press failed',
+      });
+      return;
+    }
+  }
+
+  // Special handling for 'type' with cdp:true — type a string via trusted CDP events
+  if (command.type === 'type' && (command as any).cdp) {
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      try {
+        const text = (command as any).text || '';
+        // Use Input.insertText to avoid the character doubling bug.
+        // rawKeyDown + keyUp dispatches both the key event AND triggers the
+        // browser's built-in text insertion, resulting in double characters.
+        await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text });
+        await chrome.debugger.detach({ tabId });
+        sendDeviceResponse(requestId, { success: true });
+        return;
+      } catch (debugErr) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        throw debugErr;
+      }
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : 'CDP type failed',
+      });
+      return;
+    }
+  }
+
   // Forward other commands to content script
   try {
     const response = await chrome.tabs.sendMessage(tabId, {
