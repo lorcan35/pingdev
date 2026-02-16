@@ -568,6 +568,34 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
       }));
   }
 
+  // Input surface discovery — find ALL editable elements including contentEditable
+  recon.inputs = [] as any[];
+  const inputSurfaces = document.querySelectorAll(
+    'input:not([type="hidden"]), textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"], [role="searchbox"]'
+  );
+  for (const el of Array.from(inputSurfaces)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+
+    let bestSel = '';
+    if ((el as HTMLElement).id) bestSel = '#' + (el as HTMLElement).id;
+    else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
+    else if ((el as HTMLInputElement).name) bestSel = `${el.tagName.toLowerCase()}[name="${(el as HTMLInputElement).name}"]`;
+    else if (el.getAttribute('role')) bestSel = `[role="${el.getAttribute('role')}"]`;
+    else bestSel = el.tagName.toLowerCase();
+
+    recon.inputs.push({
+      selector: bestSel,
+      tag: el.tagName.toLowerCase(),
+      type: (el as HTMLInputElement).type || undefined,
+      role: el.getAttribute('role') || undefined,
+      ariaLabel: el.getAttribute('aria-label') || undefined,
+      placeholder: el.getAttribute('placeholder') || undefined,
+      value: ((el as HTMLInputElement).value || el.textContent?.trim() || '').substring(0, 100),
+      contentEditable: (el as HTMLElement).contentEditable === 'true' || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '',
+    });
+  }
+
   // Canvas app detection
   const canvases = Array.from(document.querySelectorAll('canvas'));
   const vpArea = window.innerWidth * window.innerHeight;
@@ -628,22 +656,25 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     }
     if (sampleCells.length > 0) recon.cellSample = sampleCells;
 
-    // Selection state — what's currently selected in the grid
+    // Selection state — detect active cell/selection
+    // Method 1: Name box (Google Sheets — most reliable for non-screen-reader mode)
+    const nameBox = document.querySelector('#t-name-box') as HTMLInputElement | null;
+    const formulaBar = document.getElementById('waffle-rich-text-editor');
+    // Method 2: ARIA selected cells
     const selectedCells = document.querySelectorAll('[role="gridcell"][aria-selected="true"], [aria-current="true"], .cell-selected, [class*="current-cell"]');
-    if (selectedCells.length > 0) {
-      recon.selection = {
-        count: selectedCells.length,
-        cells: Array.from(selectedCells).slice(0, 10).map((el) => {
-          const label = el.getAttribute('aria-label') || '';
-          const refMatch = label.match(/\b([A-Z]+\d+)\b/);
-          return {
-            ref: refMatch ? refMatch[1] : undefined,
-            label: label.substring(0, 60),
-            value: (el.textContent?.trim() || '').substring(0, 100),
-          };
-        }),
-      };
-    }
+    recon.selection = {
+      activeCell: nameBox?.value || undefined,
+      formulaBarValue: (formulaBar?.textContent?.trim() || '').substring(0, 200),
+      ariaCells: selectedCells.length > 0 ? Array.from(selectedCells).slice(0, 10).map((el) => {
+        const label = el.getAttribute('aria-label') || '';
+        const refMatch = label.match(/\b([A-Z]+\d+)\b/);
+        return {
+          ref: refMatch ? refMatch[1] : undefined,
+          label: label.substring(0, 60),
+          value: (el.textContent?.trim() || '').substring(0, 100),
+        };
+      }) : [],
+    };
 
     // Canvas app fingerprinting — identify which app this is
     const url = location.href.toLowerCase();
@@ -670,44 +701,58 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     }
     recon.canvasAppType = appType;
 
-    // Zoom level detection — look for common zoom indicators
-    const zoomEl = document.querySelector('[aria-label*="zoom" i], [aria-label*="Zoom" i], [class*="zoom-level"], [class*="zoomLevel"], [data-zoom]');
+    // Zoom level detection
+    const zoomEl = document.querySelector('input[aria-label*="zoom" i], input[aria-label*="Zoom" i], [aria-label*="zoom" i], [class*="zoom-level"], [class*="zoomLevel"], [data-zoom]');
     if (zoomEl) {
-      const zoomText = zoomEl.textContent?.trim() || zoomEl.getAttribute('aria-valuenow') || zoomEl.getAttribute('data-zoom') || '';
-      const zoomMatch = zoomText.match(/(\d+)\s*%/);
+      // Try .value first (for input elements), then textContent
+      const zoomText = (zoomEl as HTMLInputElement).value || zoomEl.textContent?.trim() || zoomEl.getAttribute('aria-valuenow') || zoomEl.getAttribute('data-zoom') || '';
+      const zoomMatch = zoomText.match(/(\d+)\s*%?/);
       recon.zoomLevel = zoomMatch ? parseInt(zoomMatch[1], 10) : zoomText.substring(0, 20);
     }
 
-    // Vision mode recommendation — flag when ARIA overlay is insufficient
+    // Automation strategy — determine best approach for this canvas app
     const hasGrid = recon.accessibilityOverlay.hasOverlay;
     const hasSufficientCells = recon.accessibilityOverlay.gridcells > 0;
     const hasToolbar = document.querySelectorAll('[role="toolbar"]').length > 0;
-    recon.needsVision = !hasGrid && !hasSufficientCells;
-    recon.automationStrategy = hasGrid && hasSufficientCells
-      ? 'aria-overlay'       // Can automate via ARIA gridcells (Sheets, etc.)
-      : hasToolbar
-        ? 'toolbar-only'     // Can automate toolbar but need vision for canvas content (Figma, etc.)
-        : 'vision-required'; // No ARIA overlay, need screenshot + vision model (Maps, games, etc.)
-  }
+    const hasNameBox = !!document.querySelector('#t-name-box, [role="combobox"][aria-label*="Name"], input[aria-label*="cell" i]');
+    const hasFormulaBar = !!document.querySelector('#waffle-rich-text-editor, [role="combobox"][contenteditable], #cell-input, [aria-label*="formula" i]');
 
-  // Toolbar state — which buttons are active/pressed (works for both canvas and non-canvas apps)
-  const toolbarButtons = document.querySelectorAll('[role="toolbar"] [role="button"], [role="toolbar"] button');
-  const activeButtons: Array<{ label: string; pressed: boolean; selector: string }> = [];
-  for (const btn of Array.from(toolbarButtons)) {
-    const pressed = btn.getAttribute('aria-pressed') === 'true' ||
-      btn.getAttribute('aria-checked') === 'true' ||
-      btn.classList.contains('active') ||
-      btn.classList.contains('selected');
-    if (pressed) {
-      const label = btn.getAttribute('aria-label') || btn.textContent?.trim() || '';
-      activeButtons.push({
-        label: label.substring(0, 40),
-        pressed: true,
-        selector: btn.id ? `#${btn.id}` : `[aria-label="${(btn.getAttribute('aria-label') || '').replace(/"/g, '\\"')}"]`,
-      });
+    if (hasGrid && hasSufficientCells) {
+      recon.automationStrategy = 'aria-overlay';       // ARIA gridcells available (screen reader mode)
+      recon.needsVision = false;
+    } else if (hasNameBox && hasFormulaBar) {
+      recon.automationStrategy = 'name-box-formula-bar'; // Sheets-style: navigate via name box, edit via formula bar
+      recon.needsVision = false;
+    } else if (hasToolbar) {
+      recon.automationStrategy = 'toolbar-only';        // Can automate toolbar but need vision for canvas content
+      recon.needsVision = true;
+    } else {
+      recon.automationStrategy = 'vision-required';     // No ARIA overlay, need screenshot + vision model
+      recon.needsVision = true;
     }
   }
-  if (activeButtons.length > 0) recon.toolbarState = activeButtons;
+
+  // Key elements — identify critical interaction points for the detected app
+  recon.keyElements = {} as any;
+  const nbEl = document.querySelector('#t-name-box, input[aria-label*="Name Box" i], input[aria-label*="cell reference" i]');
+  if (nbEl) recon.keyElements.cellNavigator = { selector: nbEl.id ? `#${nbEl.id}` : 'input[aria-label*="Name Box"]', tag: nbEl.tagName.toLowerCase(), value: (nbEl as HTMLInputElement).value || '' };
+  const fbEl = document.querySelector('#waffle-rich-text-editor, #cell-input, [role="combobox"][contenteditable="true"]');
+  if (fbEl) recon.keyElements.formulaBar = { selector: fbEl.id ? `#${fbEl.id}` : '[role="combobox"][contenteditable]', tag: fbEl.tagName.toLowerCase(), contentEditable: true };
+  const gridEl = document.querySelector('canvas') || document.querySelector('[role="grid"]');
+  if (gridEl) recon.keyElements.grid = { selector: gridEl.id ? `#${gridEl.id}` : gridEl.tagName.toLowerCase(), tag: gridEl.tagName.toLowerCase() };
+  const addRowEl = document.querySelector('input[aria-label*="rows to add" i], input[aria-label*="add row" i]');
+  if (addRowEl) recon.keyElements.addRows = { selector: addRowEl.getAttribute('aria-label') ? `input[aria-label="${addRowEl.getAttribute('aria-label')}"]` : 'input', value: (addRowEl as HTMLInputElement).value || '' };
+
+  // Toolbar state — report state of toggle-able buttons (bold, italic, etc.)
+  const toolbarButtons = document.querySelectorAll('[role="toolbar"] [role="button"][aria-pressed], [role="toolbar"] [role="button"][aria-checked]');
+  recon.toolbarState = Array.from(toolbarButtons).slice(0, 30).map((btn) => {
+    const label = btn.getAttribute('aria-label') || btn.textContent?.trim() || '';
+    return {
+      label: label.substring(0, 40),
+      pressed: btn.getAttribute('aria-pressed') === 'true' || btn.getAttribute('aria-checked') === 'true',
+      selector: btn.id ? `#${btn.id}` : `[aria-label="${(btn.getAttribute('aria-label') || '').replace(/"/g, '\\"')}"]`,
+    };
+  });
 
   // ARIA landmarks
   recon.ariaLandmarks = {
@@ -867,41 +912,61 @@ async function typeInto(el: HTMLInputElement | HTMLTextAreaElement | HTMLElement
     return;
   }
 
-  // Contenteditable path (ProseMirror/CodeMirror/etc)
+  // ContentEditable path — works for Google Sheets formula bar, ProseMirror, etc.
+  // Canvas apps like Sheets check isTrusted on keyboard events, so we bypass
+  // keyboard simulation entirely and manipulate the DOM directly.
   el.focus();
 
-  // Select all contents then insert text to mimic replacement.
+  // Select all existing content first
   const range = document.createRange();
   range.selectNodeContents(el);
   const sel = window.getSelection();
   sel?.removeAllRanges();
   sel?.addRange(range);
 
-  // Try execCommand first (widely supported in editors).
-  let ok = false;
+  // Strategy 1: execCommand insertText (creates an undoable action, works in most editors)
+  let inserted = false;
   try {
-    ok = document.execCommand('insertText', false, text);
+    inserted = document.execCommand('insertText', false, text);
   } catch {
-    ok = false;
+    inserted = false;
   }
 
-  if (!ok) {
-    // Fallback: set textContent and dispatch input.
-    el.textContent = text;
+  // Strategy 2: Direct DOM manipulation (for apps that block execCommand)
+  if (!inserted) {
+    // Clear existing content
+    while (el.firstChild) el.removeChild(el.firstChild);
+    // Insert text node
+    el.appendChild(document.createTextNode(text));
+    // Move cursor to end
+    const endRange = document.createRange();
+    endRange.selectNodeContents(el);
+    endRange.collapse(false);
+    sel?.removeAllRanges();
+    sel?.addRange(endRange);
   }
 
+  // Dispatch input events that apps listen for
   try {
-    el.dispatchEvent(
-      new InputEvent('input', {
-        bubbles: true,
-        cancelable: true,
-        data: text,
-        inputType: 'insertReplacementText',
-      }),
-    );
+    el.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      cancelable: true,
+      data: text,
+      inputType: 'insertReplacementText',
+    }));
   } catch {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
+
+  // Also dispatch beforeinput for apps that use it (Google Sheets)
+  try {
+    el.dispatchEvent(new InputEvent('beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      data: text,
+      inputType: 'insertReplacementText',
+    }));
+  } catch { /* ignore */ }
 }
 
 function readText(el: Element): string {
