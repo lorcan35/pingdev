@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-02-16T14:33:00+04:00",
+  "status": "build_passed_pending_commit",
+  "tasks": {
+    "std_app_routes": "done",
+    "extension_reconnect": "done",
+    "gateway_crash_resilience": "done",
+    "skill_scripts": "done",
+    "skill_docs": "done",
+    "builds": "done",
+    "commits": "pending"
+  },
+  "notes": [
+    "chrome-extension and std builds pass clean.",
+    "Applied Claude selector fix, Amazon price cleanup, AliExpress locale enforcement, and websocket reconnect hardening.",
+    "Skill automation scripts updated: extension reload now gateway-aware; gateway restart now triggers extension reconnect."
+  ]
+}

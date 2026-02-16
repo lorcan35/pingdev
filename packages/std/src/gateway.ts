@@ -4,6 +4,7 @@
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { pathToFileURL } from 'node:url';
+import { appendFileSync } from 'node:fs';
 import { ModelRegistry } from './registry.js';
 import { mapErrnoToHttp } from './errors.js';
 import type { DeviceRequest, DeviceResponse, PingError } from './types.js';
@@ -32,6 +33,34 @@ interface ChatBody extends PromptBody {
   messages?: DeviceRequest['messages'];
 }
 
+const CRASH_LOG_PATH = '/tmp/pingos-crash.log';
+let crashHandlersInstalled = false;
+
+function appendCrashLog(event: string, err: unknown) {
+  const ts = new Date().toISOString();
+  const payload = err instanceof Error ? (err.stack || err.message) : String(err);
+  try {
+    appendFileSync(CRASH_LOG_PATH, `[${ts}] ${event}: ${payload}
+`);
+  } catch {
+    // ignore secondary logging failures
+  }
+  logGateway('[gw] crash-resilience', { event, error: serializeError(err) });
+}
+
+function setupCrashResilience() {
+  if (crashHandlersInstalled) return;
+  crashHandlersInstalled = true;
+
+  process.on('uncaughtException', (err) => {
+    appendCrashLog('uncaughtException', err);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    appendCrashLog('unhandledRejection', reason);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Gateway
 // ---------------------------------------------------------------------------
@@ -44,6 +73,8 @@ export interface GatewayOptions {
 }
 
 export async function createGateway(opts: GatewayOptions): Promise<FastifyInstance> {
+  setupCrashResilience();
+
   // Default to IPv6 any-address so `localhost` (which often resolves to ::1 in Chrome)
   // can connect. On Linux this is typically dual-stack and will also accept IPv4.
   const { registry, port = 3500, host = '::' } = opts;
