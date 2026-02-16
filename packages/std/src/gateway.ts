@@ -12,6 +12,7 @@ import { logGateway, serializeError } from './gw-log.js';
 import { loadConfig } from './config.js';
 import { SelectorCache } from './selector-cache.js';
 import { attemptHeal, configureSelfHeal } from './self-heal.js';
+import { registerAppRoutes } from './app-routes.js';
 
 // ---------------------------------------------------------------------------
 // Request / Reply schemas
@@ -391,6 +392,11 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       }
     }
   });
+
+  // Register PingApp routes
+  const gatewayUrl = `http://localhost:${port}`;
+  registerAppRoutes(app, gatewayUrl);
+  logGateway('[gw] app routes registered', { apps: ['aliexpress'] });
 
   logGateway('[gw] listening', { host, port });
   await app.listen({ port, host });
