@@ -169,22 +169,31 @@ function findElement(selector: string): Element | null {
   // aria= prefix: find by aria-label
   if (selector.startsWith('aria=')) {
     const label = selector.slice(5);
-    return document.querySelector(`[aria-label="${label}"]`) ??
-      document.querySelector(`[aria-label*="${label}"]`) ??
+    const escaped = label.replace(/["\\]/g, '\\$&');
+    return document.querySelector(`[aria-label="${escaped}"]`) ??
+      document.querySelector(`[aria-label*="${escaped}"]`) ??
       null;
   }
 
   // cell= prefix: find spreadsheet/table cell by coordinates (e.g. cell=A1 or cell=R1C1)
   if (selector.startsWith('cell=')) {
     const ref = selector.slice(5).toUpperCase();
-    // Try aria-label match first (Google Sheets uses this)
-    const byLabel = document.querySelector(`[aria-label*="${ref}"]`);
-    if (byLabel) return byLabel;
+    const escaped = ref.replace(/["\\]/g, '\\$&');
+    // Try exact aria-label match first (Google Sheets uses labels like "A1" or "Cell A1")
+    const byExact = document.querySelector(`[aria-label="${escaped}"]`);
+    if (byExact) return byExact;
+    // Try contains match but verify it's the right cell (avoid A1 matching A10)
+    const candidates = document.querySelectorAll(`[aria-label*="${escaped}"]`);
+    for (const el of Array.from(candidates)) {
+      const label = el.getAttribute('aria-label') || '';
+      // Match if label equals ref, or ref appears as a whole token (followed by non-alphanumeric or end)
+      if (label === ref || new RegExp(`\\b${ref}\\b`, 'i').test(label)) return el;
+    }
     // Try data-cell attribute
-    const byData = document.querySelector(`[data-cell="${ref}"]`);
+    const byData = document.querySelector(`[data-cell="${escaped}"]`);
     if (byData) return byData;
     // Try td with matching id
-    const byId = document.querySelector(`td[id*="${ref}"], th[id*="${ref}"]`);
+    const byId = document.querySelector(`td[id*="${escaped}"], th[id*="${escaped}"]`);
     if (byId) return byId;
     return null;
   }
@@ -457,10 +466,12 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
   // Canvas app detection
   const canvases = Array.from(document.querySelectorAll('canvas'));
   const vpArea = window.innerWidth * window.innerHeight;
-  const bigCanvas = canvases.find((c) => {
-    const r = c.getBoundingClientRect();
-    return (r.width * r.height) / vpArea > 0.5;
-  });
+  const bigCanvas = vpArea > 0
+    ? canvases.find((c) => {
+        const r = c.getBoundingClientRect();
+        return (r.width * r.height) / vpArea > 0.5;
+      })
+    : undefined;
   recon.canvasApp = !!bigCanvas;
 
   if (recon.canvasApp) {
@@ -883,8 +894,14 @@ async function handleSelect(command: {
     if (!endEl) return { success: false, error: `End element not found: ${to}` };
 
     const range = document.createRange();
-    range.setStart(startEl.firstChild || startEl, startOffset ?? 0);
-    range.setEnd(endEl.firstChild || endEl, endOffset ?? (endEl.textContent?.length ?? 0));
+    const startNode = startEl.firstChild || startEl;
+    range.setStart(startNode, startOffset ?? 0);
+    const endNode = endEl.firstChild || endEl;
+    // For text nodes, max offset is text length; for elements, max offset is childNodes.length
+    const defaultEndOffset = endNode.nodeType === Node.TEXT_NODE
+      ? (endNode.textContent?.length ?? 0)
+      : endNode.childNodes.length;
+    range.setEnd(endNode, endOffset ?? defaultEndOffset);
 
     const sel = window.getSelection();
     sel?.removeAllRanges();
