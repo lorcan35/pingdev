@@ -8,6 +8,7 @@ This document catalogs every driver adapter in PingOS, including capability matr
 
 - [Overview](#overview)
 - [Capability Matrix](#capability-matrix)
+- [Chrome Extension Driver (Authenticated Tabs)](#chrome-extension-driver-authenticated-tabs)
 - [PingApp Drivers](#pingapp-drivers)
   - [Gemini](#gemini)
   - [AI Studio](#ai-studio)
@@ -21,13 +22,24 @@ This document catalogs every driver adapter in PingOS, including capability matr
 
 ## Overview
 
-PingOS has three driver types, each with a dedicated adapter class:
+PingOS has two execution families:
+
+1. **Registry-backed drivers** (first-class `Driver` implementations)
+2. **Extension-backed devices** (authenticated Chrome tabs exposed as `chrome-{tabId}`)
+
+Registry-backed drivers have three types, each with a dedicated adapter class:
 
 | Adapter Class | Backend Type | Protocol | Auth | Use for |
 |---------------|-------------|----------|------|---------|
 | `PingAppAdapter` | `pingapp` | PingApp HTTP API (`/v1/chat`, `/v1/health`) | None (browser session) | Browser-automated website shims |
 | `OpenAICompatAdapter` | `api` / `local` | OpenAI Chat Completions API (`/v1/chat/completions`) | Bearer token (optional) | Ollama, LM Studio, OpenRouter, OpenAI, Groq, Together, Mistral, vLLM |
 | `AnthropicAdapter` | `api` | Anthropic Messages API (`/v1/messages`) | `x-api-key` header | Anthropic Claude models |
+
+In addition, PingOS includes a **Chrome Extension Auth Bridge** (gateway-side class: `ExtensionBridge`) which is not a `Driver` in the registry, but exposes *shared Chrome tabs* as runtime devices:
+
+| Component | Device IDs | Transport | Auth | Use for |
+|-----------|-----------|-----------|------|---------|
+| `ExtensionBridge` + Chrome MV3 extension | `chrome-{tabId}` | WebSocket `/ext` + content script | Your real Chrome session | Automating authenticated sites in a real user tab |
 
 ---
 
@@ -46,6 +58,8 @@ Full capability comparison across all current drivers:
 | `deepResearch` | Yes | No | Yes | No | No | No |
 | `thinking` | Yes | Yes | Yes | DeepSeek/Qwen | o1/o3 | Claude 3.5+ |
 
+> Note: extension-backed tab devices are *operation* based (read/click/type/extract/eval) rather than capability routed LLM backends, so they are not included in the capability matrix.
+
 ### Operational characteristics
 
 | Characteristic | PingApp Drivers | API Drivers |
@@ -60,6 +74,59 @@ Full capability comparison across all current drivers:
 ---
 
 ## PingApp Drivers
+
+---
+
+## Chrome Extension Driver (Authenticated Tabs)
+
+The Chrome extension bridge turns any *user-controlled*, *logged-in* Chrome tab into a PingOS device.
+
+### How tabs become devices
+
+1. Start the gateway (port `3500`).
+2. Load the extension from `packages/chrome-extension/dist/` in `chrome://extensions`.
+3. Open the extension popup and **share** a tab.
+4. The shared tab becomes addressable as:
+
+- `chrome-{tabId}` (example: `chrome-2114771645`)
+
+The gateway maintains an ownership map of `deviceId → clientId` based on the extension's `hello` and `share_update` WebSocket messages.
+
+### Operations
+
+Once a tab is shared, you can call:
+
+- `POST /v1/dev/chrome-{tabId}/read`
+- `POST /v1/dev/chrome-{tabId}/click`
+- `POST /v1/dev/chrome-{tabId}/type`
+- `POST /v1/dev/chrome-{tabId}/extract`
+- `POST /v1/dev/chrome-{tabId}/eval`
+
+See [`docs/API.md`](API.md) for request/response schemas and working curl examples.
+
+### Passive driver generator (recorder → `defineSite()`)
+
+The extension includes a passive recorder in the content script:
+
+- Records user interactions (clicks, typing, navigation)
+- Generates a starter `defineSite()` / selector map based on what you did
+
+This is intended as a fast path from **"manual exploration"** → **"compiled PingApp"**:
+
+1. Record a happy-path interaction in a real authenticated tab
+2. Export the generated `defineSite()` scaffold
+3. Feed it into the PingApp generator / recon pipeline as a starting point
+
+### PingApp drivers (CDP) vs Extension driver (real browser)
+
+| Aspect | PingApp Drivers | Extension-backed Tabs |
+|-------|------------------|------------------------|
+| Browser context | Managed CDP/Playwright session | Your actual Chrome tab |
+| Auth | Often requires scripted login or persisted cookies | Uses existing user auth (MFA/SSO already solved) |
+| API surface | High-level `llm/chat` (site-specific) | Low-level DOM ops (`read/click/type/extract/eval`) |
+| Determinism | High (compiled selectors + state machines) | Medium (DOM automation in a live tab) |
+| Best for | Productionized deterministic shims | Bootstrapping, auth-heavy sites, debugging |
+| Scaling | Limited by PingApp concurrency (usually 1/tab) | Limited by number of user tabs shared |
 
 ### Gemini
 

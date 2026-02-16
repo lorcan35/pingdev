@@ -55,3 +55,17 @@ export type {
 
 export { createGateway } from './gateway.js';
 export type { GatewayOptions } from './gateway.js';
+
+export { ExtensionBridge } from './ext-bridge.js';
+export type { ExtSharedTab, ExtHello, ExtShareUpdate, ExtDeviceRequest, ExtDeviceResponse } from './ext-bridge.js';
+
+// Phase 4: JIT selector self-healing
+export { SelectorCache } from './selector-cache.js';
+export type { SelectorCacheEntry, SelectorCacheFile, SelectorCacheOptions } from './selector-cache.js';
+
+export {
+  attemptHeal,
+  configureSelfHeal,
+  DEFAULT_SELF_HEAL_CONFIG,
+} from './self-heal.js';
+export type { HealRequest, HealResult, SelfHealConfig } from './self-heal.js';

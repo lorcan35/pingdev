@@ -51,6 +51,7 @@ graph TB
         Registry["ModelRegistry"]
         Health["Health Monitor"]
         Strategies["Routing Strategies<br/>best · fastest · cheapest · round-robin"]
+        ExtBridge["ExtensionBridge<br/>WebSocket /ext"]
     end
 
     subgraph Drivers["Driver Adapters"]
@@ -80,6 +81,12 @@ graph TB
         LMS["LM Studio :1234"]
     end
 
+    subgraph Chrome["Authenticated Chrome (User)"]
+        CExt["Chrome MV3 Extension"]
+        CTab["Shared Tab<br/>chrome-{tabId}"]
+        CS["Content Script"]
+    end
+
     CLI --> Router
     SDK --> Router
     Agent --> Router
@@ -87,6 +94,8 @@ graph TB
     Router --> Registry
     Registry --> Strategies
     Registry --> Health
+
+    Router --> ExtBridge
 
     Router --> PA
     Router --> OAI
@@ -98,11 +107,24 @@ graph TB
 
     Gemini --> FastifyS --> BullMQ --> WorkerP --> CDPB --> SM
 
+    ExtBridge <--> |"WS /ext"| CExt
+    CExt --> |"sendMessage"| CS --> CTab
+
     OAI --> Ollama
     OAI --> OpenAI
     OAI --> LMS
     ANT --> AnthropicAPI
 ```
+
+### Chrome Extension Auth Bridge (authenticated tabs)
+
+PingOS can also control a **real logged-in Chrome tab** via the MV3 extension bridge:
+
+- The gateway exposes `ws://localhost:3500/ext` and maintains an ownership map of shared tabs.
+- Shared tabs become devices named `chrome-{tabId}`.
+- HTTP requests to `/v1/dev/chrome-{tabId}/{op}` are forwarded: gateway → WS `/ext` → extension → content script → DOM.
+
+This path is ideal for auth-heavy sites (SSO/MFA) and for recording real interactions to bootstrap PingApps.
 
 ---
 
@@ -130,6 +152,7 @@ A Driver is any backend that can handle a `DeviceRequest` and return a `DeviceRe
 | `pingapp` | Gemini, AI Studio, ChatGPT | HTTP → BullMQ → CDP browser automation | Single (1 browser tab) |
 | `api` | OpenAI, Anthropic, OpenRouter | Direct HTTP API call | High (parallel) |
 | `local` | Ollama, LM Studio | Local inference server (OpenAI-compatible) | Depends on hardware |
+| `extension` | `chrome-{tabId}` shared tabs | HTTP → WS `/ext` → content script DOM ops | Per shared tab |
 
 ### Capabilities
 
@@ -317,6 +340,36 @@ curl -s http://localhost:3500/v1/dev/llm/prompt \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Say hello"}' | jq .text
 # "Hello! How can I help you today?"
+```
+
+### Step 8 (Optional): Load the Chrome Extension Auth Bridge
+
+This enables controlling an *already-authenticated* Chrome tab via device IDs like `chrome-{tabId}`.
+
+#### Build + load the extension
+
+```bash
+cd packages/chrome-extension
+npm run build
+```
+
+Then:
+
+1. Open `chrome://extensions/`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select `packages/chrome-extension/dist/`
+
+#### Share a tab + test
+
+1. Open the extension popup
+2. Toggle **Share** on the tab you want
+3. Use the device ID shown in the popup (`chrome-{tabId}`)
+
+```bash
+# Example: read a DOM node from a shared tab
+curl -X POST http://localhost:3500/v1/dev/chrome-2114771645/read \
+  -d '{"selector":"h1"}'
 ```
 
 You're up and running.
@@ -656,6 +709,7 @@ packages/
 | [Architecture](docs/ARCHITECTURE.md) | System design, data flows, capability routing, browser lifecycle |
 | [API Reference](docs/API.md) | Full HTTP API with schemas, examples, and error codes |
 | [Drivers](docs/DRIVERS.md) | Driver catalog with capabilities, config, and limitations |
+| [Chrome Extension Bridge](packages/chrome-extension/README.md) | Authenticated tab devices (`chrome-{tabId}`), WS `/ext` protocol, recorder |
 | [Contributing](docs/CONTRIBUTING.md) | How to add drivers and PingApps, code style, PR process |
 | [Phase 1 Requirements](requirements/PHASE1.md) | Architecture decisions, success criteria, build order |
 | [Changelog](CHANGELOG.md) | Version history |

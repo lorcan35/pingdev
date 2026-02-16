@@ -10,8 +10,16 @@ The PingOS gateway exposes a POSIX-inspired HTTP API for routing requests to LLM
 
 - [POST /v1/dev/llm/prompt](#post-v1devllmprompt)
 - [POST /v1/dev/llm/chat](#post-v1devllmchat)
+- [POST /v1/dev/:device/:op](#post-v1devdeviceop)
+- [Chrome Extension Devices (`chrome-{tabId}`)](#chrome-extension-devices-chrome-tabid)
+  - [op: `read`](#op-read)
+  - [op: `click`](#op-click)
+  - [op: `type`](#op-type)
+  - [op: `extract`](#op-extract)
+  - [op: `eval`](#op-eval)
 - [GET /v1/registry](#get-v1registry)
 - [GET /v1/health](#get-v1health)
+- [WebSocket `/ext` (Chrome Extension Bridge)](#websocket-ext-chrome-extension-bridge)
 - [Common Request Fields](#common-request-fields)
 - [Response Schema](#response-schema)
 - [Error Reference](#error-reference)
@@ -221,6 +229,163 @@ Same as [/v1/dev/llm/prompt](#error-cases), plus:
 
 ---
 
+## POST /v1/dev/:device/:op
+
+Generic device operation endpoint.
+
+This route is the gateway's unified "device file" interface:
+
+- If the device is **owned by the Chrome extension bridge**, the request is forwarded over WebSocket `/ext` to the owning extension client.
+- Otherwise, the gateway falls back to built-in device handlers (currently only `llm/prompt` + `llm/chat`).
+
+### Request
+
+```http
+POST /v1/dev/:device/:op
+Content-Type: application/json
+
+{ ... }
+```
+
+### Response (Extension-owned device)
+
+```json
+{ "ok": true, "result": "..." }
+```
+
+### Response (Unknown device)
+
+```json
+{
+  "errno": "ENODEV",
+  "code": "ping.gateway.device_not_found",
+  "message": "Device <device> not found",
+  "retryable": false
+}
+```
+
+---
+
+## Chrome Extension Devices (`chrome-{tabId}`)
+
+When the PingOS Chrome extension is connected and a tab is **shared** in the extension popup, that tab becomes an addressable device:
+
+- Device ID format: `chrome-{tabId}` (example: `chrome-2114771645`)
+- Execution path:
+  - HTTP `POST /v1/dev/chrome-{tabId}/{op}` → gateway → WS `/ext` → extension background → content script → DOM
+
+If the tab is not shared (or the extension is not connected), the gateway returns `ENODEV`.
+
+Operational notes:
+
+- The gateway correlates each forwarded command with a `requestId` over `/ext` and applies a timeout (currently ~20 seconds). Timeouts return `ETIMEDOUT`.
+- If the extension reports an execution error, the gateway returns `EIO`.
+
+All operations below use the same base form:
+
+```bash
+curl -sS -X POST http://localhost:3500/v1/dev/chrome-<tabId>/<op> \
+  -H 'Content-Type: application/json' \
+  -d '{ ... }'
+```
+
+### op: `read`
+
+Read `textContent` from the first element matching `selector`.
+
+**Request body**:
+
+```json
+{ "selector": "h1" }
+```
+
+**Example** (E2E):
+
+```bash
+curl -X POST http://localhost:3500/v1/dev/chrome-2114771645/read \
+  -d '{"selector":"h1"}'
+```
+
+**Response**:
+
+```json
+{ "ok": true, "result": "Example Domain" }
+```
+
+### op: `click`
+
+Click the first element matching `selector`.
+
+**Request body**:
+
+```json
+{ "selector": "button[type=submit]" }
+```
+
+**Example**:
+
+```bash
+curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/click \
+  -H 'Content-Type: application/json' \
+  -d '{"selector":"#submit"}' | jq .
+```
+
+### op: `type`
+
+Type text into an input/textarea matching `selector`.
+
+**Request body**:
+
+```json
+{ "selector": "input[name=\"q\"]", "text": "pingos" }
+```
+
+**Example**:
+
+```bash
+curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/type \
+  -H 'Content-Type: application/json' \
+  -d '{"selector":"input[name=\"q\"]","text":"pingos"}' | jq .
+```
+
+### op: `extract`
+
+Extract structured text fields using a selector map (`schema`).
+
+**Request body**:
+
+```json
+{ "schema": { "title": "h1", "price": ".price" } }
+```
+
+**Example**:
+
+```bash
+curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/extract \
+  -H 'Content-Type: application/json' \
+  -d '{"schema":{"title":"h1","price":".price"}}' | jq .
+```
+
+### op: `eval`
+
+Evaluate JavaScript in the page context.
+
+**Request body**:
+
+```json
+{ "code": "return document.title" }
+```
+
+**Example**:
+
+```bash
+curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/eval \
+  -H 'Content-Type: application/json' \
+  -d '{"code":"return document.title"}' | jq .
+```
+
+---
+
 ## GET /v1/registry
 
 List all registered drivers with their capabilities, backend type, endpoint, and priority.
@@ -365,6 +530,79 @@ curl -s http://localhost:3500/v1/health | jq .
 ```
 
 This endpoint always returns 200 if the gateway process is running. For individual driver health, check the driver's own health endpoint (e.g., `curl http://localhost:3456/v1/health` for the Gemini PingApp).
+
+---
+
+## WebSocket `/ext` (Chrome Extension Bridge)
+
+The gateway exposes a WebSocket endpoint at:
+
+- `ws://localhost:3500/ext`
+
+This is used by the PingOS Chrome extension (MV3) to:
+
+1. Announce which tabs are shared as devices (`chrome-{tabId}`)
+2. Receive device commands from the gateway
+3. Send command results back to the gateway
+
+### Messages (Extension → Gateway)
+
+**hello** (sent immediately on connect):
+
+```json
+{
+  "type": "hello",
+  "clientId": "uuid",
+  "version": "0.1.0",
+  "tabs": [
+    { "deviceId": "chrome-123", "tabId": 123, "url": "https://example.com", "title": "Example" }
+  ]
+}
+```
+
+**share_update** (sent when the user shares/unshares tabs):
+
+```json
+{
+  "type": "share_update",
+  "clientId": "uuid",
+  "tabs": [
+    { "deviceId": "chrome-123", "tabId": 123, "url": "https://example.com", "title": "Example" }
+  ]
+}
+```
+
+**device_response** (response to a gateway command):
+
+```json
+{
+  "type": "device_response",
+  "id": "request-uuid",
+  "ok": true,
+  "result": "..."
+}
+```
+
+### Messages (Gateway → Extension)
+
+**device_request** (execute an operation):
+
+```json
+{
+  "type": "device_request",
+  "requestId": "request-uuid",
+  "device": "chrome-123",
+  "command": {
+    "type": "read",
+    "selector": "h1"
+  }
+}
+```
+
+### Ownership and routing
+
+- The gateway considers a device "extension-owned" when it appears in the most recent `hello` / `share_update` tab list.
+- For extension-owned devices, `POST /v1/dev/:device/:op` is forwarded to the owning extension client.
 
 ---
 

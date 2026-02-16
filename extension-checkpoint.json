@@ -1,0 +1,116 @@
+{
+  "date": "2026-02-15",
+  "status": "IMPLEMENTATION COMPLETE — INTEGRATION PENDING",
+  "summary": "All 4 core components built. Gateway-side bridge compiles and tests pass. Extension code complete but needs workspace registration for TypeScript compilation.",
+  "completed": [
+    "Chrome Extension Core (Manifest V3) — all source files created",
+    "Auth Bridge — WebSocket client in background.ts, content script command execution",
+    "Passive Driver Generator — interaction recorder + defineSite() export in content.ts",
+    "Gateway WebSocket Endpoint — ExtensionBridge class + /v1/dev/:device/:op route + tests"
+  ],
+  "files_created": {
+    "gateway_integration": [
+      "packages/std/src/ext-bridge.ts",
+      "packages/std/src/__tests__/ext-bridge.test.ts"
+    ],
+    "gateway_modified": [
+      "packages/std/src/gateway.ts (added WebSocket upgrade, generic device route)",
+      "packages/std/src/index.ts (exported ExtensionBridge + types)",
+      "packages/std/package.json (added ws@^8.18.3, @types/ws devDep)"
+    ],
+    "extension_package": [
+      "packages/chrome-extension/src/background.ts",
+      "packages/chrome-extension/src/popup.ts",
+      "packages/chrome-extension/src/content.ts",
+      "packages/chrome-extension/src/protocol.ts",
+      "packages/chrome-extension/public/manifest.json",
+      "packages/chrome-extension/public/popup.html",
+      "packages/chrome-extension/package.json",
+      "packages/chrome-extension/tsconfig.json"
+    ],
+    "root": [
+      "tsconfig.json (excluded packages/chrome-extension from root lint)",
+      "EXTENSION-BUILD-LOG.md"
+    ]
+  },
+  "compilation_status": {
+    "packages/std": "✅ COMPILES — tests pass",
+    "packages/chrome-extension": "⚠️  NEEDS WORKSPACE REGISTRATION — @types/chrome not installed"
+  },
+  "next_steps": [
+    {
+      "step": 1,
+      "action": "Register chrome-extension workspace in root package.json",
+      "details": "Ensure 'packages/*' workspace glob includes chrome-extension or add it explicitly"
+    },
+    {
+      "step": 2,
+      "action": "Install dependencies",
+      "command": "npm install"
+    },
+    {
+      "step": 3,
+      "action": "Compile extension",
+      "command": "cd packages/chrome-extension && npm run build"
+    },
+    {
+      "step": 4,
+      "action": "Load extension in Chrome",
+      "details": "chrome://extensions → Developer mode ON → Load unpacked → select packages/chrome-extension/dist/"
+    },
+    {
+      "step": 5,
+      "action": "Start gateway with extension bridge",
+      "code_example": "import { createGateway, ModelRegistry, ExtensionBridge } from '@pingdev/std';\nconst registry = new ModelRegistry('best');\nconst extBridge = new ExtensionBridge();\nconst app = await createGateway({ port: 3500, registry, extBridge });"
+    },
+    {
+      "step": 6,
+      "action": "Test end-to-end flow",
+      "details": [
+        "Open extension popup, click 'Share Tab' on a test page",
+        "POST http://localhost:3500/v1/dev/tab-123/click with { selector: '#button' }",
+        "Verify click executes on the tab and response returns { ok: true, result: { clicked: true } }"
+      ]
+    },
+    {
+      "step": 7,
+      "action": "Run integration tests",
+      "command": "cd packages/std && npm test -- ext-bridge.test.ts"
+    }
+  ],
+  "architecture_summary": {
+    "extension_to_gateway_flow": [
+      "1. Extension background.ts connects WebSocket to ws://localhost:3500/ext",
+      "2. Sends ExtHello with clientId + list of shared tabs (deviceId: tab-${tabId})",
+      "3. Gateway ExtensionBridge tracks device ownership: deviceId → clientId"
+    ],
+    "http_request_flow": [
+      "1. HTTP POST /v1/dev/tab-123/click { selector: '#btn' }",
+      "2. Gateway checks extBridge.ownsDevice('tab-123')",
+      "3. If yes: extBridge.callDevice() sends ExtDeviceRequest via WebSocket",
+      "4. Extension background.ts routes to chrome.tabs.sendMessage(tabId, { type: 'bridge_command', op: 'click', payload })",
+      "5. Content script executes click, sends response back via sendResponse",
+      "6. Background forwards ExtDeviceResponse to gateway via WebSocket",
+      "7. Gateway returns HTTP 200 { ok: true, result: { clicked: true } }"
+    ],
+    "passive_recorder_flow": [
+      "1. Content script observes clicks, typing, navigation",
+      "2. Records events to chrome.storage.local with best-effort selectors",
+      "3. Popup 'Export' button triggers passive:get_export message",
+      "4. Content script builds defineSite() code from recorded events",
+      "5. Returns TypeScript code, popup copies to clipboard"
+    ]
+  },
+  "testing": {
+    "gateway_tests": "packages/std/src/__tests__/ext-bridge.test.ts — 5 test suites covering WebSocket connection, share updates, request/response, timeout, cleanup",
+    "extension_tests": "None (manual testing required for Chrome extension UI + runtime)"
+  },
+  "notes": [
+    "Extension uses ES2022 module syntax, requires Chrome MV3 service worker support",
+    "Password fields are redacted as '<redacted>' in passive recorder",
+    "Navigation tracking uses history.pushState/replaceState monkeypatching for SPA support",
+    "WebSocket reconnection is automatic with 1.5s backoff",
+    "Device ownership is cleared on WebSocket disconnect",
+    "Generic /v1/dev/:device/:op route falls back to existing LLM routes for backward compat"
+  ]
+}

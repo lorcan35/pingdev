@@ -1,0 +1,24 @@
+{
+  "name": "@pingdev/chrome-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PingOS Chrome Extension — Auth Bridge + passive driver generator",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "clean": "rm -rf dist",
+    "pack": "npm run build && cd dist && zip -r ../extension.zip .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.279",
+    "@types/node": "^20.12.7",
+    "esbuild": "^0.20.2",
+    "jsdom": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^1.5.0",
+    "ws": "^8.17.0"
+  }
+}

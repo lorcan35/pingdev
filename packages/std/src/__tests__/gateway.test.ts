@@ -3,22 +3,80 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import http from 'node:http';
 import { createGateway } from '../gateway.js';
 import { ModelRegistry } from '../registry.js';
 import { PingAppAdapter } from '../drivers/pingapp-adapter.js';
 
-const GATEWAY_PORT = 3500;
+// Use an ephemeral port to avoid conflicts with a dev gateway running locally.
+const GATEWAY_PORT = 0;
 const GEMINI_ENDPOINT = 'http://localhost:3456';
-const BASE = `http://localhost:${GATEWAY_PORT}`;
+let BASE = '';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
 let app: FastifyInstance;
 let registry: ModelRegistry;
+let mockPingApp: http.Server | null = null;
+let mockStarted = false;
+
+async function isGeminiUp(): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 750);
+  try {
+    const res = await fetch(`${GEMINI_ENDPOINT}/v1/health`, { signal: controller.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 beforeAll(async () => {
   registry = new ModelRegistry('best');
+
+  // These tests are designed to run against a live PingApp on :3456.
+  // In dev/CI environments where it's not running, start a tiny mock server
+  // so the suite is self-contained.
+  if (!(await isGeminiUp())) {
+    mockPingApp = http.createServer(async (req, res) => {
+      const url = req.url ?? '';
+
+      if (req.method === 'GET' && url === '/v1/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ status: 'healthy' }));
+        return;
+      }
+
+      if (req.method === 'POST' && url === '/v1/chat') {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const bodyText = Buffer.concat(chunks).toString('utf-8');
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            response: `mock:${body.prompt ?? ''}`,
+            conversation_id: body.conversation_id ?? 'mock-conv',
+            timing: { total_ms: 1 },
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      mockPingApp!.once('error', reject);
+      mockPingApp!.listen(3456, '::', () => resolve());
+    });
+
+    mockStarted = true;
+  }
 
   const gemini = new PingAppAdapter({
     id: 'gemini',
@@ -40,10 +98,21 @@ beforeAll(async () => {
   registry.register(gemini);
 
   app = await createGateway({ port: GATEWAY_PORT, registry });
+
+  const addr = app.server.address();
+  if (addr && typeof addr === 'object' && 'port' in addr) {
+    BASE = `http://localhost:${addr.port}`;
+  } else {
+    // Fallback (shouldn't happen): default dev port.
+    BASE = 'http://localhost:3500';
+  }
 });
 
 afterAll(async () => {
   if (app) await app.close();
+  if (mockPingApp && mockStarted) {
+    await new Promise<void>((resolve) => mockPingApp!.close(() => resolve()));
+  }
 });
 
 // ---------------------------------------------------------------------------

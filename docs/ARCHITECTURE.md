@@ -7,8 +7,77 @@ PingOS is a POSIX-inspired device layer that provides unified programmatic acces
 1. **Gateway** — Fastify HTTP server that receives requests and routes them to the right backend
 2. **Registry + Router** — Tracks available drivers, their capabilities, health status, and applies routing strategy
 3. **Drivers** — Adapters that execute requests against backends (PingApps, cloud APIs, local models)
+4. **Extension Bridge** — WebSocket bridge (`/ext`) that turns *authenticated Chrome tabs* into controllable devices (`chrome-{tabId}`)
 
 The key insight is **separation of concerns**: the gateway knows about routing, the drivers know about protocols, and the PingApp engine knows about browsers. No layer reaches into another's domain.
+
+---
+
+## Dual Execution Paths: CDP PingApps vs Authenticated Chrome Tabs
+
+PingOS supports two fundamentally different ways to automate the web:
+
+1. **PingApp path (CDP / headless-ish automation)**
+   - Gateway routes to a registered `Driver` (e.g. `PingAppAdapter`).
+   - The PingApp uses CDP/Playwright to control a managed browser context.
+   - Best for: deterministic, compiled automation with stable selectors/state machines.
+
+2. **Chrome Extension path (real authenticated browser)**
+   - Gateway forwards requests to the Chrome extension over WebSocket `/ext`.
+   - The extension executes commands inside a *real user tab* via a content script.
+   - Best for: sites that require real user auth, MFA, anti-bot checks, or are already logged in.
+
+```mermaid
+flowchart LR
+  Client[Client / curl / SDK] -->|HTTP :3500| Gateway
+
+  subgraph Gateway[PingOS Gateway :3500]
+    HTTP[HTTP Router]
+    Registry[ModelRegistry + Strategies]
+    Ext[ExtensionBridge\nWebSocket /ext]
+  end
+
+  %% PingApp / registry path
+  HTTP -->|/v1/dev/llm/*| Registry --> Driver[Driver Adapter] --> Backend[PingApp / API / Local]
+
+  %% Extension path
+  HTTP -->|/v1/dev/chrome-{tabId}/*| Ext --> WS[WebSocket client\n(Chrome MV3 background)] --> CS[Content Script] --> DOM[DOM]
+```
+
+### Device naming
+
+Shared tabs are addressable as:
+
+- `chrome-{tabId}` (example: `chrome-2114771645`)
+
+Where `{tabId}` is the Chrome tab ID surfaced in the extension popup.
+
+### WebSocket protocol (`/ext`)
+
+The gateway accepts WebSocket upgrades on `/ext`. The Chrome extension background service worker connects as a client.
+
+Message types:
+
+| Direction | type | Purpose |
+|-----------|------|---------|
+| Extension → Gateway | `hello` | Initial connect + full shared tab list |
+| Extension → Gateway | `share_update` | Shared tab list changed |
+| Gateway → Extension | `device_request` | Execute an operation on a shared tab |
+| Extension → Gateway | `device_response` | Result of a `device_request` |
+
+Minimal message shapes:
+
+```json
+{ "type": "hello", "clientId": "uuid", "version": "0.1.0", "tabs": [{"deviceId":"chrome-123","tabId":123,"url":"...","title":"..."}] }
+```
+
+```json
+{ "type": "device_request", "requestId": "uuid", "device": "chrome-123", "command": {"type":"read","selector":"h1"} }
+```
+
+```json
+{ "type": "device_response", "id": "uuid", "ok": true, "result": "Example Domain" }
+```
 
 ---
 
@@ -39,6 +108,31 @@ sequenceDiagram
     Backend-->>Driver: Response
     Driver-->>Gateway: DeviceResponse
     Gateway-->>Client: JSON response
+```
+
+### Request lifecycle (Chrome extension tab)
+
+For extension-owned devices, the gateway does **not** consult the driver registry. Instead it forwards the request to the owning extension client.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway as Gateway :3500
+    participant Ext as ExtensionBridge
+    participant WS as Chrome Extension (background)
+    participant CS as Content Script
+    participant DOM as Page DOM
+
+    Client->>Gateway: POST /v1/dev/chrome-123/read
+    Gateway->>Ext: callDevice(deviceId=chrome-123, op=read, payload={selector})
+    Ext->>WS: WS device_request {requestId, device, command}
+    WS->>CS: chrome.tabs.sendMessage(tabId, {command})
+    CS->>DOM: querySelector(selector) + read text
+    DOM-->>CS: textContent
+    CS-->>WS: response
+    WS-->>Ext: WS device_response {id=requestId, ok, result}
+    Ext-->>Gateway: result
+    Gateway-->>Client: {ok:true,result:"..."}
 ```
 
 ### Error flow
