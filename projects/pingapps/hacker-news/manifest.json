@@ -1,0 +1,31 @@
+{
+  "name": "Hacker News",
+  "version": "0.1.0",
+  "url_patterns": ["news.ycombinator.com/*"],
+  "description": "Browse front page, read comments, and discover trending tech content on Hacker News",
+  "user_stories": [
+    {
+      "id": "hn-browse",
+      "as": "a developer",
+      "i_want": "to browse the front page and see what's trending",
+      "so_that": "I stay informed on the latest tech news and discussions",
+      "workflow": "browse-front-page"
+    },
+    {
+      "id": "hn-comments",
+      "as": "a reader",
+      "i_want": "to open a story and read its top comments",
+      "so_that": "I can understand the community's perspective on a topic",
+      "workflow": "read-comments"
+    },
+    {
+      "id": "hn-new",
+      "as": "an early adopter",
+      "i_want": "to check the newest submissions before they hit the front page",
+      "so_that": "I discover interesting content before everyone else",
+      "workflow": "browse-front-page"
+    }
+  ],
+  "required_auth": false,
+  "tags": ["tech", "news", "community", "discussion"]
+}

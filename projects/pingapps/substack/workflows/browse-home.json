@@ -1,0 +1,17 @@
+{
+  "name": "browse-home",
+  "description": "Browse the Substack feed and discover what people are posting about",
+  "steps": [
+    { "op": "navigate", "url": "https://substack.com/home" },
+    { "op": "wait", "seconds": 5 },
+    { "op": "observe" },
+    {
+      "op": "eval",
+      "expression": "Array.from(document.querySelectorAll('p')).filter(p => p.textContent.trim().length > 50 && p.textContent.trim().length < 500 && p.children.length === 0).slice(0, 5).map(p => p.textContent.trim().substring(0, 200))"
+    }
+  ],
+  "inputs": {},
+  "outputs": {
+    "posts": { "type": "array", "description": "Text snippets from visible feed posts" }
+  }
+}

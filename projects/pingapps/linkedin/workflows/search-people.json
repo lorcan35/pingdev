@@ -1,0 +1,28 @@
+{
+  "name": "search-people",
+  "description": "Search LinkedIn for people matching a query and extract profile summaries",
+  "steps": [
+    { "op": "navigate", "url": "https://www.linkedin.com/search/results/people/?keywords={{query}}" },
+    { "op": "wait", "seconds": 5 },
+    {
+      "op": "extract",
+      "schema": {
+        "top_name": "a[href*='/in/']"
+      }
+    },
+    {
+      "op": "read",
+      "selector": "a[href*='/in/']"
+    }
+  ],
+  "inputs": {
+    "query": {
+      "type": "string",
+      "description": "Search query (name, title, company, or skills)",
+      "required": true
+    }
+  },
+  "outputs": {
+    "top_name": { "type": "string", "description": "Name and headline of the top search result" }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "GitHub",
+  "version": "0.1.0",
+  "url_patterns": ["github.com/*"],
+  "description": "Search repositories, explore trending projects, and browse issues on GitHub",
+  "user_stories": [
+    {
+      "id": "gh-search",
+      "as": "a developer",
+      "i_want": "to search for repositories on a topic",
+      "so_that": "I can find open-source tools and libraries for my projects",
+      "workflow": "search-repos"
+    },
+    {
+      "id": "gh-trending",
+      "as": "a developer",
+      "i_want": "to see what's trending on GitHub today",
+      "so_that": "I stay current on popular new projects in my field",
+      "workflow": "search-repos"
+    },
+    {
+      "id": "gh-issues",
+      "as": "a contributor",
+      "i_want": "to browse open issues on a repository",
+      "so_that": "I can find bugs to fix or features to implement",
+      "workflow": "browse-issues"
+    }
+  ],
+  "required_auth": false,
+  "tags": ["code", "opensource", "repositories", "development"]
+}

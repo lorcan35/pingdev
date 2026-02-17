@@ -1,0 +1,31 @@
+{
+  "name": "Twitter/X",
+  "version": "0.1.0",
+  "url_patterns": ["x.com/*", "twitter.com/*"],
+  "description": "Search tweets, read threads, and explore trending topics on X (formerly Twitter)",
+  "user_stories": [
+    {
+      "id": "x-search",
+      "as": "a researcher",
+      "i_want": "to search for tweets about a specific topic",
+      "so_that": "I can gauge public sentiment and find breaking news",
+      "workflow": "search-tweets"
+    },
+    {
+      "id": "x-trending",
+      "as": "a user",
+      "i_want": "to see what's currently trending on X",
+      "so_that": "I know what the world is talking about right now",
+      "workflow": "search-tweets"
+    },
+    {
+      "id": "x-thread",
+      "as": "a reader",
+      "i_want": "to read a full thread from a specific user's profile",
+      "so_that": "I can follow their complete train of thought on a topic",
+      "workflow": "read-thread"
+    }
+  ],
+  "required_auth": true,
+  "tags": ["social", "microblogging", "news", "trending"]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "search-tweets",
+  "description": "Search X for tweets matching a query and extract the top results (requires login)",
+  "steps": [
+    { "op": "navigate", "url": "https://x.com/search?q={{query}}&src=typed_query&f=top" },
+    { "op": "wait", "seconds": 5 },
+    {
+      "op": "eval",
+      "expression": "window.location.href.includes('/login') ? 'LOGIN_REQUIRED' : 'OK'"
+    },
+    {
+      "op": "extract",
+      "schema": {
+        "first_tweet": "[data-testid='tweetText']",
+        "first_author": "[data-testid='User-Name'] a"
+      }
+    },
+    {
+      "op": "read",
+      "selector": "[data-testid='tweetText']"
+    }
+  ],
+  "inputs": {
+    "query": {
+      "type": "string",
+      "description": "Search query for tweets",
+      "required": true
+    }
+  },
+  "outputs": {
+    "first_tweet": { "type": "string", "description": "Text of the first matching tweet" },
+    "first_author": { "type": "string", "description": "Author of the first tweet" }
+  }
+}

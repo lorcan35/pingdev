@@ -1,0 +1,28 @@
+{
+  "name": "browse-issues",
+  "description": "Navigate to a repository's issues page and extract open issues",
+  "steps": [
+    { "op": "navigate", "url": "https://github.com/{{repo}}/issues" },
+    { "op": "wait", "seconds": 5 },
+    {
+      "op": "extract",
+      "schema": {
+        "top_issue": "a[href*='/issues/'][class*='ListItemTitle']"
+      }
+    },
+    {
+      "op": "read",
+      "selector": "a[href*='/issues/'][class*='ListItemTitle']"
+    }
+  ],
+  "inputs": {
+    "repo": {
+      "type": "string",
+      "description": "Repository in owner/name format (e.g., 'facebook/react')",
+      "required": true
+    }
+  },
+  "outputs": {
+    "top_issue": { "type": "string", "description": "Title of the top open issue" }
+  }
+}

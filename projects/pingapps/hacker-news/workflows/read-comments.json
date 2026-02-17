@@ -1,0 +1,32 @@
+{
+  "name": "read-comments",
+  "description": "Click the top story on HN front page and extract the discussion comments",
+  "steps": [
+    { "op": "navigate", "url": "https://news.ycombinator.com/" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "top_title": ".titleline > a"
+      }
+    },
+    { "op": "click", "selector": "td.subtext a:last-child" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "story_title": ".titleline > a",
+        "top_comment": ".commtext"
+      }
+    },
+    {
+      "op": "read",
+      "selector": ".commtext"
+    }
+  ],
+  "inputs": {},
+  "outputs": {
+    "story_title": { "type": "string", "description": "Title of the story being discussed" },
+    "top_comment": { "type": "string", "description": "First comment text" }
+  }
+}
