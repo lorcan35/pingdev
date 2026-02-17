@@ -47,7 +47,7 @@ export const DEFAULT_SELF_HEAL_CONFIG: SelfHealConfig = {
   llm: {
     provider: 'openai-compat',
     baseUrl: 'https://openrouter.ai/api/v1',
-    apiKey: 'PINGOS_LLM_API_KEY_REDACTED',
+    apiKey: process.env.PINGOS_LLM_API_KEY || '',
     model: 'meta-llama/llama-3.3-70b-instruct',
     maxTokens: 500,
     temperature: 0.2,

@@ -69,3 +69,14 @@ export {
   DEFAULT_SELF_HEAL_CONFIG,
 } from './self-heal.js';
 export type { HealRequest, HealResult, SelfHealConfig } from './self-heal.js';
+
+// Workflow engine: conditional logic, error recovery
+export { WorkflowEngine, resolveTemplate, resolveValue, evaluateCondition } from './workflow-engine.js';
+export type {
+  WorkflowStep,
+  WorkflowDefaults,
+  StepResult,
+  ErrorLogEntry,
+  WorkflowResult,
+  OpExecutor,
+} from './workflow-engine.js';

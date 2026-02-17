@@ -14,6 +14,7 @@ import { loadConfig } from './config.js';
 import { SelectorCache } from './selector-cache.js';
 import { attemptHeal, configureSelfHeal } from './self-heal.js';
 import { registerAppRoutes } from './app-routes.js';
+import { suggest as llmSuggest } from './llm.js';
 
 // ---------------------------------------------------------------------------
 // Request / Reply schemas
@@ -162,6 +163,18 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     };
   });
 
+  // ---- Extension reload ----
+  app.post('/v1/extension/reload', async (_request, reply) => {
+    const sent = extBridge.sendToFirstClient({ type: 'reload_extension' });
+    if (!sent) {
+      return reply.status(503).send({
+        ok: false,
+        error: 'No extension client connected',
+      });
+    }
+    return { ok: true, message: 'Reload signal sent' };
+  });
+
   // ---- Connected devices (extension bridge) ----
   app.get('/v1/devices', async () => {
     const clients = extBridge.listSharedTabs();
@@ -190,6 +203,30 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     }
     return { ok: true, device, status };
   });
+
+  // ---- POST /v1/dev/:device/suggest ----
+  app.post<{ Params: { device: string }; Body: { context?: string; question: string } }>(
+    '/v1/dev/:device/suggest',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { context?: string; question: string } | null;
+      if (!body || !body.question) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.gateway.bad_request',
+          message: 'Missing required field: question',
+          retryable: false,
+        });
+      }
+
+      try {
+        const result = await llmSuggest(device, body.context ?? '', body.question);
+        return { ok: true, suggestion: result.suggestion, confidence: result.confidence };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
 
   // ---- POST /v1/dev/llm/prompt ----
   app.post<{ Body: PromptBody }>('/v1/dev/llm/prompt', async (request, reply) => {
@@ -397,6 +434,131 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       });
     },
   );
+
+  // ---- Recording endpoints ----
+  app.post<{ Body: { device: string } }>('/v1/record/start', async (request, reply) => {
+    const body = request.body as { device?: string } | null;
+    if (!body || !body.device) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.gateway.bad_request',
+        message: 'Missing required field: device',
+        retryable: false,
+      });
+    }
+    if (!extBridge.ownsDevice(body.device)) {
+      return reply.status(404).send({
+        errno: 'ENODEV',
+        code: 'ping.gateway.device_not_found',
+        message: `Device ${body.device} not found`,
+        retryable: false,
+      });
+    }
+    try {
+      const result = await extBridge.callDevice({
+        deviceId: body.device,
+        op: 'record_start',
+        payload: {},
+        timeoutMs: 5_000,
+      });
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  app.post<{ Body: { device: string } }>('/v1/record/stop', async (request, reply) => {
+    const body = request.body as { device?: string } | null;
+    if (!body || !body.device) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.gateway.bad_request',
+        message: 'Missing required field: device',
+        retryable: false,
+      });
+    }
+    if (!extBridge.ownsDevice(body.device)) {
+      return reply.status(404).send({
+        errno: 'ENODEV',
+        code: 'ping.gateway.device_not_found',
+        message: `Device ${body.device} not found`,
+        retryable: false,
+      });
+    }
+    try {
+      const result = await extBridge.callDevice({
+        deviceId: body.device,
+        op: 'record_stop',
+        payload: {},
+        timeoutMs: 5_000,
+      });
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  app.post<{ Body: { device: string; name?: string } }>('/v1/record/export', async (request, reply) => {
+    const body = request.body as { device?: string; name?: string } | null;
+    if (!body || !body.device) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.gateway.bad_request',
+        message: 'Missing required field: device',
+        retryable: false,
+      });
+    }
+    if (!extBridge.ownsDevice(body.device)) {
+      return reply.status(404).send({
+        errno: 'ENODEV',
+        code: 'ping.gateway.device_not_found',
+        message: `Device ${body.device} not found`,
+        retryable: false,
+      });
+    }
+    try {
+      const result = await extBridge.callDevice({
+        deviceId: body.device,
+        op: 'record_export',
+        payload: { name: body.name || 'recording' },
+        timeoutMs: 5_000,
+      });
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  app.get<{ Querystring: { device?: string } }>('/v1/record/status', async (request, reply) => {
+    const device = (request.query as { device?: string })?.device;
+    if (!device) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.gateway.bad_request',
+        message: 'Missing required query param: device',
+        retryable: false,
+      });
+    }
+    if (!extBridge.ownsDevice(device)) {
+      return reply.status(404).send({
+        errno: 'ENODEV',
+        code: 'ping.gateway.device_not_found',
+        message: `Device ${device} not found`,
+        retryable: false,
+      });
+    }
+    try {
+      const result = await extBridge.callDevice({
+        deviceId: device,
+        op: 'record_status',
+        payload: {},
+        timeoutMs: 5_000,
+      });
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
 
   // ---- WebSocket upgrade handler ----
   logGateway('[gw] starting ExtensionBridge');

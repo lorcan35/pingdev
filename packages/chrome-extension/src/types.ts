@@ -27,11 +27,29 @@ export interface BridgeResponse {
 }
 
 export interface RecordedAction {
-  type: 'click' | 'type' | 'navigate';
+  type: 'click' | 'type' | 'navigate' | 'select' | 'press';
   selector?: string;
   text?: string;
   url?: string;
+  key?: string;
+  value?: string;
   timestamp: number;
+}
+
+export interface WorkflowStep {
+  op: string;
+  selector?: string;
+  text?: string;
+  url?: string;
+  key?: string;
+  value?: string;
+}
+
+export interface WorkflowExport {
+  name: string;
+  steps: WorkflowStep[];
+  inputs: Record<string, string>;
+  outputs: Record<string, string>;
 }
 
 export interface TabInfo {
