@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Google Sheets E2E test suite for PingOS
 # Usage: ./sheets-e2e.sh [GATEWAY_URL] [DEVICE_ID]
-set -euo pipefail
+set -uo pipefail
 
 GW=${1:-http://localhost:3500}
 DEV=${2:-chrome-TAB_ID}
@@ -22,10 +22,10 @@ assert_ok() {
   local label="$1" result="$2"
   if echo "$result" | jq -e '.ok == true' >/dev/null 2>&1; then
     echo "PASS: $label"
-    ((PASS_COUNT++))
+    PASS_COUNT=$((PASS_COUNT + 1))
   else
     echo "FAIL: $label — $result"
-    ((FAIL_COUNT++))
+    FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 }
 
@@ -36,15 +36,15 @@ echo "Gateway : $GW"
 echo "Device  : $DEV"
 echo ""
 
-# 1. Recon — verify Sheets is detected
+# 1. Recon — verify Sheets is detected (check canvasAppType or appFingerprint.app contains "sheet")
 R=$(call_op recon '{}')
 if echo "$R" | jq -e '.ok == true' >/dev/null 2>&1 && \
-   echo "$R" | jq -r '.data' 2>/dev/null | grep -qiE 'canvas|grid|sheet'; then
+   echo "$R" | jq -e '.result.canvasApp == true or (.result.canvasAppType | test("sheet";"i")) or (.result.appFingerprint.app | test("sheet";"i"))' >/dev/null 2>&1; then
   echo "PASS: recon — Sheets detected"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 else
-  echo "FAIL: recon — $R"
-  ((FAIL_COUNT++))
+  echo "FAIL: recon — $(echo "$R" | jq -c '{ok:.ok, canvasApp:.result.canvasApp, appType:.result.canvasAppType}' 2>/dev/null)"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 # 2. Click on cell A1
@@ -108,25 +108,25 @@ assert_ok "press Escape" "$R"
 # 13. Recon — verify canvas app detection and automation strategy
 R=$(call_op recon '{}')
 if echo "$R" | jq -e '.ok == true' >/dev/null 2>&1 && \
-   echo "$R" | jq -e '.data.canvasApp == true' >/dev/null 2>&1; then
+   echo "$R" | jq -e '.result.canvasApp == true' >/dev/null 2>&1; then
   echo "PASS: recon canvasApp detected"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 else
   echo "FAIL: recon canvasApp — $R"
-  ((FAIL_COUNT++))
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-# 14. Verify automation strategy is 'aria-overlay' (Sheets has ARIA grid)
-STRATEGY=$(echo "$R" | jq -r '.data.automationStrategy' 2>/dev/null)
-if [ "$STRATEGY" = "aria-overlay" ]; then
-  echo "PASS: automation strategy = aria-overlay"
-  ((PASS_COUNT++))
+# 14. Verify automation strategy (Sheets uses name-box-formula-bar when no ARIA gridcells)
+STRATEGY=$(echo "$R" | jq -r '.result.automationStrategy' 2>/dev/null)
+if [ "$STRATEGY" = "name-box-formula-bar" ] || [ "$STRATEGY" = "aria-overlay" ]; then
+  echo "PASS: automation strategy = $STRATEGY"
+  PASS_COUNT=$((PASS_COUNT + 1))
 else
-  echo "FAIL: automation strategy = $STRATEGY (expected aria-overlay)"
-  ((FAIL_COUNT++))
+  echo "FAIL: automation strategy = $STRATEGY (expected name-box-formula-bar or aria-overlay)"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-# 15. Read cell via aria= prefix (fixed handleRead routing)
+# 15. Read cell via cell= prefix selector (uses name-box fallback)
 R=$(call_op read '{"selector":"cell=A1"}')
 assert_ok "read cell=A1 via prefix selector" "$R"
 

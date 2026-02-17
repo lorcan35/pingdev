@@ -1,0 +1,2 @@
+[console_scripts]
+pingos = pingos_cli.main:cli
