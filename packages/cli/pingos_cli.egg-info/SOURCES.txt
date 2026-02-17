@@ -1,0 +1,10 @@
+README.md
+setup.py
+pingos_cli/__init__.py
+pingos_cli/main.py
+pingos_cli.egg-info/PKG-INFO
+pingos_cli.egg-info/SOURCES.txt
+pingos_cli.egg-info/dependency_links.txt
+pingos_cli.egg-info/entry_points.txt
+pingos_cli.egg-info/requires.txt
+pingos_cli.egg-info/top_level.txt
