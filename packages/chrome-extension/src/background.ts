@@ -359,6 +359,35 @@ async function handleDeviceRequest(request: DeviceRequest) {
     }
   }
 
+  // Special handling for 'click' with cdp:true — use CDP mouse events
+  if (command.type === 'click' && (command as any).cdp && command.x !== undefined && command.y !== undefined) {
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      try {
+        const x = command.x;
+        const y = command.y;
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          type: 'mousePressed', x, y, button: 'left', clickCount: 1,
+        });
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          type: 'mouseReleased', x, y, button: 'left', clickCount: 1,
+        });
+        await chrome.debugger.detach({ tabId });
+        sendDeviceResponse(requestId, { success: true, data: { clickedAt: { x, y } } });
+        return;
+      } catch (debugErr) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        throw debugErr;
+      }
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : 'CDP click failed',
+      });
+      return;
+    }
+  }
+
   // Special handling for 'press' with cdp:true — use Chrome DevTools Protocol
   // to dispatch TRUSTED keyboard events (isTrusted: true) that canvas apps accept
   if (command.type === 'press' && (command as any).cdp) {
@@ -542,6 +571,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     loadSharedTabs().then((tabs) => {
       sendResponse(tabs);
     });
+    return true;
+  }
+
+  // CDP key dispatch — content scripts use this for trusted keyboard events
+  // that canvas apps (Google Sheets) require (isTrusted: true).
+  if (message.type === 'cdp_keys') {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ success: false, error: 'No tab ID' });
+      return true;
+    }
+    (async () => {
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        try {
+          for (const step of message.steps as Array<{ action: string; text?: string; key?: string; modifiers?: number; x?: number; y?: number }>) {
+            if (step.action === 'insertText' && step.text) {
+              await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: step.text });
+            } else if (step.action === 'keyDown' && step.key) {
+              const text = step.key.length === 1 ? step.key : '';
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+                type: 'keyDown', key: step.key, text, unmodifiedText: text, modifiers: step.modifiers ?? 0,
+              });
+            } else if (step.action === 'keyUp' && step.key) {
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+                type: 'keyUp', key: step.key, text: '', unmodifiedText: '', modifiers: step.modifiers ?? 0,
+              });
+            } else if (step.action === 'char' && step.key) {
+              const text = step.key.length === 1 ? step.key : '';
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+                type: 'char', key: step.key, text, unmodifiedText: text, modifiers: step.modifiers ?? 0,
+              });
+            } else if (step.action === 'mouseClick' && step.x !== undefined && step.y !== undefined) {
+              const x = step.x as number;
+              const y = step.y as number;
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+                type: 'mousePressed', x, y, button: 'left', clickCount: 1,
+              });
+              await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+                type: 'mouseReleased', x, y, button: 'left', clickCount: 1,
+              });
+            } else if (step.action === 'pause') {
+              await new Promise(r => setTimeout(r, 50));
+            }
+          }
+          await chrome.debugger.detach({ tabId });
+          sendResponse({ success: true });
+        } catch (e) {
+          await chrome.debugger.detach({ tabId }).catch(() => {});
+          throw e;
+        }
+      } catch (err) {
+        sendResponse({ success: false, error: err instanceof Error ? err.message : 'CDP keys failed' });
+      }
+    })();
     return true;
   }
 

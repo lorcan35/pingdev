@@ -4,7 +4,22 @@ All notable changes to PingOS will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] - 2026-02-15
+## [0.2.0] — 2026-02-17
+
+### Added
+- `observe` op in chrome extension — answers "What can I do on this page?" with human-readable action list
+- `observe` CLI command: `pingos observe [DEVICE]` with colored output
+- `read` CLI command: `pingos read SELECTOR [DEVICE]`
+- Python SDK: `Tab.observe()`, `Tab.wait()`, `Browser.find()` methods
+- Python SDK: `Tab.__repr__` for nicer debugging output
+- Python SDK: full README with API reference
+
+### Fixed
+- CLI `devices` command now shows cleaner table (ID, title, domain)
+- CLI colored output (cyan headers, green success, yellow warnings)
+- Python SDK `Tab.read()` handles both string and list responses
+
+## [0.1.1] - 2026-02-15
 
 Phase 2: **Chrome Extension Auth Bridge** — control real authenticated Chrome tabs via PingOS.
 

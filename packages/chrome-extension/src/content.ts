@@ -55,7 +55,10 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         response = await handleRead(command.selector);
         break;
       case 'extract':
-        response = await handleExtract(command.schema);
+        response = await handleExtract(command);
+        break;
+      case 'act':
+        response = await handleAct(command.instruction);
         break;
       case 'eval': {
         // CANONICAL field name is `expression`; keep `code` as a fallback alias.
@@ -75,6 +78,9 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         break;
       case 'recon':
         response = await handleRecon(command.classify);
+        break;
+      case 'observe':
+        response = await handleObserve();
         break;
       case 'clean': {
         // Ad-block / clutter removal
@@ -128,19 +134,45 @@ function findElement(selector: string): Element | null {
   // text= prefix: search interactive elements by text content
   if (selector.startsWith('text=')) {
     const text = selector.slice(5);
+    const lowerText = text.toLowerCase();
     // Search broadly: interactive elements first, then all elements
     const interactive = document.querySelectorAll(
       'button, a, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [onclick], input, select, textarea, [contenteditable], label, summary, details, [tabindex]'
     );
+    // Pass 1: exact text match (trimmed) — most specific
     for (const el of Array.from(interactive)) {
-      if (el.textContent?.trim().includes(text)) return el;
+      const elText = el.textContent?.trim() || '';
+      if (elText.toLowerCase() === lowerText) return el;
     }
-    // Fallback: any element containing the text
+    // Pass 2: element whose DIRECT text (not children) matches
+    for (const el of Array.from(interactive)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const elText = el.textContent?.trim() || '';
+      if (elText.toLowerCase().includes(lowerText) && elText.length < lowerText.length * 3) return el;
+    }
+    // Pass 3: aria-label match
+    for (const el of Array.from(interactive)) {
+      const label = el.getAttribute('aria-label') || '';
+      if (label.toLowerCase().includes(lowerText)) return el;
+    }
+    // Pass 4: broader includes, prefer shortest match (most specific element)
+    let bestEl: Element | null = null;
+    let bestLen = Infinity;
+    for (const el of Array.from(interactive)) {
+      const elText = el.textContent?.trim() || '';
+      if (elText.toLowerCase().includes(lowerText) && elText.length < bestLen) {
+        bestEl = el;
+        bestLen = elText.length;
+      }
+    }
+    if (bestEl) return bestEl;
+    // Pass 5: leaf elements (no children) containing the text
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
     let node: Node | null;
     while ((node = walker.nextNode())) {
       const el = node as Element;
-      if (el.textContent?.trim().includes(text) && el.children.length === 0) return el;
+      if (el.textContent?.trim().toLowerCase().includes(lowerText) && el.children.length === 0) return el;
     }
     return null;
   }
@@ -195,6 +227,7 @@ function findElement(selector: string): Element | null {
     // Try td with matching id
     const byId = document.querySelector(`td[id*="${escaped}"], th[id*="${escaped}"]`);
     if (byId) return byId;
+    // Note: caller should use navigateToCell() as fallback for canvas apps
     return null;
   }
 
@@ -204,6 +237,15 @@ function findElement(selector: string): Element | null {
 
 async function handleClick(selector: string, stealth?: boolean, x?: number, y?: number): Promise<BridgeResponse> {
   const element = findElement(selector);
+
+  // Name-box fallback for cell= selectors in canvas apps (no ARIA gridcells)
+  if (!element && selector.startsWith('cell=')) {
+    const ref = selector.slice(5);
+    const ok = await navigateToCell(ref);
+    if (ok) return { success: true, data: { navigatedTo: ref.toUpperCase() } };
+    return { success: false, error: `Cell not found and name-box fallback failed: ${selector}` };
+  }
+
   if (!element) return { success: false, error: `Element not found: ${selector}` };
 
   try {
@@ -276,12 +318,18 @@ async function handleRead(selector: string): Promise<BridgeResponse> {
   // Cell range reading: cell=A1:B5 → read a grid block from ARIA overlay
   const rangeMatch = selector.match(/^cell=([A-Za-z]+\d+):([A-Za-z]+\d+)$/);
   if (rangeMatch) {
-    return readCellRange(rangeMatch[1].toUpperCase(), rangeMatch[2].toUpperCase());
+    return await readCellRange(rangeMatch[1].toUpperCase(), rangeMatch[2].toUpperCase());
   }
 
   // Prefix selectors (text=, role=, aria=, cell=) route through findElement
   if (/^(text=|role=|aria=|cell=)/.test(selector)) {
     const el = findElement(selector);
+    if (!el && selector.startsWith('cell=')) {
+      // Fallback: read single cell via name-box + formula-bar
+      const ref = selector.slice(5);
+      const value = await readCellViaFormulaBar(ref);
+      return { success: true, data: { cell: ref.toUpperCase(), value } };
+    }
     if (!el) return { success: false, error: `Element not found: ${selector}` };
     return { success: true, data: readText(el) };
   }
@@ -299,7 +347,7 @@ async function handleRead(selector: string): Promise<BridgeResponse> {
  * Read a rectangular range of cell values from ARIA grid overlay.
  * Parses cell references like A1:B5 and extracts text from gridcell elements.
  */
-function readCellRange(startRef: string, endRef: string): BridgeResponse {
+async function readCellRange(startRef: string, endRef: string): Promise<BridgeResponse> {
   // Parse column letters and row numbers
   const parseRef = (ref: string) => {
     const match = ref.match(/^([A-Z]+)(\d+)$/);
@@ -353,6 +401,23 @@ function readCellRange(startRef: string, endRef: string): BridgeResponse {
     }
   }
 
+  // Name-box + formula-bar fallback for canvas apps without ARIA gridcells
+  if (Object.keys(grid).length === 0) {
+    const nameBox = document.querySelector('#t-name-box') as HTMLInputElement | null;
+    if (nameBox) {
+      for (let r = minRow; r <= maxRow; r++) {
+        for (let c = minCol; c <= maxCol; c++) {
+          let colStr = '';
+          let cn = c;
+          while (cn > 0) { colStr = String.fromCharCode(64 + ((cn - 1) % 26) + 1) + colStr; cn = Math.floor((cn - 1) / 26); }
+          const cellRef = `${colStr}${r}`;
+          const value = await readCellViaFormulaBar(cellRef);
+          grid[cellRef] = value;
+        }
+      }
+    }
+  }
+
   return {
     success: true,
     data: {
@@ -363,9 +428,68 @@ function readCellRange(startRef: string, endRef: string): BridgeResponse {
   };
 }
 
-async function handleExtract(schema: Record<string, string>): Promise<BridgeResponse> {
-  const result: Record<string, string> = {};
+async function handleExtract(command: {
+  range?: string;
+  format?: 'array' | 'object' | 'csv';
+  schema?: Record<string, string>;
+}): Promise<BridgeResponse> {
+  const { range, format = 'object', schema } = command;
 
+  // New range-based extraction: "A1:B5" → read cells via name-box + formula-bar
+  if (range) {
+    const rangeMatch = range.match(/^([A-Za-z]+\d+):([A-Za-z]+\d+)$/);
+    if (!rangeMatch) return { success: false, error: `Invalid range: ${range}` };
+    const startRef = rangeMatch[1].toUpperCase();
+    const endRef = rangeMatch[2].toUpperCase();
+    const parseRef = (ref: string) => {
+      const m = ref.match(/^([A-Z]+)(\d+)$/);
+      if (!m) return null;
+      const col = m[1].split('').reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0);
+      return { col, row: parseInt(m[2], 10), colStr: m[1] };
+    };
+
+    const start = parseRef(startRef);
+    const end = parseRef(endRef);
+    if (!start || !end) return { success: false, error: `Invalid cell refs: ${range}` };
+
+    const minRow = Math.min(start.row, end.row);
+    const maxRow = Math.max(start.row, end.row);
+    const minCol = Math.min(start.col, end.col);
+    const maxCol = Math.max(start.col, end.col);
+
+    const colToStr = (c: number): string => {
+      let s = '';
+      let n = c;
+      while (n > 0) { s = String.fromCharCode(64 + ((n - 1) % 26) + 1) + s; n = Math.floor((n - 1) / 26); }
+      return s;
+    };
+
+    // Read all cells via name-box + formula-bar
+    const grid: Record<string, string> = {};
+    const rows: string[][] = [];
+    for (let r = minRow; r <= maxRow; r++) {
+      const row: string[] = [];
+      for (let c = minCol; c <= maxCol; c++) {
+        const ref = `${colToStr(c)}${r}`;
+        const value = await readCellViaFormulaBar(ref);
+        grid[ref] = value;
+        row.push(value);
+      }
+      rows.push(row);
+    }
+
+    if (format === 'array') {
+      return { success: true, data: { range, values: rows } };
+    } else if (format === 'csv') {
+      const csv = rows.map(r => r.map(v => `"${v.replace(/"/g, '""')}"`).join(',')).join('\n');
+      return { success: true, data: { range, csv } };
+    } else {
+      return { success: true, data: { range, cells: grid, count: Object.keys(grid).length } };
+    }
+  }
+
+  // Legacy schema-based extraction: { key: selector } → { key: text }
+  const result: Record<string, string> = {};
   const entries =
     schema && typeof schema === 'object'
       ? Object.entries(schema as Record<string, string>)
@@ -379,8 +503,439 @@ async function handleExtract(schema: Record<string, string>): Promise<BridgeResp
     const element = document.querySelector(selector);
     result[key] = element ? readText(element) : '';
   }
-  
+
   return { success: true, data: result };
+}
+
+// ---------------------------------------------------------------------------
+// Act handler — instruction execution for spreadsheets and generic pages
+// ---------------------------------------------------------------------------
+
+// Fuzzy match: score how well `query` matches `candidate` (both lowercased).
+// Returns 0 for no match, higher is better.
+function fuzzyMatchScore(query: string, candidate: string): number {
+  const q = query.toLowerCase();
+  const c = candidate.toLowerCase();
+  // Exact match
+  if (q === c) return 1000;
+  // Full substring match (query in candidate)
+  if (c.includes(q)) return 500 + q.length;
+  // Full substring match (candidate in query)
+  if (q.includes(c)) return 400 + c.length;
+  // Word overlap scoring
+  const qWords = q.split(/\s+/).filter(w => w.length > 1);
+  const cWords = c.split(/\s+/).filter(w => w.length > 1);
+  let overlap = 0;
+  for (const qw of qWords) {
+    for (const cw of cWords) {
+      if (cw === qw) overlap += 10;
+      else if (cw.includes(qw) || qw.includes(cw)) overlap += 5;
+    }
+  }
+  return overlap;
+}
+
+// Lightweight inline recon: scan visible interactive elements and inputs.
+// Returns the same shape as handleRecon's actions[] and inputs[].
+function scanPageActions(): Array<{ selector: string; label: string; purpose: string; tag: string }> {
+  const results: Array<{ selector: string; label: string; purpose: string; tag: string }> = [];
+  const selectors = [
+    'button:not([disabled])',
+    '[role="button"]',
+    'a[href]',
+    'input:not([type="hidden"])',
+    'textarea',
+    'select',
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+    '[role="combobox"]',
+    '[role="searchbox"]',
+    '[role="menuitem"]',
+    '[role="tab"]',
+    '[role="link"]',
+  ];
+  const seen = new Set<Element>();
+  for (const sel of selectors) {
+    document.querySelectorAll(sel).forEach((el) => {
+      if (seen.has(el)) return;
+      seen.add(el);
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      if (rect.top >= window.innerHeight || rect.bottom <= 0) return;
+
+      const label =
+        el.getAttribute('aria-label') ||
+        el.getAttribute('placeholder') ||
+        el.getAttribute('title') ||
+        (el.textContent?.trim() || '').substring(0, 60);
+      if (!label) return;
+
+      let bestSel = '';
+      if (el.id && !/^[a-z]{1,2}-[0-9a-f]{4,}/i.test(el.id)) bestSel = '#' + el.id;
+      else if (el.getAttribute('data-testid')) bestSel = `[data-testid="${el.getAttribute('data-testid')}"]`;
+      else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
+      else if (el.getAttribute('name')) bestSel = `${el.tagName.toLowerCase()}[name="${el.getAttribute('name')}"]`;
+      else if (el.tagName === 'A') {
+        const href = el.getAttribute('href') || '';
+        if (href && href !== '#' && !href.startsWith('javascript') && href.length < 150)
+          bestSel = `a[href="${href.replace(/"/g, '\\"')}"]`;
+        else bestSel = `text=${label.substring(0, 40)}`;
+      }
+      else bestSel = el.tagName.toLowerCase();
+
+      const l = label.toLowerCase();
+      let purpose = 'action';
+      if (l.includes('search')) purpose = 'search';
+      else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).contentEditable === 'true')
+        purpose = 'input';
+
+      results.push({ selector: bestSel, label: label.substring(0, 60), purpose, tag: el.tagName.toLowerCase() });
+    });
+  }
+  return results.slice(0, 150);
+}
+
+interface ActStep {
+  op: string;
+  ref?: string;
+  text?: string;
+  key?: string;
+  modifiers?: string[];
+  selector?: string;
+  target?: string;
+  status: 'pending' | 'done' | 'failed';
+  error?: string;
+}
+
+function parseActInstruction(instruction: string): ActStep[] {
+  const steps: ActStep[] = [];
+  const instr = instruction.trim();
+
+  // Extract cell references
+  const cellRefPattern = /\b([A-Z]{1,3}\d{1,7})\b/gi;
+
+  // Extract quoted text
+  const quotedPattern = /["']([^"']+)["']/;
+  const quotedMatch = instr.match(quotedPattern);
+
+  // Normalize instruction
+  const lower = instr.toLowerCase();
+
+  // Pattern: "clear cell X" / "delete X"
+  if (/\b(clear|delete)\b/.test(lower)) {
+    const refs = instr.match(cellRefPattern);
+    if (refs && refs.length > 0) {
+      steps.push({ op: 'navigate', ref: refs[0].toUpperCase(), status: 'pending' });
+      steps.push({ op: 'press', key: 'Delete', status: 'pending' });
+    }
+    return steps;
+  }
+
+  // Pattern: "copy cell X" / "copy X"
+  if (/\bcopy\b/.test(lower) && !/paste/.test(lower)) {
+    const refs = instr.match(cellRefPattern);
+    if (refs && refs.length > 0) {
+      steps.push({ op: 'navigate', ref: refs[0].toUpperCase(), status: 'pending' });
+      steps.push({ op: 'press', key: 'c', modifiers: ['ctrl'], status: 'pending' });
+    }
+    return steps;
+  }
+
+  // Pattern: "paste into X" / "paste X"
+  if (/\bpaste\b/.test(lower)) {
+    const refs = instr.match(cellRefPattern);
+    if (refs && refs.length > 0) {
+      steps.push({ op: 'navigate', ref: refs[0].toUpperCase(), status: 'pending' });
+      steps.push({ op: 'press', key: 'v', modifiers: ['ctrl'], status: 'pending' });
+    }
+    return steps;
+  }
+
+  // Pattern: "press Ctrl+C" / "press Enter" / "press Tab"
+  const pressMatch = lower.match(/\bpress\s+((?:(?:ctrl|shift|alt|meta|cmd)\+)*\w+)\b/i);
+  if (pressMatch && !cellRefPattern.test(instr)) {
+    const parts = pressMatch[1].split('+');
+    const key = parts.pop()!;
+    const modifiers = parts.length > 0 ? parts.map(m => m.toLowerCase()) : undefined;
+    // Capitalize first letter for named keys
+    const normalizedKey = key.length > 1 ? key.charAt(0).toUpperCase() + key.slice(1) : key;
+    steps.push({ op: 'press', key: normalizedKey, modifiers, status: 'pending' });
+    return steps;
+  }
+
+  // Pattern: "click/open X menu" / "click on Format menu"
+  const menuMatch = instr.match(/\b(?:click|open)\s+(?:on\s+)?(?:the\s+)?(\w+)\s+menu\b/i);
+  if (menuMatch) {
+    steps.push({ op: 'click', selector: `role=menuitem:${menuMatch[1]}`, status: 'pending' });
+    return steps;
+  }
+
+  // Pattern: combined "click/go/select/navigate cell X and/then type Y"
+  const refs = instr.match(cellRefPattern);
+  const typeMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:(?:the\s+)?(?:value|text|formula)\s+)?(.+?)(?:\s+(?:in|into|to|at)\s+(?:cell\s+)?[A-Z]{1,3}\d{1,7})?$/i);
+  let textToType: string | null = null;
+
+  if (typeMatch) {
+    let raw = typeMatch[1].trim();
+    // Remove trailing "in X" if cell ref is at end
+    raw = raw.replace(/\s+(?:in|into|to|at)\s+(?:cell\s+)?[A-Z]{1,3}\d{1,7}\s*$/i, '').trim();
+    // Remove surrounding quotes
+    raw = raw.replace(/^["']|["']$/g, '');
+    textToType = raw;
+  }
+
+  // If quoted text found but typeMatch missed it, use quoted text
+  if (!textToType && quotedMatch) {
+    textToType = quotedMatch[1];
+  }
+
+  // Navigate to cell if a reference was found
+  if (refs && refs.length > 0) {
+    // If there are multiple refs and we're typing, navigate to the last one mentioned
+    // "type Hello in B2" → B2 is the target
+    const targetRef = refs[refs.length > 1 && textToType ? refs.length - 1 : 0].toUpperCase();
+    steps.push({ op: 'navigate', ref: targetRef, status: 'pending' });
+  }
+
+  // Type text if found
+  if (textToType) {
+    steps.push({ op: 'type', text: textToType, target: 'formulaBar', status: 'pending' });
+    steps.push({ op: 'press', key: 'Enter', status: 'pending' });
+  }
+
+  // If no steps were generated, try simple click/navigate
+  if (steps.length === 0 && refs && refs.length > 0) {
+    steps.push({ op: 'navigate', ref: refs[0].toUpperCase(), status: 'pending' });
+  }
+
+  // -----------------------------------------------------------------------
+  // Generic fallback: works on ANY page, not just Sheets
+  // -----------------------------------------------------------------------
+  if (steps.length === 0) {
+    const actions = scanPageActions();
+
+    // Pattern: "type X in Y" / "type X into Y" / "enter X in Y"
+    const typeInMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:["']([^"']+)["']|(\S+))\s+(?:in|into)\s+(?:the\s+)?(.+)$/i);
+    if (typeInMatch) {
+      const textVal = typeInMatch[1] || typeInMatch[2];
+      const targetDesc = typeInMatch[3].trim();
+      // Find best matching input
+      const inputs = actions.filter(a => a.purpose === 'input' || a.purpose === 'search');
+      let bestMatch: typeof actions[0] | null = null;
+      let bestScore = 0;
+      for (const inp of inputs) {
+        const score = fuzzyMatchScore(targetDesc, inp.label);
+        if (score > bestScore) { bestScore = score; bestMatch = inp; }
+      }
+      if (bestMatch && bestScore >= 10) {
+        steps.push({ op: 'click-selector', selector: bestMatch.selector, status: 'pending' });
+        steps.push({ op: 'type', text: textVal, status: 'pending' });
+      } else {
+        // Fallback: try text= selector
+        steps.push({ op: 'click-selector', selector: `text=${targetDesc}`, status: 'pending' });
+        steps.push({ op: 'type', text: textVal, status: 'pending' });
+      }
+      return steps;
+    }
+
+    // Pattern: "type X" with no target — type into currently focused element
+    const typeOnlyMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:["']([^"']+)["']|(.+))$/i);
+    if (typeOnlyMatch) {
+      const textVal = typeOnlyMatch[1] || typeOnlyMatch[2].trim();
+      steps.push({ op: 'type', text: textVal, status: 'pending' });
+      return steps;
+    }
+
+    // Pattern: "click X" / "press X" / "tap X" / "select X" / "open X"
+    const clickMatch = instr.match(/\b(?:click|press|tap|select|open|hit)\s+(?:on\s+)?(?:the\s+)?(.+)$/i);
+    if (clickMatch) {
+      const targetDesc = clickMatch[1].trim().replace(/\s+button$/i, '');
+      let bestMatch: typeof actions[0] | null = null;
+      let bestScore = 0;
+      for (const act of actions) {
+        const score = fuzzyMatchScore(targetDesc, act.label);
+        if (score > bestScore) { bestScore = score; bestMatch = act; }
+      }
+      if (bestMatch && bestScore >= 10) {
+        steps.push({ op: 'click-selector', selector: bestMatch.selector, status: 'pending' });
+      } else {
+        // Last resort: find by visible text content (works for links, tabs, etc.)
+        steps.push({ op: 'click-selector', selector: `text=${targetDesc}`, status: 'pending' });
+      }
+      return steps;
+    }
+
+    // Truly unparseable
+    steps.push({ op: 'unknown', status: 'failed', error: `Could not parse instruction: ${instruction}` });
+  }
+
+  return steps;
+}
+
+async function executeActStep(step: ActStep): Promise<void> {
+  switch (step.op) {
+    case 'navigate': {
+      if (!step.ref) { step.status = 'failed'; step.error = 'No cell ref'; return; }
+      const ok = await navigateToCell(step.ref);
+      step.status = ok ? 'done' : 'failed';
+      if (!ok) step.error = 'Name box not found';
+      break;
+    }
+    case 'type': {
+      if (!step.text) { step.status = 'failed'; step.error = 'No text'; return; }
+      // Use CDP insertText to type into whatever is focused (usually the formula bar or cell editor)
+      // Retry once after a pause — CDP debugger may still be detaching from the previous step
+      let typed = await cdpKeys([
+        { action: 'insertText', text: step.text },
+      ]);
+      if (!typed) {
+        await sleep(300);
+        typed = await cdpKeys([
+          { action: 'insertText', text: step.text },
+        ]);
+      }
+      step.status = typed ? 'done' : 'failed';
+      if (!typed) step.error = 'CDP type failed';
+      break;
+    }
+    case 'press': {
+      if (!step.key) { step.status = 'failed'; step.error = 'No key'; return; }
+      // Use CDP for trusted key events (canvas apps require isTrusted: true)
+      const mods = step.modifiers || [];
+      const modBits = (mods.includes('alt') ? 1 : 0) | (mods.includes('ctrl') ? 2 : 0) |
+        (mods.includes('meta') || mods.includes('cmd') ? 4 : 0) | (mods.includes('shift') ? 8 : 0);
+      const pressed = await cdpKeys([
+        { action: 'keyDown', key: step.key, modifiers: modBits || undefined },
+        { action: 'keyUp', key: step.key, modifiers: modBits || undefined },
+      ]);
+      if (pressed) {
+        step.status = 'done';
+      } else {
+        // Fallback to synthetic events
+        const res = await handlePress(step.key, step.modifiers);
+        step.status = res.success ? 'done' : 'failed';
+        if (!res.success) step.error = res.error;
+      }
+      break;
+    }
+    case 'click': {
+      if (!step.selector) { step.status = 'failed'; step.error = 'No selector'; return; }
+      const res = await handleClick(step.selector);
+      step.status = res.success ? 'done' : 'failed';
+      if (!res.success) step.error = res.error;
+      break;
+    }
+    case 'click-selector': {
+      if (!step.selector) { step.status = 'failed'; step.error = 'No selector'; return; }
+      const el = findElement(step.selector);
+      if (!el) { step.status = 'failed'; step.error = `Element not found: ${step.selector}`; return; }
+      const clickRes = await handleClick(step.selector);
+      step.status = clickRes.success ? 'done' : 'failed';
+      if (!clickRes.success) step.error = clickRes.error;
+      break;
+    }
+    default:
+      step.status = 'failed';
+      step.error = `Unknown step op: ${step.op}`;
+  }
+}
+
+async function handleAct(instruction: string): Promise<BridgeResponse> {
+  if (!instruction || !instruction.trim()) {
+    return { success: false, error: 'No instruction provided' };
+  }
+
+  const steps = parseActInstruction(instruction);
+
+  // Optimization: detect navigate+type+enter pattern and batch into a single CDP session
+  // to avoid debugger detach/reattach timing issues
+  if (steps.length >= 2 && steps[0].op === 'navigate' && steps[1].op === 'type' && steps[0].ref && steps[1].text) {
+    const ref = steps[0].ref;
+    const text = steps[1].text;
+    const hasEnter = steps.length >= 3 && steps[2].op === 'press' && steps[2].key === 'Enter';
+
+    const nameBox = document.querySelector('#t-name-box') as HTMLInputElement | null;
+    if (nameBox) {
+      const nbRect = nameBox.getBoundingClientRect();
+      const nbX = Math.round(nbRect.left + nbRect.width / 2);
+      const nbY = Math.round(nbRect.top + nbRect.height / 2);
+
+      // Click canvas first to ensure grid focus
+      const canvas = document.querySelector('canvas') as HTMLElement | null;
+      const cdpSteps: Array<{ action: string; text?: string; key?: string; modifiers?: number; x?: number; y?: number }> = [];
+
+      if (canvas) {
+        const cvRect = canvas.getBoundingClientRect();
+        cdpSteps.push({ action: 'mouseClick', x: Math.round(cvRect.left + 50), y: Math.round(cvRect.top + 50) });
+        cdpSteps.push({ action: 'pause' });
+      }
+
+      // Click name-box, select all, type ref, Enter to navigate
+      cdpSteps.push({ action: 'mouseClick', x: nbX, y: nbY });
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'keyDown', key: 'a', modifiers: 2 });
+      cdpSteps.push({ action: 'keyUp', key: 'a', modifiers: 2 });
+      cdpSteps.push({ action: 'insertText', text: ref.toUpperCase() });
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'keyDown', key: 'Enter' });
+      cdpSteps.push({ action: 'keyUp', key: 'Enter' });
+      // Wait for navigation to settle
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'pause' });
+      cdpSteps.push({ action: 'pause' }); // ~300ms total pause
+
+      // Type the value (starts cell editing automatically)
+      cdpSteps.push({ action: 'insertText', text });
+
+      // Press Enter to commit if needed
+      if (hasEnter) {
+        cdpSteps.push({ action: 'pause' });
+        cdpSteps.push({ action: 'keyDown', key: 'Enter' });
+        cdpSteps.push({ action: 'keyUp', key: 'Enter' });
+      }
+
+      const ok = await cdpKeys(cdpSteps);
+      if (ok) {
+        await sleep(300); // Wait for Sheets to commit
+        steps[0].status = 'done';
+        steps[1].status = 'done';
+        if (hasEnter) steps[2].status = 'done';
+        const completed = hasEnter ? 3 : 2;
+        return {
+          success: true,
+          data: { instruction, steps, stepsCompleted: completed, stepsTotal: steps.length },
+        };
+      }
+      // Fall through to sequential execution if batched CDP fails
+    }
+  }
+
+  // Sequential execution for non-batchable steps
+  let completed = 0;
+  for (const step of steps) {
+    if (step.status === 'failed') break;
+    if ((step.status as string) === 'done') { completed++; continue; } // already handled by batch
+    await executeActStep(step);
+    if (step.status === 'done') completed++;
+    else break;
+    // Delay between steps for UI to settle and CDP debugger to fully detach
+    await sleep(250);
+  }
+
+  const allDone = completed === steps.length;
+  return {
+    success: allDone,
+    data: {
+      instruction,
+      steps,
+      stepsCompleted: completed,
+      stepsTotal: steps.length,
+    },
+    error: allDone ? undefined : steps.find(s => s.status === 'failed')?.error,
+  };
 }
 
 async function handleEval(code: string): Promise<BridgeResponse> {
@@ -445,6 +1000,107 @@ async function handleWaitFor(selector: string, timeoutMs?: number): Promise<Brid
   }
 
   return { success: false, error: `Timeout waiting for selector: ${selector}` };
+}
+
+async function handleObserve(): Promise<BridgeResponse> {
+  const actions: string[] = [];
+  const forms: { name: string; fields: string[] }[] = [];
+  const navigation: string[] = [];
+
+  let buttonCount = 0;
+  let inputCount = 0;
+  let linkCount = 0;
+
+  // Scan visible interactive elements
+  const selectors = [
+    'button:not([disabled])',
+    '[role="button"]',
+    'a[href]',
+    'input:not([type="hidden"])',
+    'textarea',
+    'select',
+    '[contenteditable="true"]',
+  ];
+  const seen = new Set<Element>();
+  for (const sel of selectors) {
+    document.querySelectorAll(sel).forEach((el) => {
+      if (seen.has(el)) return;
+      seen.add(el);
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      if (rect.top >= window.innerHeight || rect.bottom <= 0) return;
+
+      const tag = el.tagName.toLowerCase();
+      const label =
+        el.getAttribute('aria-label') ||
+        el.getAttribute('title') ||
+        (el.textContent?.trim() || '').substring(0, 60);
+      const placeholder = el.getAttribute('placeholder') || '';
+
+      if (tag === 'a') {
+        const href = (el as HTMLAnchorElement).href || '';
+        const text = label || href;
+        linkCount++;
+        if (text) actions.push(`Click '${text.substring(0, 50)}' link${href ? ' → ' + href : ''}`);
+      } else if (tag === 'button' || el.getAttribute('role') === 'button') {
+        buttonCount++;
+        if (label) actions.push(`Click '${label.substring(0, 50)}' button`);
+      } else if (tag === 'input' || tag === 'textarea' || (el as HTMLElement).contentEditable === 'true') {
+        inputCount++;
+        const inputType = (el as HTMLInputElement).type || tag;
+        const desc = label || placeholder;
+        if (desc) actions.push(`Type into ${inputType} (${desc.substring(0, 50)})`);
+        else actions.push(`Type into ${inputType}`);
+      } else if (tag === 'select') {
+        inputCount++;
+        actions.push(`Select from '${label || 'dropdown'}'`);
+      }
+    });
+  }
+
+  // Navigation links from nav elements
+  const nav = document.querySelector('nav,[role="navigation"]');
+  if (nav) {
+    Array.from(nav.querySelectorAll('a[href]'))
+      .slice(0, 30)
+      .forEach((a) => {
+        const text = (a.textContent?.trim() || '').substring(0, 40);
+        const href = (a as HTMLAnchorElement).href;
+        if (text) navigation.push(`${text} → ${href}`);
+      });
+  }
+
+  // Forms
+  document.querySelectorAll('form').forEach((form) => {
+    const action = form.getAttribute('action') || '';
+    const name = action || `form-${forms.length + 1}`;
+    const fields: string[] = [];
+    form.querySelectorAll('input:not([type="hidden"]),textarea,select').forEach((f) => {
+      const fLabel =
+        f.getAttribute('aria-label') ||
+        f.getAttribute('placeholder') ||
+        (f as HTMLInputElement).name ||
+        f.tagName.toLowerCase();
+      const fType = (f as HTMLInputElement).type || f.tagName.toLowerCase();
+      fields.push(`${fLabel} (${fType})`);
+    });
+    forms.push({ name, fields });
+  });
+
+  // Cap actions to avoid huge payloads
+  const cappedActions = actions.slice(0, 100);
+
+  const summary = `${document.title || location.hostname} with ${inputCount} input${inputCount !== 1 ? 's' : ''}, ${buttonCount} button${buttonCount !== 1 ? 's' : ''}, and ${linkCount} link${linkCount !== 1 ? 's' : ''}`;
+
+  return {
+    success: true,
+    data: {
+      actions: cappedActions,
+      forms,
+      navigation,
+      summary,
+    },
+  };
 }
 
 async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
@@ -515,6 +1171,12 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
       else if (el.getAttribute('data-testid')) bestSel = `[data-testid="${el.getAttribute('data-testid')}"]`;
       else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
       else if (el.getAttribute('name')) bestSel = `${el.tagName.toLowerCase()}[name="${el.getAttribute('name')}"]`;
+      else if (el.tagName === 'A') {
+        const href = el.getAttribute('href') || '';
+        if (href && href !== '#' && !href.startsWith('javascript') && href.length < 150)
+          bestSel = `a[href="${href.replace(/"/g, '\\"')}"]`;
+        else bestSel = `text=${label.substring(0, 40)}`;
+      }
       else bestSel = el.tagName.toLowerCase(); // fallback
 
       // Infer purpose
@@ -656,27 +1318,68 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     }
     if (sampleCells.length > 0) recon.cellSample = sampleCells;
 
-    // Selection state — detect active cell/selection
-    // Method 1: Name box (Google Sheets — most reliable for non-screen-reader mode)
-    const nameBox = document.querySelector('#t-name-box') as HTMLInputElement | null;
-    const formulaBar = document.getElementById('waffle-rich-text-editor');
-    // Method 2: ARIA selected cells
-    const selectedCells = document.querySelectorAll('[role="gridcell"][aria-selected="true"], [aria-current="true"], .cell-selected, [class*="current-cell"]');
+    // ── Generic canvas input surface discovery ──
+    // Find inputs and editables positioned above/near the canvas — app-agnostic.
+    // Any canvas app (Sheets, Figma, Excalidraw, Maps…) may have navigation
+    // inputs and editing bars above its main canvas.
+    const cvsBounds = cvs.getBoundingClientRect();
+    const isAboveCanvas = (el: Element, margin = 150): boolean => {
+      const r = el.getBoundingClientRect();
+      return r.width > 10 && r.height > 0 && r.bottom <= cvsBounds.top + margin;
+    };
+    const bestSelector = (el: Element): string => {
+      if (el.id) return `#${el.id}`;
+      const al = el.getAttribute('aria-label');
+      if (al) return `${el.tagName.toLowerCase()}[aria-label="${al.replace(/"/g, '\\"')}"]`;
+      const name = (el as HTMLInputElement).name;
+      if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+      const role = el.getAttribute('role');
+      if (role) return `[role="${role}"]`;
+      return el.tagName.toLowerCase();
+    };
+
+    // Navigator inputs: any visible text input / combobox above the canvas
+    const navigatorInputs = Array.from(document.querySelectorAll(
+      'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]), [role="combobox"]'
+    )).filter(el => isAboveCanvas(el)) as HTMLInputElement[];
+    // Prefer inputs with cell reference pattern (A1, B2, AA100), then fallback to any short value
+    const cellRefPattern = /^[A-Z]{1,3}[0-9]+$/;
+    const refInput = navigatorInputs.find(el => {
+      const val = (el.value || '').trim();
+      return cellRefPattern.test(val);
+    }) || navigatorInputs.find(el => {
+      const val = (el.value || '').trim();
+      return val.length > 0 && val.length < 50;
+    }) || null;
+
+    // Editable bars: any contenteditable / textbox above the canvas
+    const editableBars = Array.from(document.querySelectorAll(
+      '[contenteditable="true"], [contenteditable=""], [role="textbox"]'
+    )).filter(el => isAboveCanvas(el)) as HTMLElement[];
+    const editBar = editableBars[0] || null;
+
+    // Selection state — generic active selection detection
+    const selectedElements = document.querySelectorAll(
+      '[aria-selected="true"], [aria-current="true"]'
+    );
     recon.selection = {
-      activeCell: nameBox?.value || undefined,
-      formulaBarValue: (formulaBar?.textContent?.trim() || '').substring(0, 200),
-      ariaCells: selectedCells.length > 0 ? Array.from(selectedCells).slice(0, 10).map((el) => {
+      activeRef: refInput?.value?.trim() || undefined,
+      refInputSelector: refInput ? bestSelector(refInput) : undefined,
+      editBarValue: (editBar?.textContent?.trim() || '').substring(0, 200),
+      editBarSelector: editBar ? bestSelector(editBar) : undefined,
+      selectedElements: selectedElements.length > 0 ? Array.from(selectedElements).slice(0, 10).map((el) => {
         const label = el.getAttribute('aria-label') || '';
         const refMatch = label.match(/\b([A-Z]+\d+)\b/);
         return {
           ref: refMatch ? refMatch[1] : undefined,
+          selector: bestSelector(el),
           label: label.substring(0, 60),
           value: (el.textContent?.trim() || '').substring(0, 100),
         };
       }) : [],
     };
 
-    // Canvas app fingerprinting — identify which app this is
+    // Canvas app type — URL + title heuristic (kept for backward compat)
     const url = location.href.toLowerCase();
     const title = document.title.toLowerCase();
     let appType: string = 'unknown';
@@ -704,44 +1407,112 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     // Zoom level detection
     const zoomEl = document.querySelector('input[aria-label*="zoom" i], input[aria-label*="Zoom" i], [aria-label*="zoom" i], [class*="zoom-level"], [class*="zoomLevel"], [data-zoom]');
     if (zoomEl) {
-      // Try .value first (for input elements), then textContent
       const zoomText = (zoomEl as HTMLInputElement).value || zoomEl.textContent?.trim() || zoomEl.getAttribute('aria-valuenow') || zoomEl.getAttribute('data-zoom') || '';
       const zoomMatch = zoomText.match(/(\d+)\s*%?/);
       recon.zoomLevel = zoomMatch ? parseInt(zoomMatch[1], 10) : zoomText.substring(0, 20);
     }
 
-    // Automation strategy — determine best approach for this canvas app
+    // Automation strategy — derived from what elements exist, not which app
     const hasGrid = recon.accessibilityOverlay.hasOverlay;
     const hasSufficientCells = recon.accessibilityOverlay.gridcells > 0;
     const hasToolbar = document.querySelectorAll('[role="toolbar"]').length > 0;
-    const hasNameBox = !!document.querySelector('#t-name-box, [role="combobox"][aria-label*="Name"], input[aria-label*="cell" i]');
-    const hasFormulaBar = !!document.querySelector('#waffle-rich-text-editor, [role="combobox"][contenteditable], #cell-input, [aria-label*="formula" i]');
+    const hasNavigatorInput = navigatorInputs.length > 0;
+    const hasEditableBar = editableBars.length > 0;
 
     if (hasGrid && hasSufficientCells) {
-      recon.automationStrategy = 'aria-overlay';       // ARIA gridcells available (screen reader mode)
+      recon.automationStrategy = 'aria-overlay';
       recon.needsVision = false;
-    } else if (hasNameBox && hasFormulaBar) {
-      recon.automationStrategy = 'name-box-formula-bar'; // Sheets-style: navigate via name box, edit via formula bar
+    } else if (hasNavigatorInput && hasEditableBar) {
+      recon.automationStrategy = 'name-box-formula-bar';
       recon.needsVision = false;
     } else if (hasToolbar) {
-      recon.automationStrategy = 'toolbar-only';        // Can automate toolbar but need vision for canvas content
+      recon.automationStrategy = 'toolbar-only';
       recon.needsVision = true;
     } else {
-      recon.automationStrategy = 'vision-required';     // No ARIA overlay, need screenshot + vision model
+      recon.automationStrategy = 'vision-required';
       recon.needsVision = true;
     }
   }
 
-  // Key elements — identify critical interaction points for the detected app
+  // Key elements — structured discovery of critical interaction points
+  const canvasBounds = bigCanvas ? bigCanvas.getBoundingClientRect() : null;
+  const keSel = (el: Element): string => {
+    if (el.id) return `#${el.id}`;
+    const al = el.getAttribute('aria-label');
+    if (al) return `${el.tagName.toLowerCase()}[aria-label="${al.replace(/"/g, '\\"')}"]`;
+    const name = (el as HTMLInputElement).name;
+    if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+    const role = el.getAttribute('role');
+    if (role) return `[role="${role}"]`;
+    return el.tagName.toLowerCase();
+  };
+  const kePosition = (el: Element): string => {
+    if (!canvasBounds) return 'page';
+    const r = el.getBoundingClientRect();
+    if (r.bottom <= canvasBounds.top + 10) return 'above-canvas';
+    if (r.top >= canvasBounds.bottom - 10) return 'below-canvas';
+    if (r.right <= canvasBounds.left + 10) return 'left-of-canvas';
+    if (r.left >= canvasBounds.right - 10) return 'right-of-canvas';
+    return 'over-canvas';
+  };
+
+  // Build structured keyElements object using values from recon.selection (which has refInput and editBar data)
   recon.keyElements = {} as any;
-  const nbEl = document.querySelector('#t-name-box, input[aria-label*="Name Box" i], input[aria-label*="cell reference" i]');
-  if (nbEl) recon.keyElements.cellNavigator = { selector: nbEl.id ? `#${nbEl.id}` : 'input[aria-label*="Name Box"]', tag: nbEl.tagName.toLowerCase(), value: (nbEl as HTMLInputElement).value || '' };
-  const fbEl = document.querySelector('#waffle-rich-text-editor, #cell-input, [role="combobox"][contenteditable="true"]');
-  if (fbEl) recon.keyElements.formulaBar = { selector: fbEl.id ? `#${fbEl.id}` : '[role="combobox"][contenteditable]', tag: fbEl.tagName.toLowerCase(), contentEditable: true };
-  const gridEl = document.querySelector('canvas') || document.querySelector('[role="grid"]');
-  if (gridEl) recon.keyElements.grid = { selector: gridEl.id ? `#${gridEl.id}` : gridEl.tagName.toLowerCase(), tag: gridEl.tagName.toLowerCase() };
-  const addRowEl = document.querySelector('input[aria-label*="rows to add" i], input[aria-label*="add row" i]');
-  if (addRowEl) recon.keyElements.addRows = { selector: addRowEl.getAttribute('aria-label') ? `input[aria-label="${addRowEl.getAttribute('aria-label')}"]` : 'input', value: (addRowEl as HTMLInputElement).value || '' };
+  
+  // cellNavigator = from recon.selection.refInputSelector
+  if (recon.selection?.refInputSelector && recon.selection?.activeRef) {
+    recon.keyElements.cellNavigator = {
+      selector: recon.selection.refInputSelector,
+      value: recon.selection.activeRef,
+    };
+  }
+  
+  // formulaBar = from recon.selection.editBarSelector
+  if (recon.selection?.editBarSelector && recon.selection?.editBarValue !== undefined) {
+    recon.keyElements.formulaBar = {
+      selector: recon.selection.editBarSelector,
+      contentEditable: true,
+    };
+  }
+  
+  // grid = main canvas or grid surface
+  const mainSurface = bigCanvas || document.querySelector('[role="grid"]');
+  if (mainSurface) {
+    recon.keyElements.grid = {
+      selector: mainSurface.id ? `#${mainSurface.id}` : mainSurface.tagName.toLowerCase(),
+      tag: mainSurface.tagName.toLowerCase(),
+    };
+  }
+  
+  // addRows = input for adding rows (if exists)
+  const addRowsInput = document.querySelector('input[aria-label*="rows"]') as HTMLInputElement;
+  if (addRowsInput) {
+    recon.keyElements.addRows = {
+      selector: keSel(addRowsInput),
+      value: addRowsInput.value,
+    };
+  }
+
+  // Also collect ALL input surfaces as a flat array for reference
+  const allKeInputs = document.querySelectorAll(
+    'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]), textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="combobox"], [role="searchbox"]'
+  );
+  recon.inputs = [];
+  for (const el of Array.from(allKeInputs)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (rect.top > window.innerHeight || rect.bottom < 0) continue;
+    recon.inputs.push({
+      selector: keSel(el),
+      tag: el.tagName.toLowerCase(),
+      type: (el as HTMLInputElement).type || undefined,
+      role: el.getAttribute('role') || undefined,
+      ariaLabel: el.getAttribute('aria-label') || undefined,
+      value: ((el as HTMLInputElement).value || el.textContent?.trim() || '').substring(0, 100),
+      contentEditable: (el as HTMLElement).isContentEditable || undefined,
+      position: kePosition(el),
+    });
+  }
 
   // Toolbar state — report state of toggle-able buttons (bold, italic, etc.)
   const toolbarButtons = document.querySelectorAll('[role="toolbar"] [role="button"][aria-pressed], [role="toolbar"] [role="button"][aria-checked]');
@@ -779,6 +1550,97 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
       selector: el.id ? `#${el.id}` : `[role="menuitem"][aria-label="${el.getAttribute('aria-label') || ''}"]`,
     }));
 
+  // App fingerprint — URL patterns + DOM signatures (generic, always runs)
+  const fpUrl = location.href.toLowerCase();
+  let fpApp: string | null = null;
+  let fpConfidence: 'high' | 'medium' | 'low' = 'low';
+  // Tier 1: URL pattern detection (high confidence)
+  const urlPatterns: Array<[RegExp, string]> = [
+    [/docs\.google\.com\/spreadsheets/, 'google-sheets'],
+    [/docs\.google\.com\/document/, 'google-docs'],
+    [/docs\.google\.com\/presentation/, 'google-slides'],
+    [/figma\.com/, 'figma'],
+    [/excalidraw/, 'excalidraw'],
+    [/google\.com\/maps|maps\.google/, 'google-maps'],
+    [/miro\.com/, 'miro'],
+    [/canva\.com/, 'canva'],
+    [/lucid(?:chart|spark)\.com/, 'lucidchart'],
+    [/draw\.io|diagrams\.net/, 'drawio'],
+    [/notion\.so/, 'notion'],
+    [/airtable\.com/, 'airtable'],
+    [/codepen\.io/, 'codepen'],
+    [/codesandbox\.io/, 'codesandbox'],
+  ];
+  for (const [pattern, app] of urlPatterns) {
+    if (pattern.test(fpUrl)) { fpApp = app; fpConfidence = 'high'; break; }
+  }
+  // Tier 2: DOM signature detection (medium confidence)
+  if (!fpApp) {
+    const appNameAttr = document.querySelector('[data-app-name]')?.getAttribute('data-app-name');
+    const generator = document.querySelector('meta[name="generator"]')?.getAttribute('content');
+    const appName = document.querySelector('meta[name="application-name"]')?.getAttribute('content');
+    if (appNameAttr) { fpApp = appNameAttr.toLowerCase(); fpConfidence = 'medium'; }
+    else if (generator) { fpApp = generator.toLowerCase(); fpConfidence = 'medium'; }
+    else if (appName) { fpApp = appName.toLowerCase(); fpConfidence = 'medium'; }
+  }
+  // Tier 3: Canvas heuristic classification (low confidence)
+  if (!fpApp && recon.canvasApp) {
+    const hasGridOverlay = recon.accessibilityOverlay?.hasOverlay;
+    const hasToolbars = (recon.ariaLandmarks?.toolbars?.length || 0) > 0;
+    if (hasGridOverlay) { fpApp = 'unknown-spreadsheet'; fpConfidence = 'low'; }
+    else if (hasToolbars) { fpApp = 'unknown-drawing'; fpConfidence = 'low'; }
+    else { fpApp = 'unknown-canvas'; fpConfidence = 'low'; }
+  }
+  recon.appFingerprint = fpApp ? { app: fpApp, confidence: fpConfidence } : null;
+
+  // Selection state — generic detection from all available indicators
+  let selRef: string | null = null;
+  let selSource: string | null = null;
+  let selSelector: string | null = null;
+  // Source 1: Navigator input above canvas (cell ref, address bar, object name)
+  if (recon.selection?.activeRef) {
+    selRef = recon.selection.activeRef;
+    selSource = 'ref-input';
+    selSelector = recon.selection.refInputSelector || null;
+  }
+  // Source 2: ARIA selected/current elements
+  if (!selRef) {
+    const ariaSel = document.querySelector('[aria-selected="true"], [aria-current="true"]');
+    if (ariaSel) {
+      const label = ariaSel.getAttribute('aria-label') || '';
+      const refMatch = label.match(/\b([A-Z]+\d+)\b/);
+      selRef = refMatch ? refMatch[1] : (label || ariaSel.textContent?.trim() || '').substring(0, 40) || null;
+      selSource = ariaSel.hasAttribute('aria-selected') ? 'aria-selected' : 'aria-current';
+    }
+  }
+  // Source 3: Focused editable element
+  if (!selRef && document.activeElement && document.activeElement !== document.body) {
+    const active = document.activeElement;
+    const val = ((active as HTMLInputElement).value || active.textContent?.trim() || '').substring(0, 40);
+    if (val) {
+      selRef = val;
+      selSource = 'active-element';
+    }
+  }
+  recon.selectionState = selRef ? { activeCell: selRef, source: selSource, selector: selSelector } : null;
+
+  // Cell samples — read content from the best available source (generic)
+  const cellSamples: Array<{ cell: string; value: string }> = [];
+  if (selRef) {
+    // Primary: edit bar / formula bar / property panel content
+    const barValue = recon.selection?.editBarValue || '';
+    cellSamples.push({ cell: selRef, value: barValue });
+  }
+  // Also include any ARIA gridcell samples if available
+  if (recon.cellSample) {
+    for (const s of recon.cellSample as Array<{ ref: string; value: string }>) {
+      if (!cellSamples.find((x) => x.cell === s.ref)) {
+        cellSamples.push({ cell: s.ref, value: s.value });
+      }
+    }
+  }
+  recon.cellSamples = cellSamples.length > 0 ? cellSamples : null;
+
   return { success: true, data: recon };
 }
 
@@ -788,6 +1650,124 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Send trusted keyboard events via CDP through the background script.
+ * Returns true on success. Falls back to synthetic events if CDP unavailable.
+ */
+async function cdpKeys(steps: Array<{ action: string; text?: string; key?: string; modifiers?: number; x?: number; y?: number }>): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'cdp_keys', steps }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[cdpKeys] runtime error:', chrome.runtime.lastError.message);
+          resolve(false);
+        } else if (!response?.success) {
+          console.warn('[cdpKeys] failed:', response?.error);
+          resolve(false);
+        } else {
+          resolve(true);
+        }
+      });
+    } catch (e) {
+      console.warn('[cdpKeys] exception:', e);
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Navigate to a cell using the name-box (#t-name-box) — works for canvas-based
+ * spreadsheets that don't expose ARIA gridcell elements.
+ * Uses CDP trusted keyboard events to type the ref and press Enter.
+ * Sends Escape first to exit any active edit mode.
+ */
+async function navigateToCell(ref: string): Promise<boolean> {
+  const nameBox = document.querySelector('#t-name-box') as HTMLInputElement | null;
+  if (!nameBox) return false;
+
+  // Get viewport coordinates for CDP mouse events
+  const nbRect = nameBox.getBoundingClientRect();
+  const nbX = Math.round(nbRect.left + nbRect.width / 2);
+  const nbY = Math.round(nbRect.top + nbRect.height / 2);
+
+  // Step 1: Click on the canvas to ensure grid has focus (exits any name-box/edit state)
+  const canvas = document.querySelector('canvas') as HTMLElement | null;
+  if (canvas) {
+    const cvRect = canvas.getBoundingClientRect();
+    await cdpKeys([
+      { action: 'mouseClick', x: Math.round(cvRect.left + 50), y: Math.round(cvRect.top + 50) },
+    ]);
+    await sleep(150);
+  }
+
+  // Step 2: Click name-box, select all, type cell ref, press Enter
+  const ok = await cdpKeys([
+    { action: 'mouseClick', x: nbX, y: nbY },
+    { action: 'pause' },
+    { action: 'keyDown', key: 'a', modifiers: 2 /* ctrl */ },
+    { action: 'keyUp', key: 'a', modifiers: 2 },
+    { action: 'insertText', text: ref.toUpperCase() },
+    { action: 'pause' },
+    { action: 'keyDown', key: 'Enter' },
+    { action: 'keyUp', key: 'Enter' },
+  ]);
+
+  if (ok) {
+    // Wait for Sheets to navigate and update the formula bar
+    await sleep(300);
+    return true;
+  }
+
+  // Fallback: synthetic events (won't work for Sheets but keeps non-canvas apps working)
+  setNativeValue(nameBox, ref.toUpperCase());
+  nameBox.dispatchEvent(new Event('input', { bubbles: true }));
+  nameBox.dispatchEvent(new Event('change', { bubbles: true }));
+  const enterOpts: KeyboardEventInit = {
+    key: 'Enter', code: 'Enter', bubbles: true, cancelable: true,
+  };
+  nameBox.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+  nameBox.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+  await sleep(150);
+  return true;
+}
+
+/**
+ * Read the current cell value from the formula bar (#t-formula-bar-input).
+ * Uses CDP eval for a fresh read to avoid stale DOM references.
+ */
+async function readFormulaBar(): Promise<string> {
+  // Try reading via CDP eval for a fresh value (avoids stale content script DOM)
+  return new Promise((resolve) => {
+    try {
+      // Read from the formula bar input element
+      const bar = document.querySelector('#t-formula-bar-input') as HTMLElement | null;
+      if (bar) {
+        if (bar instanceof HTMLInputElement || bar instanceof HTMLTextAreaElement) {
+          resolve(bar.value);
+        } else {
+          resolve(bar.textContent?.trim() ?? '');
+        }
+      } else {
+        resolve('');
+      }
+    } catch {
+      resolve('');
+    }
+  });
+}
+
+/**
+ * Read a single cell's value using the name-box + formula-bar pattern.
+ * Navigates to the cell, waits for the formula bar to update, then reads.
+ */
+async function readCellViaFormulaBar(ref: string): Promise<string> {
+  const ok = await navigateToCell(ref);
+  if (!ok) return '';
+  // Extra wait to ensure formula bar has updated
+  await sleep(150);
+  return readFormulaBar();
 }
 
 function normalizeText(s: string): string {
@@ -1131,6 +2111,24 @@ async function handlePress(
 // ---------------------------------------------------------------------------
 async function handleDblClick(selector: string, stealth?: boolean): Promise<BridgeResponse> {
   const element = findElement(selector);
+
+  // Name-box fallback for cell= selectors: navigate then press F2 to enter edit mode
+  if (!element && selector.startsWith('cell=')) {
+    const ref = selector.slice(5);
+    const ok = await navigateToCell(ref);
+    if (!ok) return { success: false, error: `Cell not found and name-box fallback failed: ${selector}` };
+    // Press F2 to enter cell edit mode (equivalent to double-clicking)
+    const active = document.activeElement;
+    if (active) {
+      const f2Opts: KeyboardEventInit = {
+        key: 'F2', code: 'F2', bubbles: true, cancelable: true,
+      };
+      active.dispatchEvent(new KeyboardEvent('keydown', f2Opts));
+      active.dispatchEvent(new KeyboardEvent('keyup', f2Opts));
+    }
+    return { success: true, data: { navigatedTo: ref.toUpperCase(), editMode: true } };
+  }
+
   if (!element) return { success: false, error: `Element not found: ${selector}` };
 
   try {
