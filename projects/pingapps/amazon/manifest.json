@@ -1,0 +1,24 @@
+{
+  "name": "Amazon",
+  "version": "0.1.0",
+  "url_patterns": ["amazon.com/*", "www.amazon.com/*"],
+  "description": "Search products, compare prices, and extract deal information from Amazon",
+  "user_stories": [
+    {
+      "id": "amz-search",
+      "as": "a shopper",
+      "i_want": "to search for a product by name",
+      "so_that": "I can find items I want to buy and compare options",
+      "workflow": "search-product"
+    },
+    {
+      "id": "amz-price",
+      "as": "a shopper",
+      "i_want": "to check the current price of a specific product",
+      "so_that": "I can decide whether to buy now or wait for a better deal",
+      "workflow": "price-check"
+    }
+  ],
+  "required_auth": false,
+  "tags": ["shopping", "ecommerce", "price-comparison"]
+}

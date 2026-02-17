@@ -1,0 +1,47 @@
+{
+  "name": "create-event",
+  "description": "Create a new event in Google Calendar with title, date, and time",
+  "steps": [
+    { "op": "navigate", "url": "https://calendar.google.com/calendar/u/0/r" },
+    { "op": "wait", "seconds": 4 },
+    { "op": "act", "instruction": "click the Create button (+ icon or 'Create' text)" },
+    { "op": "wait", "seconds": 2 },
+    { "op": "act", "instruction": "click the title/event name input field" },
+    { "op": "type", "text": "{{title}}" },
+    { "op": "act", "instruction": "click the date field" },
+    { "op": "eval", "expression": "document.querySelector('[data-key=\"startDate\"] input, [aria-label*=\"Start date\"]').value = ''" },
+    { "op": "type", "text": "{{date}}" },
+    { "op": "act", "instruction": "click the start time field" },
+    { "op": "eval", "expression": "document.querySelector('[data-key=\"startTime\"] input, [aria-label*=\"Start time\"]').value = ''" },
+    { "op": "type", "text": "{{start_time}}" },
+    { "op": "act", "instruction": "click the end time field" },
+    { "op": "eval", "expression": "document.querySelector('[data-key=\"endTime\"] input, [aria-label*=\"End time\"]').value = ''" },
+    { "op": "type", "text": "{{end_time}}" },
+    { "op": "screenshot" },
+    { "op": "act", "instruction": "click the Save button" },
+    { "op": "wait", "seconds": 2 }
+  ],
+  "inputs": {
+    "title": {
+      "type": "string",
+      "description": "Event title",
+      "required": true
+    },
+    "date": {
+      "type": "string",
+      "description": "Event date (e.g. 'February 20, 2026' or 'Tomorrow')",
+      "required": true
+    },
+    "start_time": {
+      "type": "string",
+      "description": "Start time (e.g. '10:00 AM')",
+      "required": true
+    },
+    "end_time": {
+      "type": "string",
+      "description": "End time (e.g. '11:00 AM')",
+      "required": true
+    }
+  },
+  "outputs": {}
+}

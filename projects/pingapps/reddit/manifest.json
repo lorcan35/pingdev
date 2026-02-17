@@ -1,0 +1,24 @@
+{
+  "name": "Reddit",
+  "version": "0.1.0",
+  "url_patterns": ["reddit.com/*", "www.reddit.com/*", "old.reddit.com/*"],
+  "description": "Browse subreddits, read posts, and extract top content from Reddit",
+  "user_stories": [
+    {
+      "id": "rd-browse",
+      "as": "a user",
+      "i_want": "to browse posts in a specific subreddit",
+      "so_that": "I can read discussions on topics I care about",
+      "workflow": "browse-subreddit"
+    },
+    {
+      "id": "rd-top-posts",
+      "as": "a researcher",
+      "i_want": "to extract the top posts from a subreddit",
+      "so_that": "I can analyze trending discussions and sentiment",
+      "workflow": "extract-top-posts"
+    }
+  ],
+  "required_auth": false,
+  "tags": ["social", "forum", "discussion", "news"]
+}

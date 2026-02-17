@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PingApp Manifest",
+  "description": "Schema for PingApp manifest.json files",
+  "type": "object",
+  "required": ["name", "version", "url_patterns", "description", "user_stories"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable name of the PingApp"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semver version string"
+    },
+    "url_patterns": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Glob patterns matching target site URLs"
+    },
+    "description": {
+      "type": "string",
+      "description": "What this PingApp does"
+    },
+    "user_stories": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/UserStory" },
+      "minItems": 1,
+      "description": "User stories describing what this app enables"
+    },
+    "required_auth": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the target site requires authentication"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Categorization tags"
+    }
+  },
+  "definitions": {
+    "UserStory": {
+      "type": "object",
+      "required": ["id", "as", "i_want", "so_that", "workflow"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Unique identifier for this user story"
+        },
+        "as": {
+          "type": "string",
+          "description": "The role (e.g. 'a user', 'a shopper')"
+        },
+        "i_want": {
+          "type": "string",
+          "description": "What the user wants to accomplish"
+        },
+        "so_that": {
+          "type": "string",
+          "description": "The benefit or reason"
+        },
+        "workflow": {
+          "type": "string",
+          "description": "Name of the workflow file (without .json extension)"
+        }
+      }
+    },
+    "Workflow": {
+      "type": "object",
+      "required": ["name", "description", "steps"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Workflow name matching the filename"
+        },
+        "description": {
+          "type": "string",
+          "description": "What this workflow does"
+        },
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/WorkflowStep" },
+          "minItems": 1,
+          "description": "Ordered list of PingOS ops to execute"
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/WorkflowParam" },
+          "description": "Template variables this workflow accepts"
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/WorkflowParam" },
+          "description": "Data this workflow produces"
+        }
+      }
+    },
+    "WorkflowStep": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": ["recon", "observe", "act", "extract", "click", "type", "press", "read", "scroll", "wait", "screenshot", "eval", "navigate"],
+          "description": "PingOS operation to execute"
+        },
+        "instruction": { "type": "string" },
+        "text": { "type": "string" },
+        "key": { "type": "string" },
+        "selector": { "type": "string" },
+        "schema": { "type": "object" },
+        "seconds": { "type": "number" },
+        "url": { "type": "string" },
+        "expression": { "type": "string" },
+        "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+        "amount": { "type": "number" }
+      }
+    },
+    "WorkflowParam": {
+      "type": "object",
+      "required": ["type", "description"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "number", "boolean", "array", "object"],
+          "description": "Parameter data type"
+        },
+        "description": {
+          "type": "string",
+          "description": "What this parameter is for"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this parameter must be provided"
+        },
+        "default": {
+          "description": "Default value if not provided"
+        }
+      }
+    }
+  }
+}

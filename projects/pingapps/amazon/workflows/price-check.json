@@ -1,0 +1,39 @@
+{
+  "name": "price-check",
+  "description": "Navigate to a specific Amazon product page and extract its current price, availability, and deal info",
+  "steps": [
+    { "op": "navigate", "url": "{{product_url}}" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "title": "#productTitle",
+        "price": ".a-price .a-offscreen",
+        "list_price": ".basisPrice .a-offscreen",
+        "availability": "#availability span",
+        "rating": "#acrPopover .a-icon-alt",
+        "review_count": "#acrCustomerReviewText",
+        "deal_badge": "#dealBadge_feature_div .a-color-price",
+        "coupon": "#promoPriceBlockMessage_feature_div span.a-color-success"
+      }
+    },
+    { "op": "screenshot" }
+  ],
+  "inputs": {
+    "product_url": {
+      "type": "string",
+      "description": "Full Amazon product page URL",
+      "required": true
+    }
+  },
+  "outputs": {
+    "title": { "type": "string", "description": "Product name" },
+    "price": { "type": "string", "description": "Current price" },
+    "list_price": { "type": "string", "description": "Original list price (if on sale)" },
+    "availability": { "type": "string", "description": "Stock availability status" },
+    "rating": { "type": "string", "description": "Star rating" },
+    "review_count": { "type": "string", "description": "Total number of reviews" },
+    "deal_badge": { "type": "string", "description": "Deal label if product is on sale" },
+    "coupon": { "type": "string", "description": "Coupon info if available" }
+  }
+}

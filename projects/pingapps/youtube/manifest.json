@@ -1,0 +1,24 @@
+{
+  "name": "YouTube",
+  "version": "0.1.0",
+  "url_patterns": ["youtube.com/*", "www.youtube.com/*"],
+  "description": "Search, watch, and extract data from YouTube",
+  "user_stories": [
+    {
+      "id": "yt-search",
+      "as": "a user",
+      "i_want": "to search for videos on a topic",
+      "so_that": "I can find relevant content quickly",
+      "workflow": "search-and-play"
+    },
+    {
+      "id": "yt-trending",
+      "as": "a user",
+      "i_want": "to see what videos are trending right now",
+      "so_that": "I can stay up to date with popular content",
+      "workflow": "extract-trending"
+    }
+  ],
+  "required_auth": false,
+  "tags": ["video", "media", "search", "entertainment"]
+}
