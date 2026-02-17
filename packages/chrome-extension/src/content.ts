@@ -1,6 +1,6 @@
 // Content script - Bridge executor + interaction recorder
 
-import type { BridgeCommand, BridgeResponse, RecordedAction } from './types';
+import type { BridgeCommand, BridgeResponse, RecordedAction, WorkflowStep, WorkflowExport } from './types';
 import { humanClick, humanType, withJitter } from './stealth';
 import { fullCleanup, injectAdBlockCSS, removeAdElements, detectClutter } from './adblock';
 
@@ -9,6 +9,32 @@ import { fullCleanup, injectAdBlockCSS, removeAdElements, detectClutter } from '
 // ============================================================================
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Recording commands — handle before generic bridge_command
+  if (message.type === 'bridge_command' && message.command?.type === 'record_start') {
+    startRecording();
+    sendResponse({ success: true, data: { recording: true } });
+    return true;
+  }
+
+  if (message.type === 'bridge_command' && message.command?.type === 'record_stop') {
+    stopRecording();
+    sendResponse({ success: true, data: { recording: false, stepCount: recordedActions.length } });
+    return true;
+  }
+
+  if (message.type === 'bridge_command' && message.command?.type === 'record_export') {
+    const name = message.command?.name || 'recording';
+    const exported = exportRecording(name);
+    sendResponse({ success: true, data: exported });
+    return true;
+  }
+
+  if (message.type === 'bridge_command' && message.command?.type === 'record_status') {
+    sendResponse({ success: true, data: { recording: recordingEnabled, stepCount: recordedActions.length } });
+    return true;
+  }
+
+  // Generic bridge commands
   if (message.type === 'bridge_command') {
     handleBridgeCommand(message.command)
       .then((response) => {
@@ -20,7 +46,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: err instanceof Error ? err.message : 'Unknown error',
         });
       });
-    return true; // Keep channel open for async response
+    return true;
   }
 
   if (message.type === 'get_recorded_actions') {
@@ -554,8 +580,8 @@ function isNaturalLanguageQuery(value: string): boolean {
   if (/^(div|span|p|a|h[1-6]|ul|ol|li|table|tr|td|th|img|input|button|form|section|article|nav|header|footer|main|aside)$/i.test(value)) return false;
   // Contains spaces or articles/prepositions = likely natural language
   if (/\b(the|a|an|of|on|in|for|from|this|that|all|each|every)\b/i.test(value)) return true;
-  // Contains descriptive words
-  if (/\b(title|name|price|headline|comment|review|date|time|author|score|count|text|content|description|link|url|image|video|post|article|item|product|result)\b/i.test(value)) return true;
+  // Contains descriptive words (including plurals)
+  if (/\b(titles?|names?|prices?|headlines?|comments?|reviews?|dates?|times?|authors?|scores?|counts?|texts?|contents?|descriptions?|links?|urls?|images?|videos?|posts?|articles?|items?|products?|results?|channels?|views?)\b/i.test(value)) return true;
   // Multiple words = likely natural language
   if (value.split(/\s+/).length >= 2) return true;
   return false;
@@ -569,53 +595,53 @@ interface NLExtractResult {
 function extractByNaturalLanguage(description: string): NLExtractResult {
   const lower = description.toLowerCase();
 
-  // Title/headline patterns
-  if (/\b(title|headline|heading)\b/.test(lower)) {
+  // Title/headline patterns (handle plurals: titles, headlines, headings)
+  if (/\b(titles?|headlines?|headings?)\b/.test(lower)) {
     return extractTitles();
   }
 
   // Price/cost patterns
-  if (/\b(price|cost|amount|fee)\b/.test(lower)) {
+  if (/\b(prices?|costs?|amounts?|fees?)\b/.test(lower)) {
     return extractPrices();
   }
 
   // Score/vote/upvote/rating patterns
-  if (/\b(score|vote|upvote|downvote|rating|point|karma)\b/.test(lower)) {
+  if (/\b(scores?|votes?|upvotes?|downvotes?|ratings?|points?|karma)\b/.test(lower)) {
     return extractScores();
   }
 
   // Comment/review/feedback patterns
-  if (/\b(comment|review|feedback|reply|response)\b/.test(lower)) {
+  if (/\b(comments?|reviews?|feedback|replies|reply|responses?)\b/.test(lower)) {
     return extractTextBlocks('comment');
   }
 
   // Date/time patterns
-  if (/\b(date|time|when|posted|published|created|updated|ago)\b/.test(lower)) {
+  if (/\b(dates?|times?|when|posted|published|created|updated|ago)\b/.test(lower)) {
     return extractDates();
   }
 
   // Name/author/user/channel patterns
-  if (/\b(name|author|user|channel|creator|by|poster|username|handle)\b/.test(lower)) {
+  if (/\b(names?|authors?|users?|channels?|creators?|by|posters?|usernames?|handles?)\b/.test(lower)) {
     return extractNames();
   }
 
   // Link/URL patterns
-  if (/\b(link|url|href)\b/.test(lower)) {
+  if (/\b(links?|urls?|hrefs?)\b/.test(lower)) {
     return extractLinks();
   }
 
   // Image patterns
-  if (/\b(image|img|photo|picture|thumbnail|avatar)\b/.test(lower)) {
+  if (/\b(images?|imgs?|photos?|pictures?|thumbnails?|avatars?)\b/.test(lower)) {
     return extractImages();
   }
 
   // View/watch/play count patterns
-  if (/\b(view|watch|play|listen|stream)\b/.test(lower)) {
+  if (/\b(views?|watch|play|listen|stream|view.?count)\b/.test(lower)) {
     return extractViewCounts();
   }
 
   // Description/summary/excerpt/snippet patterns
-  if (/\b(description|summary|excerpt|snippet|preview|subtitle|sub.?title|tagline)\b/.test(lower)) {
+  if (/\b(descriptions?|summar(y|ies)|excerpts?|snippets?|previews?|subtitles?|sub.?titles?|taglines?)\b/.test(lower)) {
     return extractDescriptions();
   }
 
@@ -1062,7 +1088,10 @@ async function handleExtract(command: {
 
     // Standard CSS selector path
     // Try normal querySelector first
-    let element = document.querySelector(selectorOrDesc);
+    let element: Element | null = null;
+    try {
+      element = document.querySelector(selectorOrDesc);
+    } catch { /* invalid CSS selector syntax */ }
 
     // Fix 2: Shadow DOM fallback
     if (!element) {
@@ -2863,11 +2892,13 @@ async function handleScroll(command: {
 }
 
 // ============================================================================
-// Part B: Passive Recorder
+// Part B: Workflow Recorder
 // ============================================================================
 
 let recordingEnabled = false;
 const recordedActions: RecordedAction[] = [];
+let typeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let lastTypeSelector = '';
 
 async function getRecordedActions(): Promise<RecordedAction[]> {
   const result = await chrome.storage.local.get('recordedActions');
@@ -2882,18 +2913,90 @@ async function clearRecordedActions() {
   await chrome.storage.local.set({ recordedActions: [] });
 }
 
-function generateSelector(element: Element): string {
-  // Priority: id > name > unique class > tag with index
+function startRecording() {
+  recordedActions.length = 0;
+  recordingEnabled = true;
+  console.log('[Recorder] Recording started');
+}
+
+function stopRecording() {
+  recordingEnabled = false;
+  console.log('[Recorder] Recording stopped —', recordedActions.length, 'steps');
+}
+
+function exportRecording(name: string): WorkflowExport {
+  const steps: WorkflowStep[] = recordedActions.map((a) => {
+    const step: WorkflowStep = { op: a.type };
+    if (a.selector) step.selector = a.selector;
+    if (a.text) step.text = a.text;
+    if (a.url) step.url = a.url;
+    if (a.key) step.key = a.key;
+    if (a.value) step.value = a.value;
+    return step;
+  });
+
+  return {
+    name,
+    steps,
+    inputs: {},
+    outputs: {},
+  };
+}
+
+function smartSelector(element: Element): string {
+  // Priority: aria-label > id > data-testid > name > stable CSS > generic fallback
+
+  // 1. aria-label (most readable and stable)
+  const ariaLabel = element.getAttribute('aria-label');
+  if (ariaLabel) {
+    const tag = element.tagName.toLowerCase();
+    const sel = `${tag}[aria-label="${ariaLabel}"]`;
+    if (document.querySelectorAll(sel).length === 1) return sel;
+  }
+
+  // 2. ID
   if (element.id) {
-    return `#${element.id}`;
+    // Skip hash-like IDs
+    if (!/^[a-z]{1,3}-[a-zA-Z0-9]{6,}$/.test(element.id) && !/^:/.test(element.id)) {
+      return `#${element.id}`;
+    }
   }
-  
-  if (element instanceof HTMLInputElement && element.name) {
-    return `input[name="${element.name}"]`;
+
+  // 3. data-testid
+  const testId = element.getAttribute('data-testid');
+  if (testId) {
+    return `[data-testid="${testId}"]`;
   }
-  
+
+  // 4. name attribute (for inputs)
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+    if (element.name) {
+      const tag = element.tagName.toLowerCase();
+      return `${tag}[name="${element.name}"]`;
+    }
+  }
+
+  // 5. role + accessible text
+  const role = element.getAttribute('role');
+  if (role) {
+    const text = element.textContent?.trim().slice(0, 40);
+    if (text) {
+      const sel = `[role="${role}"]`;
+      const matches = document.querySelectorAll(sel);
+      if (matches.length === 1) return sel;
+    }
+  }
+
+  // 6. Unique class combo (skip hash-like classes)
   if (element.className && typeof element.className === 'string') {
-    const classes = element.className.split(' ').filter(c => c.trim());
+    const classes = element.className.split(' ').filter((c) => {
+      if (!c.trim()) return false;
+      if (/^css-/i.test(c)) return false;
+      if (/^sc-/i.test(c)) return false;
+      if (/^[a-z]{1,3}-[a-zA-Z0-9]{4,}$/.test(c)) return false;
+      if (/^[a-z]{3,5}-[0-9a-f]{5,}$/i.test(c)) return false;
+      return true;
+    });
     if (classes.length > 0) {
       const selector = `.${classes.join('.')}`;
       if (document.querySelectorAll(selector).length === 1) {
@@ -2901,55 +3004,115 @@ function generateSelector(element: Element): string {
       }
     }
   }
-  
-  // Fallback: tag with nth-of-type
+
+  // 7. Fallback: tag with nth-of-type
   const tag = element.tagName.toLowerCase();
   const siblings = Array.from(element.parentElement?.children || []);
-  const sameTagSiblings = siblings.filter(s => s.tagName === element.tagName);
+  const sameTagSiblings = siblings.filter((s) => s.tagName === element.tagName);
   const index = sameTagSiblings.indexOf(element) + 1;
-  
   return `${tag}:nth-of-type(${index})`;
 }
 
 // Record click events
 document.addEventListener('click', (event) => {
   if (!recordingEnabled) return;
-  
+
   const target = event.target;
   if (!(target instanceof Element)) return;
-  
-  const selector = generateSelector(target);
+
+  const selector = smartSelector(target);
   const action: RecordedAction = {
     type: 'click',
     selector,
     timestamp: Date.now(),
   };
-  
+
   recordedActions.push(action);
   saveRecordedActions(recordedActions);
   console.log('[Recorder] Click:', selector);
 }, true);
 
-// Record input events
+// Record input events (debounced — only save final value per field)
 document.addEventListener('input', (event) => {
   if (!recordingEnabled) return;
-  
+
   const target = event.target;
   if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
-  
-  const selector = generateSelector(target);
+
+  const selector = smartSelector(target);
+
+  // Debounce: if still typing in the same field, update last entry
+  if (lastTypeSelector === selector && recordedActions.length > 0) {
+    const last = recordedActions[recordedActions.length - 1];
+    if (last.type === 'type' && last.selector === selector) {
+      last.text = target.value;
+      last.timestamp = Date.now();
+      if (typeDebounceTimer) clearTimeout(typeDebounceTimer);
+      typeDebounceTimer = setTimeout(() => {
+        saveRecordedActions(recordedActions);
+      }, 500);
+      return;
+    }
+  }
+
+  lastTypeSelector = selector;
   const action: RecordedAction = {
     type: 'type',
     selector,
     text: target.value,
     timestamp: Date.now(),
   };
-  
+
   recordedActions.push(action);
-  saveRecordedActions(recordedActions);
-  console.log('[Recorder] Type:', selector, target.value);
+  if (typeDebounceTimer) clearTimeout(typeDebounceTimer);
+  typeDebounceTimer = setTimeout(() => {
+    saveRecordedActions(recordedActions);
+  }, 500);
+  console.log('[Recorder] Type:', selector);
 }, true);
 
-// Enable recording by default
-recordingEnabled = true;
-console.log('[Content] Bridge executor and recorder loaded');
+// Record select/change events
+document.addEventListener('change', (event) => {
+  if (!recordingEnabled) return;
+
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement)) return;
+
+  const selector = smartSelector(target);
+  const action: RecordedAction = {
+    type: 'select',
+    selector,
+    value: target.value,
+    timestamp: Date.now(),
+  };
+
+  recordedActions.push(action);
+  saveRecordedActions(recordedActions);
+  console.log('[Recorder] Select:', selector, target.value);
+}, true);
+
+// Record key presses (Enter, Escape, Tab — important for form submission)
+document.addEventListener('keydown', (event) => {
+  if (!recordingEnabled) return;
+
+  const key = event.key;
+  if (!['Enter', 'Escape', 'Tab'].includes(key)) return;
+
+  const target = event.target;
+  const selector = target instanceof Element ? smartSelector(target) : undefined;
+
+  const action: RecordedAction = {
+    type: 'press',
+    key,
+    selector,
+    timestamp: Date.now(),
+  };
+
+  recordedActions.push(action);
+  saveRecordedActions(recordedActions);
+  console.log('[Recorder] Press:', key, selector);
+}, true);
+
+// Don't enable recording by default — wait for explicit start
+console.log('[Content] Bridge executor and recorder loaded — v3-workflow-recorder');
+(window as any).__PINGOS_CONTENT_VERSION = 'v3-workflow-recorder';

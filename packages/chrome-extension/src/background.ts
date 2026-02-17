@@ -207,8 +207,21 @@ function connect() {
         return;
       }
 
+      if (message?.type === 'reload_extension') {
+        console.log('[Background] Reload requested via gateway');
+        chrome.runtime.reload();
+        return;
+      }
+
       if (message?.type === 'device_request') {
         await handleDeviceRequest(message as DeviceRequest);
+        return;
+      }
+
+      // Recording commands from gateway
+      if (message?.type === 'record_start' || message?.type === 'record_stop' ||
+          message?.type === 'record_export' || message?.type === 'record_status') {
+        await handleRecordCommand(message);
         return;
       }
     } catch (err) {
@@ -307,6 +320,44 @@ async function handleDeviceRequest(request: DeviceRequest) {
       error: 'Tab not shared',
     });
     return;
+  }
+
+  // Special handling for 'navigate' — use chrome.tabs.update to bypass content script
+  // This ensures navigation works even when the content script is orphaned/stale.
+  if (command.type === 'navigate') {
+    try {
+      const url = command.url;
+      if (!url) {
+        sendDeviceResponse(requestId, { success: false, error: 'No URL provided' });
+        return;
+      }
+      await chrome.tabs.update(tabId, { url });
+      // Wait for page load, then inject content script
+      const waitForLoad = () => new Promise<void>((resolve) => {
+        const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+          if (updatedTabId === tabId && changeInfo.status === 'complete') {
+            chrome.tabs.onUpdated.removeListener(onUpdated);
+            resolve();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(onUpdated);
+        // Timeout after 15s
+        setTimeout(() => {
+          chrome.tabs.onUpdated.removeListener(onUpdated);
+          resolve();
+        }, 15000);
+      });
+      await waitForLoad();
+      await injectContentScript(tabId);
+      sendDeviceResponse(requestId, { success: true });
+      return;
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : 'Navigate failed',
+      });
+      return;
+    }
   }
 
   // Special handling for 'eval' — use chrome.debugger CDP to bypass CSP completely
@@ -477,16 +528,60 @@ async function handleDeviceRequest(request: DeviceRequest) {
 
   // Forward other commands to content script
   try {
-    const response = await chrome.tabs.sendMessage(tabId, {
+    let response = await chrome.tabs.sendMessage(tabId, {
       type: 'bridge_command',
       command,
-    });
+    }).catch(() => null);
 
-    sendDeviceResponse(requestId, response);
+    // If response is null, content script may be orphaned — re-inject and retry once
+    if (!response) {
+      await injectContentScript(tabId);
+      await new Promise(r => setTimeout(r, 300));
+      response = await chrome.tabs.sendMessage(tabId, {
+        type: 'bridge_command',
+        command,
+      }).catch(() => null);
+    }
+
+    sendDeviceResponse(requestId, response ?? { success: false, error: 'Content script not responding' });
   } catch (err) {
     sendDeviceResponse(requestId, {
       success: false,
       error: err instanceof Error ? err.message : 'Unknown error',
+    });
+  }
+}
+
+async function handleRecordCommand(message: any) {
+  const device = message.device || '';
+  const requestId = message.requestId || '';
+  const tabIdMatch = device.match(/^chrome-(\d+)$/);
+
+  if (!tabIdMatch) {
+    sendDeviceResponse(requestId, { success: false, error: 'Invalid device format' });
+    return;
+  }
+
+  const tabId = parseInt(tabIdMatch[1], 10);
+  // Map gateway message type to content script command type
+  const typeMap: Record<string, string> = {
+    record_start: 'record_start',
+    record_stop: 'record_stop',
+    record_export: 'record_export',
+    record_status: 'record_status',
+  };
+  const commandType = typeMap[message.type];
+
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: 'bridge_command',
+      command: { type: commandType, name: message.name },
+    });
+    sendDeviceResponse(requestId, response);
+  } catch (err) {
+    sendDeviceResponse(requestId, {
+      success: false,
+      error: err instanceof Error ? err.message : 'Record command failed',
     });
   }
 }

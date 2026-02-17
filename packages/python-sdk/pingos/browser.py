@@ -75,6 +75,40 @@ class Tab:
         """Evaluate a JavaScript expression in the tab."""
         return self._op('eval', expression=expression)
 
+    def suggest(self, question, context=None):
+        """Get an LLM suggestion for this tab.
+
+        Args:
+            question: The question to ask.
+            context: Optional page context string.
+
+        Returns:
+            dict with 'suggestion' and 'confidence' keys.
+        """
+        body = {'question': question}
+        if context is not None:
+            body['context'] = context
+        return self.client._request('POST', f'/v1/dev/{self.device_id}/suggest', body=body)
+
+    def record_start(self):
+        """Start recording user interactions on this tab."""
+        return self.client._request('POST', '/v1/record/start', body={'device': self.device_id})
+
+    def record_stop(self):
+        """Stop recording user interactions on this tab."""
+        return self.client._request('POST', '/v1/record/stop', body={'device': self.device_id})
+
+    def export_recording(self, name='recording'):
+        """Export the recorded workflow as PingApp JSON.
+
+        Args:
+            name: Name for the exported workflow.
+
+        Returns:
+            dict with the workflow definition.
+        """
+        return self.client._request('POST', '/v1/record/export', body={'device': self.device_id, 'name': name})
+
 
 class Browser:
     """High-level interface to the PingOS gateway."""

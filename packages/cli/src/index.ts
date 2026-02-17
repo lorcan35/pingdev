@@ -302,6 +302,118 @@ async function runServeCommand(argv: string[]) {
   }
 }
 
+async function runSuggestCommand(argv: string[]) {
+  const device = argv[0];
+  const question = argv.slice(1).join(' ');
+  if (!device || !question) {
+    console.error('Usage: pingdev suggest <device> <question>');
+    process.exit(1);
+  }
+
+  const flags = parseFlags(argv);
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+  const context = typeof flags['context'] === 'string' ? flags['context'] : '';
+
+  const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/suggest`;
+  const body = JSON.stringify({ question, context });
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+
+  const data = await res.json() as any;
+  if (!res.ok) {
+    console.error(`[suggest] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+
+  console.log(`Suggestion (confidence: ${data.confidence}):`);
+  console.log(data.suggestion);
+}
+
+async function runRecordCommand(argv: string[]) {
+  const sub = argv[0];
+  const flags = parseFlags(argv.slice(1));
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+  const device = typeof flags['device'] === 'string' ? flags['device'] : argv[1];
+  const baseUrl = `http://${host}:${port}`;
+
+  if (!device && sub !== 'help') {
+    console.error('Usage: pingdev record <start|stop|export|status> <device> [options]');
+    console.error('');
+    console.error('Options:');
+    console.error('  --name <name>   Name for exported workflow (export only)');
+    console.error('  --host <host>   Gateway host (default: localhost)');
+    console.error('  --port <port>   Gateway port (default: 3500)');
+    process.exit(1);
+  }
+
+  switch (sub) {
+    case 'start': {
+      const res = await fetch(`${baseUrl}/v1/record/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[record] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      console.log('[record] Recording started on', device);
+      break;
+    }
+    case 'stop': {
+      const res = await fetch(`${baseUrl}/v1/record/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[record] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      console.log('[record] Recording stopped on', device);
+      break;
+    }
+    case 'export': {
+      const name = typeof flags['name'] === 'string' ? flags['name'] : 'recording';
+      const res = await fetch(`${baseUrl}/v1/record/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device, name }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[record] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(data.result, null, 2));
+      break;
+    }
+    case 'status': {
+      const res = await fetch(`${baseUrl}/v1/record/status?device=${encodeURIComponent(device!)}`, {
+        method: 'GET',
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[record] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      console.log('[record] Status:', JSON.stringify(data.result, null, 2));
+      break;
+    }
+    default:
+      console.error('Usage: pingdev record <start|stop|export|status> <device> [options]');
+      process.exit(1);
+  }
+}
+
 switch (command) {
   case 'recon':
     runReconCommand(args.slice(1)).catch((err) => {
@@ -331,6 +443,20 @@ switch (command) {
       process.exit(1);
     });
     break;
+  case 'suggest':
+    runSuggestCommand(args.slice(1)).catch((err) => {
+      console.error(`[suggest] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'record':
+    runRecordCommand(args.slice(1)).catch((err) => {
+      console.error(`[record] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
   case 'init':
     console.log('pingdev init — not yet implemented (Phase 2)');
     break;
@@ -345,6 +471,8 @@ switch (command) {
     console.log('  validate <app-dir>   Validate a PingApp against a live site');
     console.log('  heal <app-dir>       Validate and auto-fix broken selectors');
     console.log('  serve <app-dir>      Show PingApp config and how to start');
+    console.log('  suggest <dev> <q>    Get an LLM suggestion for a device');
+    console.log('  record <sub> <dev>   Record workflows (start|stop|export|status)');
     console.log('  init <url>           Scaffold a new PingApp for the given URL');
     console.log('  health               Check system health');
     process.exit(command ? 1 : 0);

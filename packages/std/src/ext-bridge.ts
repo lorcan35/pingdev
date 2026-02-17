@@ -223,6 +223,20 @@ export class ExtensionBridge {
     });
   }
 
+  /** Send a raw message to the first connected extension client. */
+  sendToFirstClient(message: unknown): boolean {
+    const first = this.clients.entries().next();
+    if (first.done) return false;
+    const [, ws] = first.value;
+    if (ws.readyState !== 1 /* OPEN */) return false;
+    try {
+      ws.send(JSON.stringify(message));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // ---- internals ----
 
   private onConnection(ws: WebSocket): void {
