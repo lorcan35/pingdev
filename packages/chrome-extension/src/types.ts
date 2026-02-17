@@ -4,7 +4,6 @@ export type BridgeCommand =
   | { type: 'click'; selector: string; x?: number; y?: number; stealth?: boolean }
   | { type: 'type'; selector: string; text: string; stealth?: boolean }
   | { type: 'read'; selector: string; stealth?: boolean }
-  | { type: 'extract'; schema: Record<string, string>; stealth?: boolean } // selector map
   // CANONICAL field name is `expression`; keep `code` as a backwards-compatible alias.
   | { type: 'eval'; expression?: string; code?: string; stealth?: boolean }
   | { type: 'waitFor'; selector: string; timeoutMs?: number; stealth?: boolean }
@@ -12,11 +11,14 @@ export type BridgeCommand =
   | { type: 'getUrl'; stealth?: boolean }
   | { type: 'clean'; mode?: 'css' | 'remove' | 'detect' | 'full'; stealth?: boolean }
   | { type: 'recon'; classify?: boolean; stealth?: boolean }
+  | { type: 'observe'; stealth?: boolean }
   | { type: 'screenshot'; stealth?: boolean }
   | { type: 'press'; key: string; modifiers?: string[]; selector?: string; stealth?: boolean }
   | { type: 'dblclick'; selector: string; stealth?: boolean }
   | { type: 'select'; from?: string; to?: string; selector?: string; startOffset?: number; endOffset?: number; stealth?: boolean }
-  | { type: 'scroll'; direction?: 'up' | 'down' | 'left' | 'right'; amount?: number; selector?: string; to?: 'top' | 'bottom'; stealth?: boolean };
+  | { type: 'scroll'; direction?: 'up' | 'down' | 'left' | 'right'; amount?: number; selector?: string; to?: 'top' | 'bottom'; stealth?: boolean }
+  | { type: 'act'; instruction: string; stealth?: boolean }
+  | { type: 'extract'; range?: string; format?: 'array' | 'object' | 'csv'; schema?: Record<string, string>; stealth?: boolean };
 
 export interface BridgeResponse {
   success: boolean;
