@@ -1,0 +1,30 @@
+{
+  "name": "search-repos",
+  "description": "Search GitHub for repositories matching a query and extract top results",
+  "steps": [
+    { "op": "navigate", "url": "https://github.com/search?type=repositories&q={{query}}" },
+    { "op": "wait", "seconds": 4 },
+    {
+      "op": "extract",
+      "schema": {
+        "top_repo": "[data-testid='results-list'] .search-title a",
+        "top_description": "[data-testid='results-list'] .search-match p"
+      }
+    },
+    {
+      "op": "read",
+      "selector": "[data-testid='results-list'] .search-title a"
+    }
+  ],
+  "inputs": {
+    "query": {
+      "type": "string",
+      "description": "Search query for repositories",
+      "required": true
+    }
+  },
+  "outputs": {
+    "top_repo": { "type": "string", "description": "Name of the top matching repository" },
+    "top_description": { "type": "string", "description": "Description of the top result" }
+  }
+}

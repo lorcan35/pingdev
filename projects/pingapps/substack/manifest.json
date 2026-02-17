@@ -1,0 +1,31 @@
+{
+  "name": "Substack",
+  "version": "0.1.0",
+  "url_patterns": ["substack.com/*", "*.substack.com/*"],
+  "description": "Discover newsletters, read articles, and explore Substack's content network",
+  "user_stories": [
+    {
+      "id": "ss-browse",
+      "as": "a reader",
+      "i_want": "to browse the Substack homepage for recommended newsletters",
+      "so_that": "I can discover new writers and topics that interest me",
+      "workflow": "browse-home"
+    },
+    {
+      "id": "ss-read",
+      "as": "a subscriber",
+      "i_want": "to read the latest post from a specific Substack newsletter",
+      "so_that": "I stay up to date with my favorite writers",
+      "workflow": "read-article"
+    },
+    {
+      "id": "ss-discover",
+      "as": "a curious reader",
+      "i_want": "to search Substack for articles on a specific topic",
+      "so_that": "I can find in-depth analysis and perspectives from independent writers",
+      "workflow": "browse-home"
+    }
+  ],
+  "required_auth": false,
+  "tags": ["newsletters", "writing", "reading", "blogs"]
+}

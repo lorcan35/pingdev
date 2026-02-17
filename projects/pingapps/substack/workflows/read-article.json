@@ -1,0 +1,41 @@
+{
+  "name": "read-article",
+  "description": "Navigate to a Substack newsletter and read the latest article",
+  "steps": [
+    { "op": "navigate", "url": "https://{{newsletter}}.substack.com" },
+    { "op": "wait", "seconds": 5 },
+    {
+      "op": "extract",
+      "schema": {
+        "newsletter_name": ".publication-name",
+        "latest_title": "a[href*='/p/']"
+      }
+    },
+    { "op": "click", "selector": "a[href*='/p/']" },
+    { "op": "wait", "seconds": 5 },
+    {
+      "op": "extract",
+      "schema": {
+        "article_title": "h1",
+        "article_subtitle": "h3.subtitle",
+        "author": "a[class*='frontend-pencraft-Text']"
+      }
+    },
+    {
+      "op": "eval",
+      "expression": "Array.from(document.querySelectorAll('p')).filter(p => p.closest('.body') && p.textContent.trim().length > 20).slice(0, 3).map(p => p.textContent.trim().substring(0, 200))"
+    }
+  ],
+  "inputs": {
+    "newsletter": {
+      "type": "string",
+      "description": "Substack newsletter subdomain (e.g., 'platformer')",
+      "required": true
+    }
+  },
+  "outputs": {
+    "article_title": { "type": "string", "description": "Title of the article" },
+    "article_subtitle": { "type": "string", "description": "Subtitle" },
+    "author": { "type": "string", "description": "Author name" }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "browse-feed",
+  "description": "Browse the LinkedIn feed and extract visible profile activity",
+  "steps": [
+    { "op": "navigate", "url": "https://www.linkedin.com/feed/" },
+    { "op": "wait", "seconds": 5 },
+    { "op": "scroll", "direction": "down", "amount": 3 },
+    { "op": "wait", "seconds": 2 },
+    { "op": "observe" }
+  ],
+  "inputs": {},
+  "outputs": {
+    "summary": { "type": "string", "description": "Page summary with interactive element counts" },
+    "actions": { "type": "array", "description": "Available actions on the feed" }
+  }
+}

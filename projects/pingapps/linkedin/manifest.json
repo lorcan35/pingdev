@@ -1,0 +1,31 @@
+{
+  "name": "LinkedIn",
+  "version": "0.1.0",
+  "url_patterns": ["linkedin.com/*", "www.linkedin.com/*"],
+  "description": "Search for people, browse profiles, and explore professional content on LinkedIn",
+  "user_stories": [
+    {
+      "id": "li-search",
+      "as": "a recruiter",
+      "i_want": "to search for people with specific skills or job titles",
+      "so_that": "I can find candidates for open positions",
+      "workflow": "search-people"
+    },
+    {
+      "id": "li-feed",
+      "as": "a professional",
+      "i_want": "to browse my LinkedIn feed for industry updates",
+      "so_that": "I stay connected with my professional network",
+      "workflow": "browse-feed"
+    },
+    {
+      "id": "li-profile",
+      "as": "a job seeker",
+      "i_want": "to view a company's profile and recent posts",
+      "so_that": "I can research potential employers before applying",
+      "workflow": "search-people"
+    }
+  ],
+  "required_auth": true,
+  "tags": ["professional", "networking", "recruiting", "careers"]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "read-thread",
+  "description": "Navigate to a user's profile and read their latest tweet/thread",
+  "steps": [
+    { "op": "navigate", "url": "https://x.com/{{username}}" },
+    { "op": "wait", "seconds": 5 },
+    {
+      "op": "extract",
+      "schema": {
+        "display_name": "[data-testid='UserName'] span",
+        "bio": "[data-testid='UserDescription']",
+        "latest_tweet": "[data-testid='tweetText']"
+      }
+    },
+    { "op": "click", "selector": "[data-testid='tweetText']" },
+    { "op": "wait", "seconds": 4 },
+    {
+      "op": "read",
+      "selector": "[data-testid='tweetText']"
+    }
+  ],
+  "inputs": {
+    "username": {
+      "type": "string",
+      "description": "X/Twitter username without @ (e.g., 'elonmusk')",
+      "required": true
+    }
+  },
+  "outputs": {
+    "display_name": { "type": "string", "description": "User's display name" },
+    "bio": { "type": "string", "description": "User's bio text" },
+    "latest_tweet": { "type": "string", "description": "Text of their latest tweet" }
+  }
+}

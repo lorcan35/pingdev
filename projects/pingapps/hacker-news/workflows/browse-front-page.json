@@ -1,0 +1,26 @@
+{
+  "name": "browse-front-page",
+  "description": "Navigate to Hacker News front page and extract top stories with points and comment counts",
+  "steps": [
+    { "op": "navigate", "url": "https://news.ycombinator.com/" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "top_title": ".titleline > a",
+        "top_points": ".score",
+        "top_source": ".titleline > .sitestr"
+      }
+    },
+    {
+      "op": "read",
+      "selector": ".titleline > a"
+    }
+  ],
+  "inputs": {},
+  "outputs": {
+    "top_title": { "type": "string", "description": "Title of the #1 story" },
+    "top_points": { "type": "string", "description": "Points of the #1 story" },
+    "top_source": { "type": "string", "description": "Source domain of the #1 story" }
+  }
+}
