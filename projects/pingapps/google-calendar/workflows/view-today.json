@@ -1,0 +1,23 @@
+{
+  "name": "view-today",
+  "description": "View today's events in Google Calendar and extract event details",
+  "steps": [
+    { "op": "navigate", "url": "https://calendar.google.com/calendar/u/0/r/day" },
+    { "op": "wait", "seconds": 4 },
+    {
+      "op": "extract",
+      "schema": {
+        "events": "[data-eventchip] span[data-eventchip]",
+        "times": "[data-eventchip] [aria-label]",
+        "current_date": "[data-datekey].KKi2nd"
+      }
+    },
+    { "op": "screenshot" }
+  ],
+  "inputs": {},
+  "outputs": {
+    "events": { "type": "array", "description": "Names of today's calendar events" },
+    "times": { "type": "array", "description": "Times and details for each event" },
+    "current_date": { "type": "string", "description": "The currently displayed date" }
+  }
+}

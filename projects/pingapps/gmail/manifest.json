@@ -1,0 +1,24 @@
+{
+  "name": "Gmail",
+  "version": "0.1.0",
+  "url_patterns": ["mail.google.com/*"],
+  "description": "Check inbox, read emails, and compose messages in Gmail",
+  "user_stories": [
+    {
+      "id": "gm-inbox",
+      "as": "a user",
+      "i_want": "to check my inbox for new emails",
+      "so_that": "I can see unread messages and their subjects at a glance",
+      "workflow": "check-inbox"
+    },
+    {
+      "id": "gm-compose",
+      "as": "a user",
+      "i_want": "to compose and send a new email",
+      "so_that": "I can communicate with someone without manual browser navigation",
+      "workflow": "compose-email"
+    }
+  ],
+  "required_auth": true,
+  "tags": ["email", "communication", "productivity"]
+}

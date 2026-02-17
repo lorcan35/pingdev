@@ -1,0 +1,45 @@
+{
+  "name": "extract-top-posts",
+  "description": "Extract the top posts from a subreddit sorted by top of the specified time period",
+  "steps": [
+    { "op": "navigate", "url": "https://www.reddit.com/r/{{subreddit}}/top/?t={{time_period}}" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "titles": "shreddit-post [slot='title']",
+        "authors": "shreddit-post [slot='credit-bar'] a",
+        "scores": "shreddit-post shreddit-post-overflow faceplate-number",
+        "comment_counts": "shreddit-post [slot='comment-count']"
+      }
+    },
+    { "op": "scroll", "direction": "down", "amount": 3 },
+    { "op": "wait", "seconds": 2 },
+    {
+      "op": "extract",
+      "schema": {
+        "more_titles": "shreddit-post [slot='title']",
+        "more_scores": "shreddit-post shreddit-post-overflow faceplate-number"
+      }
+    }
+  ],
+  "inputs": {
+    "subreddit": {
+      "type": "string",
+      "description": "Name of the subreddit (without r/ prefix)",
+      "required": true
+    },
+    "time_period": {
+      "type": "string",
+      "description": "Time period for top posts: hour, day, week, month, year, all",
+      "required": false,
+      "default": "week"
+    }
+  },
+  "outputs": {
+    "titles": { "type": "array", "description": "Top post titles (first page)" },
+    "authors": { "type": "array", "description": "Post authors" },
+    "scores": { "type": "array", "description": "Upvote scores" },
+    "more_titles": { "type": "array", "description": "Additional post titles after scrolling" }
+  }
+}

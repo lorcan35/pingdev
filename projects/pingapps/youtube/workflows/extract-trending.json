@@ -1,0 +1,25 @@
+{
+  "name": "extract-trending",
+  "description": "Navigate to YouTube Trending and extract the top trending videos",
+  "steps": [
+    { "op": "navigate", "url": "https://www.youtube.com/feed/trending" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "titles": "ytd-video-renderer #video-title",
+        "channels": "ytd-video-renderer ytd-channel-name a",
+        "views": "ytd-video-renderer #metadata-line span:first-child",
+        "durations": "ytd-video-renderer ytd-thumbnail-overlay-time-status-renderer span"
+      }
+    },
+    { "op": "screenshot" }
+  ],
+  "inputs": {},
+  "outputs": {
+    "titles": { "type": "array", "description": "Titles of trending videos" },
+    "channels": { "type": "array", "description": "Channel names for trending videos" },
+    "views": { "type": "array", "description": "View counts for trending videos" },
+    "durations": { "type": "array", "description": "Video durations" }
+  }
+}

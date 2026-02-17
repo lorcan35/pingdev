@@ -1,0 +1,31 @@
+{
+  "name": "browse-subreddit",
+  "description": "Navigate to a subreddit and extract the current posts on the front page",
+  "steps": [
+    { "op": "navigate", "url": "https://www.reddit.com/r/{{subreddit}}/" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "titles": "shreddit-post [slot='title']",
+        "authors": "shreddit-post [slot='credit-bar'] a",
+        "scores": "shreddit-post shreddit-post-overflow faceplate-number",
+        "comment_counts": "shreddit-post [slot='comment-count']"
+      }
+    },
+    { "op": "screenshot" }
+  ],
+  "inputs": {
+    "subreddit": {
+      "type": "string",
+      "description": "Name of the subreddit to browse (without r/ prefix)",
+      "required": true
+    }
+  },
+  "outputs": {
+    "titles": { "type": "array", "description": "Post titles on the subreddit front page" },
+    "authors": { "type": "array", "description": "Post authors" },
+    "scores": { "type": "array", "description": "Upvote scores" },
+    "comment_counts": { "type": "array", "description": "Number of comments per post" }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "name": "compose-email",
+  "description": "Compose and send a new email in Gmail",
+  "steps": [
+    { "op": "navigate", "url": "https://mail.google.com/mail/u/0/#inbox" },
+    { "op": "wait", "seconds": 4 },
+    { "op": "act", "instruction": "click the Compose button" },
+    { "op": "wait", "seconds": 2 },
+    { "op": "act", "instruction": "click the To field in the compose window" },
+    { "op": "type", "text": "{{to}}" },
+    { "op": "press", "key": "Tab" },
+    { "op": "act", "instruction": "click the Subject field" },
+    { "op": "type", "text": "{{subject}}" },
+    { "op": "act", "instruction": "click the email body area" },
+    { "op": "type", "text": "{{body}}" },
+    { "op": "screenshot" },
+    { "op": "act", "instruction": "click the Send button" },
+    { "op": "wait", "seconds": 2 },
+    {
+      "op": "extract",
+      "schema": {
+        "confirmation": ".aT [data-message-id]"
+      }
+    }
+  ],
+  "inputs": {
+    "to": {
+      "type": "string",
+      "description": "Recipient email address",
+      "required": true
+    },
+    "subject": {
+      "type": "string",
+      "description": "Email subject line",
+      "required": true
+    },
+    "body": {
+      "type": "string",
+      "description": "Email body text",
+      "required": true
+    }
+  },
+  "outputs": {
+    "confirmation": { "type": "string", "description": "Confirmation that the email was sent" }
+  }
+}

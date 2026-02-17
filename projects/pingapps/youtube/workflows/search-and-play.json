@@ -1,0 +1,43 @@
+{
+  "name": "search-and-play",
+  "description": "Search YouTube for a query and play the first matching video",
+  "steps": [
+    { "op": "navigate", "url": "https://www.youtube.com" },
+    { "op": "wait", "seconds": 5 },
+    { "op": "click", "selector": "input[name=\"search_query\"]" },
+    { "op": "type", "text": "{{query}}", "selector": "input[name=\"search_query\"]" },
+    { "op": "click", "selector": "button[aria-label=\"Search\"]" },
+    { "op": "wait", "seconds": 4 },
+    {
+      "op": "extract",
+      "schema": {
+        "titles": "ytd-video-renderer #video-title",
+        "channels": "ytd-video-renderer ytd-channel-name a",
+        "views": "ytd-video-renderer #metadata-line span:first-child"
+      }
+    },
+    { "op": "click", "selector": "ytd-video-renderer #video-title" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "video_title": "ytd-watch-metadata h1 yt-formatted-string",
+        "channel_name": "ytd-channel-name a",
+        "view_count": "#info-container #info span"
+      }
+    }
+  ],
+  "inputs": {
+    "query": {
+      "type": "string",
+      "description": "Search query for finding videos",
+      "required": true
+    }
+  },
+  "outputs": {
+    "titles": { "type": "array", "description": "Video titles from search results" },
+    "channels": { "type": "array", "description": "Channel names for each result" },
+    "video_title": { "type": "string", "description": "Title of the playing video" },
+    "channel_name": { "type": "string", "description": "Channel of the playing video" }
+  }
+}

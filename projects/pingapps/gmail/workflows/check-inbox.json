@@ -1,0 +1,36 @@
+{
+  "name": "check-inbox",
+  "description": "Open Gmail inbox and extract unread email subjects, senders, and snippets",
+  "steps": [
+    { "op": "navigate", "url": "https://mail.google.com/mail/u/0/#inbox" },
+    { "op": "wait", "seconds": 4 },
+    {
+      "op": "extract",
+      "schema": {
+        "unread_count": ".aim [aria-label*='Inbox'] .bsU",
+        "senders": "tr.zE .yW span[email]",
+        "subjects": "tr.zE .y6 span:first-child",
+        "snippets": "tr.zE .y2"
+      }
+    },
+    {
+      "op": "extract",
+      "schema": {
+        "all_senders": "tr .yW span[email]",
+        "all_subjects": "tr .y6 span:first-child",
+        "timestamps": "tr td.xW span[title]"
+      }
+    },
+    { "op": "screenshot" }
+  ],
+  "inputs": {},
+  "outputs": {
+    "unread_count": { "type": "string", "description": "Number of unread emails in inbox" },
+    "senders": { "type": "array", "description": "Senders of unread emails" },
+    "subjects": { "type": "array", "description": "Subjects of unread emails" },
+    "snippets": { "type": "array", "description": "Preview text of unread emails" },
+    "all_senders": { "type": "array", "description": "All visible email senders" },
+    "all_subjects": { "type": "array", "description": "All visible email subjects" },
+    "timestamps": { "type": "array", "description": "Timestamps of visible emails" }
+  }
+}

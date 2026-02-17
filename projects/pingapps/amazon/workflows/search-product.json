@@ -1,0 +1,37 @@
+{
+  "name": "search-product",
+  "description": "Search Amazon for a product and extract results with prices and ratings",
+  "steps": [
+    { "op": "navigate", "url": "https://www.amazon.com" },
+    { "op": "wait", "seconds": 3 },
+    { "op": "act", "instruction": "click the search box at the top of the page" },
+    { "op": "type", "text": "{{query}}" },
+    { "op": "press", "key": "Enter" },
+    { "op": "wait", "seconds": 3 },
+    {
+      "op": "extract",
+      "schema": {
+        "titles": "[data-component-type='s-search-result'] h2 a span",
+        "prices": "[data-component-type='s-search-result'] .a-price .a-offscreen",
+        "ratings": "[data-component-type='s-search-result'] .a-icon-alt",
+        "review_counts": "[data-component-type='s-search-result'] .s-underline-text",
+        "links": "[data-component-type='s-search-result'] h2 a"
+      }
+    },
+    { "op": "screenshot" }
+  ],
+  "inputs": {
+    "query": {
+      "type": "string",
+      "description": "Product search query",
+      "required": true
+    }
+  },
+  "outputs": {
+    "titles": { "type": "array", "description": "Product names from search results" },
+    "prices": { "type": "array", "description": "Product prices" },
+    "ratings": { "type": "array", "description": "Star ratings (e.g. '4.5 out of 5 stars')" },
+    "review_counts": { "type": "array", "description": "Number of reviews per product" },
+    "links": { "type": "array", "description": "Product page links" }
+  }
+}

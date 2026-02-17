@@ -131,6 +131,7 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
 }
 
 function findElement(selector: string): Element | null {
+  if (!selector || typeof selector !== 'string') return null;
   // text= prefix: search interactive elements by text content
   if (selector.startsWith('text=')) {
     const text = selector.slice(5);
@@ -236,6 +237,7 @@ function findElement(selector: string): Element | null {
 }
 
 async function handleClick(selector: string, stealth?: boolean, x?: number, y?: number): Promise<BridgeResponse> {
+  if (!selector || typeof selector !== 'string') return { success: false, error: 'Invalid selector: must be a string' };
   const element = findElement(selector);
 
   // Name-box fallback for cell= selectors in canvas apps (no ARIA gridcells)
@@ -297,7 +299,16 @@ async function handleClick(selector: string, stealth?: boolean, x?: number, y?: 
 }
 
 async function handleType(selector: string, text: string, stealth?: boolean): Promise<BridgeResponse> {
-  const element = findElement(selector);
+  // If no selector provided, type into the currently focused/active element
+  let element: Element | null = null;
+  if (!selector || typeof selector !== 'string') {
+    element = document.activeElement;
+    if (!element || element === document.body) {
+      return { success: false, error: 'No selector provided and no element is focused' };
+    }
+  } else {
+    element = findElement(selector);
+  }
   if (!element) return { success: false, error: `Element not found: ${selector}` };
 
   const editable = resolveEditableElement(element);
@@ -315,6 +326,7 @@ async function handleType(selector: string, text: string, stealth?: boolean): Pr
 }
 
 async function handleRead(selector: string): Promise<BridgeResponse> {
+  if (!selector || typeof selector !== 'string') return { success: false, error: 'Invalid selector: must be a string' };
   // Cell range reading: cell=A1:B5 → read a grid block from ARIA overlay
   const rangeMatch = selector.match(/^cell=([A-Za-z]+\d+):([A-Za-z]+\d+)$/);
   if (rangeMatch) {
@@ -2059,7 +2071,7 @@ async function handlePress(
 ): Promise<BridgeResponse> {
   // Resolve target element
   let target: Element | null = null;
-  if (selector) {
+  if (selector && typeof selector === 'string') {
     target = findElement(selector);
     if (!target) return { success: false, error: `Element not found: ${selector}` };
   } else {
@@ -2110,6 +2122,7 @@ async function handlePress(
 // DblClick handler
 // ---------------------------------------------------------------------------
 async function handleDblClick(selector: string, stealth?: boolean): Promise<BridgeResponse> {
+  if (!selector || typeof selector !== 'string') return { success: false, error: 'Invalid selector: must be a string' };
   const element = findElement(selector);
 
   // Name-box fallback for cell= selectors: navigate then press F2 to enter edit mode

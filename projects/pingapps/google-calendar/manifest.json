@@ -1,0 +1,24 @@
+{
+  "name": "Google Calendar",
+  "version": "0.1.0",
+  "url_patterns": ["calendar.google.com/*"],
+  "description": "View upcoming events and create new calendar entries in Google Calendar",
+  "user_stories": [
+    {
+      "id": "gcal-today",
+      "as": "a user",
+      "i_want": "to see my events for today",
+      "so_that": "I can plan my day without opening the calendar manually",
+      "workflow": "view-today"
+    },
+    {
+      "id": "gcal-create",
+      "as": "a user",
+      "i_want": "to create a new calendar event",
+      "so_that": "I can schedule meetings or reminders quickly",
+      "workflow": "create-event"
+    }
+  ],
+  "required_auth": true,
+  "tags": ["calendar", "scheduling", "productivity"]
+}
