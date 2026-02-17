@@ -183,17 +183,24 @@ function findElement(selector: string): Element | null {
     const parts = selector.slice(5);
     const [role, ...rest] = parts.split(':');
     const filter = rest.join(':');
+    // Fix 2: Shadow DOM piercing for role selectors
     const candidates = document.querySelectorAll(`[role="${role}"]`);
+    let allCandidates = Array.from(candidates);
+    if (allCandidates.length === 0) {
+      allCandidates = deepQuerySelectorAll(document, `[role="${role}"]`);
+    }
 
     // nth= modifier
     if (filter.startsWith('nth=')) {
       const n = parseInt(filter.slice(4), 10);
-      return candidates[n - 1] ?? null;
+      return allCandidates[n - 1] ?? null;
     }
 
-    if (!filter) return candidates[0] ?? null;
-    for (const el of Array.from(candidates)) {
-      const label = el.getAttribute('aria-label') || el.textContent?.trim() || '';
+    if (!filter) return allCandidates[0] ?? null;
+    for (const el of allCandidates) {
+      // Fix 3: Sanitize aria-label before matching
+      const rawLabel = el.getAttribute('aria-label') || el.textContent?.trim() || '';
+      const label = sanitizeAriaLabel(rawLabel);
       if (label.includes(filter)) return el;
     }
     return null;
@@ -202,25 +209,34 @@ function findElement(selector: string): Element | null {
   // aria= prefix: find by aria-label
   if (selector.startsWith('aria=')) {
     const label = selector.slice(5);
-    const escaped = label.replace(/["\\]/g, '\\$&');
-    return document.querySelector(`[aria-label="${escaped}"]`) ??
+    const escaped = escapeCSSAttrValue(label);
+    let result = document.querySelector(`[aria-label="${escaped}"]`) ??
       document.querySelector(`[aria-label*="${escaped}"]`) ??
       null;
+    // Fix 2: Shadow DOM fallback
+    if (!result) {
+      result = deepQuerySelector(document, `[aria-label="${escaped}"]`) ??
+        deepQuerySelector(document, `[aria-label*="${escaped}"]`) ??
+        null;
+    }
+    return result;
   }
 
   // cell= prefix: find spreadsheet/table cell by coordinates (e.g. cell=A1 or cell=R1C1)
   if (selector.startsWith('cell=')) {
     const ref = selector.slice(5).toUpperCase();
-    const escaped = ref.replace(/["\\]/g, '\\$&');
+    const escaped = escapeCSSAttrValue(ref);
     // Try exact aria-label match first (Google Sheets uses labels like "A1" or "Cell A1")
     const byExact = document.querySelector(`[aria-label="${escaped}"]`);
     if (byExact) return byExact;
     // Try contains match but verify it's the right cell (avoid A1 matching A10)
     const candidates = document.querySelectorAll(`[aria-label*="${escaped}"]`);
     for (const el of Array.from(candidates)) {
-      const label = el.getAttribute('aria-label') || '';
+      const rawLabel = el.getAttribute('aria-label') || '';
+      // Fix 3: Escape regex chars in ref before using in RegExp
+      const escapedRef = escapeRegexChars(ref);
       // Match if label equals ref, or ref appears as a whole token (followed by non-alphanumeric or end)
-      if (label === ref || new RegExp(`\\b${ref}\\b`, 'i').test(label)) return el;
+      if (rawLabel === ref || new RegExp(`\\b${escapedRef}\\b`, 'i').test(rawLabel)) return el;
     }
     // Try data-cell attribute
     const byData = document.querySelector(`[data-cell="${escaped}"]`);
@@ -233,7 +249,12 @@ function findElement(selector: string): Element | null {
   }
 
   // Default: CSS selector
-  return document.querySelector(selector);
+  // Fix 2: Try normal querySelector first, then shadow DOM piercing
+  try {
+    const result = document.querySelector(selector);
+    if (result) return result;
+  } catch { /* invalid selector syntax */ }
+  return deepQuerySelector(document, selector);
 }
 
 async function handleClick(selector: string, stealth?: boolean, x?: number, y?: number): Promise<BridgeResponse> {
@@ -347,7 +368,11 @@ async function handleRead(selector: string): Promise<BridgeResponse> {
   }
 
   // Standard CSS selectors can match multiple elements
-  const nodes = Array.from(document.querySelectorAll(selector));
+  let nodes = Array.from(document.querySelectorAll(selector));
+  // Fix 2: Shadow DOM fallback for read
+  if (nodes.length === 0) {
+    nodes = deepQuerySelectorAll(document, selector);
+  }
   if (nodes.length === 0) return { success: false, error: `Element not found: ${selector}` };
 
   const texts = nodes.map((el) => readText(el));
@@ -440,6 +465,519 @@ async function readCellRange(startRef: string, endRef: string): Promise<BridgeRe
   };
 }
 
+// ---------------------------------------------------------------------------
+// Fix 2: Shadow DOM Piercing — traverse shadow roots for selector matching
+// ---------------------------------------------------------------------------
+
+function deepQuerySelectorAll(root: Document | Element | ShadowRoot, selector: string): Element[] {
+  const results: Element[] = [];
+  try {
+    results.push(...Array.from(root.querySelectorAll(selector)));
+  } catch { /* invalid selector */ }
+
+  // Traverse shadow roots
+  const traverse = (node: Document | Element | ShadowRoot) => {
+    const children = node instanceof Document ? Array.from(node.querySelectorAll('*')) : Array.from(node.querySelectorAll('*'));
+    for (const child of children) {
+      if (child.shadowRoot) {
+        try {
+          results.push(...Array.from(child.shadowRoot.querySelectorAll(selector)));
+        } catch { /* invalid selector */ }
+        traverse(child.shadowRoot);
+      }
+    }
+  };
+  traverse(root);
+  return results;
+}
+
+function deepQuerySelector(root: Document | Element | ShadowRoot, selector: string): Element | null {
+  try {
+    const result = root.querySelector(selector);
+    if (result) return result;
+  } catch { /* invalid selector */ }
+
+  // Traverse shadow roots
+  const traverse = (node: Document | Element | ShadowRoot): Element | null => {
+    const children = Array.from(node.querySelectorAll('*'));
+    for (const child of children) {
+      if (child.shadowRoot) {
+        try {
+          const found = child.shadowRoot.querySelector(selector);
+          if (found) return found;
+        } catch { /* invalid selector */ }
+        const deeper = traverse(child.shadowRoot);
+        if (deeper) return deeper;
+      }
+    }
+    return null;
+  };
+  return traverse(root);
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3: Aria-Label Sanitization — escape special chars for regex/CSS safety
+// ---------------------------------------------------------------------------
+
+function sanitizeAriaLabel(label: string): string {
+  if (!label) return '';
+  // Truncate absurdly long labels (some Amazon/eBay product labels are 500+ chars)
+  let safe = label.substring(0, 200);
+  // Normalize unicode whitespace
+  safe = safe.replace(/[\u00A0\u2000-\u200B\u2028\u2029\uFEFF]/g, ' ');
+  // Collapse multiple spaces
+  safe = safe.replace(/\s+/g, ' ').trim();
+  return safe;
+}
+
+function escapeRegexChars(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function escapeCSSAttrValue(str: string): string {
+  // Escape chars that break CSS attribute selectors: " \ and control chars
+  return str.replace(/["\\]/g, '\\$&').replace(/[\x00-\x1f\x7f]/g, '');
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: Natural Language Extract — heuristic content extraction by description
+// ---------------------------------------------------------------------------
+
+function isNaturalLanguageQuery(value: string): boolean {
+  if (!value || value.length < 3) return false;
+  // If it looks like a CSS selector (starts with ., #, [, or contains tag-like patterns), it's not NL
+  if (/^[.#\[]/.test(value)) return false;
+  if (/^[a-z]+[.#\[][a-z]/i.test(value)) return false;
+  // If it contains CSS combinator patterns, it's not NL
+  if (/[>+~]/.test(value) && !/\s[>+~]\s/.test(value)) return false;
+  // If it's a simple tag name, not NL
+  if (/^(div|span|p|a|h[1-6]|ul|ol|li|table|tr|td|th|img|input|button|form|section|article|nav|header|footer|main|aside)$/i.test(value)) return false;
+  // Contains spaces or articles/prepositions = likely natural language
+  if (/\b(the|a|an|of|on|in|for|from|this|that|all|each|every)\b/i.test(value)) return true;
+  // Contains descriptive words
+  if (/\b(title|name|price|headline|comment|review|date|time|author|score|count|text|content|description|link|url|image|video|post|article|item|product|result)\b/i.test(value)) return true;
+  // Multiple words = likely natural language
+  if (value.split(/\s+/).length >= 2) return true;
+  return false;
+}
+
+interface NLExtractResult {
+  items: string[];
+  method: string;
+}
+
+function extractByNaturalLanguage(description: string): NLExtractResult {
+  const lower = description.toLowerCase();
+
+  // Title/headline patterns
+  if (/\b(title|headline|heading)\b/.test(lower)) {
+    return extractTitles();
+  }
+
+  // Price/cost patterns
+  if (/\b(price|cost|amount|fee)\b/.test(lower)) {
+    return extractPrices();
+  }
+
+  // Score/vote/upvote/rating patterns
+  if (/\b(score|vote|upvote|downvote|rating|point|karma)\b/.test(lower)) {
+    return extractScores();
+  }
+
+  // Comment/review/feedback patterns
+  if (/\b(comment|review|feedback|reply|response)\b/.test(lower)) {
+    return extractTextBlocks('comment');
+  }
+
+  // Date/time patterns
+  if (/\b(date|time|when|posted|published|created|updated|ago)\b/.test(lower)) {
+    return extractDates();
+  }
+
+  // Name/author/user/channel patterns
+  if (/\b(name|author|user|channel|creator|by|poster|username|handle)\b/.test(lower)) {
+    return extractNames();
+  }
+
+  // Link/URL patterns
+  if (/\b(link|url|href)\b/.test(lower)) {
+    return extractLinks();
+  }
+
+  // Image patterns
+  if (/\b(image|img|photo|picture|thumbnail|avatar)\b/.test(lower)) {
+    return extractImages();
+  }
+
+  // View/watch/play count patterns
+  if (/\b(view|watch|play|listen|stream)\b/.test(lower)) {
+    return extractViewCounts();
+  }
+
+  // Description/summary/excerpt/snippet patterns
+  if (/\b(description|summary|excerpt|snippet|preview|subtitle|sub.?title|tagline)\b/.test(lower)) {
+    return extractDescriptions();
+  }
+
+  // Generic: try to find repeated patterns that match the description
+  return extractGeneric(description);
+}
+
+function extractTitles(): NLExtractResult {
+  const titles: string[] = [];
+
+  // Strategy 1: h1-h3 headings
+  const headings = document.querySelectorAll('h1, h2, h3');
+  for (const h of Array.from(headings)) {
+    const text = h.textContent?.trim();
+    if (text && text.length > 3 && text.length < 300) titles.push(text);
+  }
+
+  // Strategy 2: links inside repeated containers (common in feeds/lists)
+  if (titles.length < 3) {
+    const repeated = findRepeatedContainers();
+    for (const container of repeated) {
+      const link = container.querySelector('a[href]');
+      const heading = container.querySelector('h1, h2, h3, h4, [role="heading"]');
+      const el = heading || link;
+      if (el) {
+        const text = el.textContent?.trim();
+        if (text && text.length > 3 && text.length < 300 && !titles.includes(text)) {
+          titles.push(text);
+        }
+      }
+    }
+  }
+
+  // Strategy 3: aria heading roles
+  if (titles.length < 3) {
+    const ariaHeadings = document.querySelectorAll('[role="heading"]');
+    for (const h of Array.from(ariaHeadings)) {
+      const text = h.textContent?.trim();
+      if (text && text.length > 3 && !titles.includes(text)) titles.push(text);
+    }
+  }
+
+  // Strategy 4: links with title attributes
+  if (titles.length < 3) {
+    const titledLinks = document.querySelectorAll('a[title]');
+    for (const a of Array.from(titledLinks)) {
+      const text = a.getAttribute('title')?.trim();
+      if (text && text.length > 3 && !titles.includes(text)) titles.push(text);
+    }
+  }
+
+  return { items: titles.slice(0, 50), method: 'headings+repeated-containers' };
+}
+
+function extractPrices(): NLExtractResult {
+  const prices: string[] = [];
+  const priceRegex = /(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP)\s*[\d,]+(?:\.\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP)/;
+
+  // Walk all text nodes
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const text = node.textContent?.trim() || '';
+    const match = text.match(priceRegex);
+    if (match && match[0]) {
+      prices.push(match[0]);
+    }
+  }
+
+  // Also check elements with price-related classes/attributes
+  const priceEls = document.querySelectorAll('[class*="price"], [class*="Price"], [data-price], [itemprop="price"]');
+  for (const el of Array.from(priceEls)) {
+    const text = el.textContent?.trim();
+    if (text && text.length < 30 && !prices.includes(text)) {
+      prices.push(text);
+    }
+  }
+
+  return { items: [...new Set(prices)].slice(0, 50), method: 'price-regex+price-classes' };
+}
+
+function extractScores(): NLExtractResult {
+  const scores: string[] = [];
+
+  // Elements with score/vote related attributes
+  const scoreEls = document.querySelectorAll(
+    '[class*="score"], [class*="vote"], [class*="karma"], [class*="rating"], [class*="points"], ' +
+    '[data-score], [data-vote-count], [aria-label*="vote"], [aria-label*="point"]'
+  );
+  for (const el of Array.from(scoreEls)) {
+    const text = el.textContent?.trim();
+    if (text && text.length < 20) scores.push(text);
+  }
+
+  // Shadow DOM fallback for sites like Reddit
+  if (scores.length === 0) {
+    const shadowScores = deepQuerySelectorAll(document, '[class*="score"], [class*="vote"], [data-score]');
+    for (const el of shadowScores) {
+      const text = el.textContent?.trim();
+      if (text && text.length < 20) scores.push(text);
+    }
+  }
+
+  return { items: scores.slice(0, 50), method: 'score-classes+shadow-dom' };
+}
+
+function extractTextBlocks(type: string): NLExtractResult {
+  const blocks: string[] = [];
+  const selectors = type === 'comment'
+    ? '[class*="comment"], [class*="Comment"], [data-type="comment"], [class*="reply"], [class*="post-body"]'
+    : 'p, [class*="text"], [class*="body"], [class*="content"]';
+
+  const els = document.querySelectorAll(selectors);
+  for (const el of Array.from(els)) {
+    const text = el.textContent?.trim();
+    if (text && text.length > 10 && text.length < 2000) blocks.push(text);
+  }
+
+  return { items: blocks.slice(0, 30), method: `${type}-selectors` };
+}
+
+function extractDates(): NLExtractResult {
+  const dates: string[] = [];
+
+  // time elements
+  const timeEls = document.querySelectorAll('time, [datetime], [class*="date"], [class*="time"], [class*="ago"]');
+  for (const el of Array.from(timeEls)) {
+    const datetime = el.getAttribute('datetime');
+    const text = datetime || el.textContent?.trim();
+    if (text && text.length < 60) dates.push(text);
+  }
+
+  // Text with date-like patterns
+  if (dates.length === 0) {
+    const dateRegex = /\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{2,4}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\b\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago\b/gi;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent?.trim() || '';
+      const matches = text.match(dateRegex);
+      if (matches) dates.push(...matches);
+    }
+  }
+
+  return { items: [...new Set(dates)].slice(0, 50), method: 'time-elements+date-regex' };
+}
+
+function extractNames(): NLExtractResult {
+  const names: string[] = [];
+
+  // Channel/author/user elements
+  const nameEls = document.querySelectorAll(
+    '[class*="author"], [class*="channel"], [class*="user"], [class*="creator"], [class*="byline"], ' +
+    '[class*="Author"], [class*="Channel"], [class*="User"], [itemprop="author"], [rel="author"]'
+  );
+  for (const el of Array.from(nameEls)) {
+    const text = el.textContent?.trim();
+    if (text && text.length > 1 && text.length < 100 && !names.includes(text)) names.push(text);
+  }
+
+  // Links inside repeated containers that look like usernames (short text)
+  if (names.length === 0) {
+    const repeated = findRepeatedContainers();
+    for (const container of repeated) {
+      const links = container.querySelectorAll('a[href]');
+      for (const link of Array.from(links)) {
+        const text = link.textContent?.trim();
+        // Heuristic: names/usernames are short and don't contain price/date patterns
+        if (text && text.length > 1 && text.length < 50 && !/[\$\d{4}]/.test(text)) {
+          // Skip if it looks like a title (too long)
+          if (text.split(' ').length <= 4 && !names.includes(text)) {
+            names.push(text);
+            break; // one name per container
+          }
+        }
+      }
+    }
+  }
+
+  return { items: names.slice(0, 50), method: 'name-classes+repeated-containers' };
+}
+
+function extractLinks(): NLExtractResult {
+  const links: string[] = [];
+  const allLinks = document.querySelectorAll('a[href]');
+  for (const a of Array.from(allLinks)) {
+    const href = (a as HTMLAnchorElement).href;
+    if (href && !href.startsWith('javascript') && href !== '#') {
+      links.push(href);
+    }
+  }
+  return { items: [...new Set(links)].slice(0, 50), method: 'anchor-hrefs' };
+}
+
+function extractImages(): NLExtractResult {
+  const images: string[] = [];
+  const imgs = document.querySelectorAll('img[src], [style*="background-image"]');
+  for (const img of Array.from(imgs)) {
+    if (img instanceof HTMLImageElement) {
+      if (img.src && img.naturalWidth > 50) images.push(img.src);
+    } else {
+      const style = (img as HTMLElement).style.backgroundImage;
+      const urlMatch = style?.match(/url\(["']?([^"')]+)["']?\)/);
+      if (urlMatch) images.push(urlMatch[1]);
+    }
+  }
+  return { items: images.slice(0, 50), method: 'img-elements' };
+}
+
+function extractViewCounts(): NLExtractResult {
+  const counts: string[] = [];
+
+  // Elements with view/watch count indicators
+  const viewEls = document.querySelectorAll(
+    '[class*="view"], [class*="watch"], [class*="play-count"], [class*="views"], ' +
+    '[aria-label*="view"], [aria-label*="watch"]'
+  );
+  for (const el of Array.from(viewEls)) {
+    const text = el.textContent?.trim();
+    if (text && text.length < 30 && /\d/.test(text)) counts.push(text);
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel && /\d/.test(ariaLabel) && /view|watch|play/i.test(ariaLabel)) {
+      counts.push(ariaLabel);
+    }
+  }
+
+  return { items: [...new Set(counts)].slice(0, 50), method: 'view-count-classes' };
+}
+
+function extractDescriptions(): NLExtractResult {
+  const descriptions: string[] = [];
+  const repeated = findRepeatedContainers();
+  for (const container of repeated) {
+    // Look for paragraphs, spans, or description-like elements
+    const desc = container.querySelector(
+      'p, [class*="description"], [class*="snippet"], [class*="summary"], [class*="preview"], ' +
+      '[class*="subtitle"], [class*="meta"]'
+    );
+    if (desc) {
+      const text = desc.textContent?.trim();
+      if (text && text.length > 10 && text.length < 500) descriptions.push(text);
+    }
+  }
+  return { items: descriptions.slice(0, 50), method: 'description-selectors' };
+}
+
+function extractGeneric(description: string): NLExtractResult {
+  const items: string[] = [];
+  // Try to find elements whose text content relates to the description
+  const repeated = findRepeatedContainers();
+  for (const container of repeated) {
+    const text = container.textContent?.trim();
+    if (text && text.length > 3 && text.length < 500) items.push(text);
+  }
+  if (items.length === 0) {
+    // Fallback: all visible text from main content area
+    const main = document.querySelector('main, [role="main"], #content, .content, article');
+    if (main) {
+      const paragraphs = main.querySelectorAll('p, li, h1, h2, h3, h4, span');
+      for (const p of Array.from(paragraphs)) {
+        const text = p.textContent?.trim();
+        if (text && text.length > 5) items.push(text);
+      }
+    }
+  }
+  return { items: items.slice(0, 50), method: 'generic-repeated-containers' };
+}
+
+/**
+ * Find repeated sibling containers — the core pattern for feed/list pages.
+ * Looks for parent elements with many same-tag children (ul>li, div>div, etc.)
+ */
+function findRepeatedContainers(): Element[] {
+  const candidates: Element[] = [];
+  // Look for common list/feed patterns
+  const listParents = document.querySelectorAll('ul, ol, [role="list"], [role="feed"], section, main, [role="main"]');
+  for (const parent of Array.from(listParents)) {
+    const children = Array.from(parent.children);
+    if (children.length < 2) continue;
+
+    // Count tag frequency among children
+    const tagCounts = new Map<string, number>();
+    for (const child of children) {
+      const tag = child.tagName;
+      tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+    }
+
+    // If a tag appears 3+ times, those children are our repeated containers
+    for (const [tag, count] of tagCounts) {
+      if (count >= 3) {
+        candidates.push(...children.filter(c => c.tagName === tag));
+      }
+    }
+    if (candidates.length >= 3) break;
+  }
+
+  // Fallback: find divs with many same-class siblings
+  if (candidates.length < 3) {
+    const allDivs = document.querySelectorAll('div[class]');
+    const classCounts = new Map<string, Element[]>();
+    for (const div of Array.from(allDivs)) {
+      const cls = div.className;
+      if (!cls || typeof cls !== 'string') continue;
+      const key = cls.split(' ').sort().join(' ');
+      const list = classCounts.get(key) || [];
+      list.push(div);
+      classCounts.set(key, list);
+    }
+    // Pick the largest group of same-class divs
+    let bestGroup: Element[] = [];
+    for (const [, group] of classCounts) {
+      if (group.length > bestGroup.length && group.length >= 3) {
+        bestGroup = group;
+      }
+    }
+    if (bestGroup.length >= 3) candidates.push(...bestGroup);
+  }
+
+  return candidates.slice(0, 50);
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1: Smart Extract Fallback — semantic extraction when CSS selectors fail
+// ---------------------------------------------------------------------------
+
+function smartExtractFallback(selector: string, key: string): string {
+  // Try to infer what kind of data was expected based on the selector and key
+  const lower = (selector + ' ' + key).toLowerCase();
+
+  // Title-like selectors
+  if (/title|heading|h[1-6]|headline/i.test(lower)) {
+    const result = extractTitles();
+    return result.items.join('\n');
+  }
+
+  // Price-like selectors
+  if (/price|cost|amount/i.test(lower)) {
+    const result = extractPrices();
+    return result.items.join('\n');
+  }
+
+  // Score-like selectors
+  if (/score|vote|rating|point/i.test(lower)) {
+    const result = extractScores();
+    return result.items.join('\n');
+  }
+
+  // Channel/author
+  if (/channel|author|user|creator/i.test(lower)) {
+    const result = extractNames();
+    return result.items.join('\n');
+  }
+
+  // Views
+  if (/view|watch|play/i.test(lower)) {
+    const result = extractViewCounts();
+    return result.items.join('\n');
+  }
+
+  return '';
+}
+
 async function handleExtract(command: {
   range?: string;
   format?: 'array' | 'object' | 'csv';
@@ -500,23 +1038,56 @@ async function handleExtract(command: {
     }
   }
 
-  // Legacy schema-based extraction: { key: selector } → { key: text }
-  const result: Record<string, string> = {};
+  // Schema-based extraction: { key: selector_or_description } → { key: text }
+  const result: Record<string, string | string[]> = {};
+  const meta: Record<string, string> = {};
   const entries =
     schema && typeof schema === 'object'
       ? Object.entries(schema as Record<string, string>)
       : ([] as Array<[string, string]>);
 
-  for (const [key, selector] of entries) {
-    if (!selector) {
+  for (const [key, selectorOrDesc] of entries) {
+    if (!selectorOrDesc) {
       result[key] = '';
       continue;
     }
-    const element = document.querySelector(selector);
-    result[key] = element ? readText(element) : '';
+
+    // Fix 4: Natural Language Extract Mode
+    if (isNaturalLanguageQuery(selectorOrDesc)) {
+      const nlResult = extractByNaturalLanguage(selectorOrDesc);
+      result[key] = nlResult.items;
+      meta[key] = `nl:${nlResult.method}`;
+      continue;
+    }
+
+    // Standard CSS selector path
+    // Try normal querySelector first
+    let element = document.querySelector(selectorOrDesc);
+
+    // Fix 2: Shadow DOM fallback
+    if (!element) {
+      element = deepQuerySelector(document, selectorOrDesc);
+      if (element) meta[key] = 'shadow-dom';
+    }
+
+    if (element) {
+      result[key] = readText(element);
+    } else {
+      // Fix 1: Smart Extract Fallback — try semantic extraction
+      const fallbackText = smartExtractFallback(selectorOrDesc, key);
+      if (fallbackText) {
+        result[key] = fallbackText;
+        meta[key] = 'smart-fallback';
+      } else {
+        result[key] = '';
+        meta[key] = 'not-found';
+      }
+    }
   }
 
-  return { success: true, data: result };
+  // Include extraction metadata (method used for each key) alongside results
+  const responseData = Object.keys(meta).length > 0 ? { result, _meta: meta } : result;
+  return { success: true, data: responseData };
 }
 
 // ---------------------------------------------------------------------------
@@ -575,17 +1146,19 @@ function scanPageActions(): Array<{ selector: string; label: string; purpose: st
       if (rect.width === 0 || rect.height === 0) return;
       if (rect.top >= window.innerHeight || rect.bottom <= 0) return;
 
-      const label =
+      const rawLabel =
         el.getAttribute('aria-label') ||
         el.getAttribute('placeholder') ||
         el.getAttribute('title') ||
         (el.textContent?.trim() || '').substring(0, 60);
+      // Fix 3: Sanitize aria-labels to prevent regex/CSS crashes
+      const label = sanitizeAriaLabel(rawLabel);
       if (!label) return;
 
       let bestSel = '';
       if (el.id && !/^[a-z]{1,2}-[0-9a-f]{4,}/i.test(el.id)) bestSel = '#' + el.id;
       else if (el.getAttribute('data-testid')) bestSel = `[data-testid="${el.getAttribute('data-testid')}"]`;
-      else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
+      else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(el.getAttribute('aria-label') || ''))}"]`;
       else if (el.getAttribute('name')) bestSel = `${el.tagName.toLowerCase()}[name="${el.getAttribute('name')}"]`;
       else if (el.tagName === 'A') {
         const href = el.getAttribute('href') || '';
@@ -1043,10 +1616,12 @@ async function handleObserve(): Promise<BridgeResponse> {
       if (rect.top >= window.innerHeight || rect.bottom <= 0) return;
 
       const tag = el.tagName.toLowerCase();
-      const label =
+      // Fix 3: Sanitize aria-labels in observe output
+      const label = sanitizeAriaLabel(
         el.getAttribute('aria-label') ||
         el.getAttribute('title') ||
-        (el.textContent?.trim() || '').substring(0, 60);
+        (el.textContent?.trim() || '').substring(0, 60)
+      );
       const placeholder = el.getAttribute('placeholder') || '';
 
       if (tag === 'a') {
@@ -1170,18 +1745,20 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
       const visible = rect.top < window.innerHeight && rect.bottom > 0;
       if (!visible) return;
 
-      const label =
+      const rawLabel =
         el.getAttribute('aria-label') ||
         el.getAttribute('placeholder') ||
         el.getAttribute('title') ||
         (el.textContent?.trim() || '').substring(0, 50);
+      // Fix 3: Sanitize aria-labels
+      const label = sanitizeAriaLabel(rawLabel);
       if (!label) return;
 
       // Build stable selector
       let bestSel = '';
       if (el.id && !/^[a-z]{1,2}-[0-9a-f]{4,}/i.test(el.id)) bestSel = '#' + el.id;
       else if (el.getAttribute('data-testid')) bestSel = `[data-testid="${el.getAttribute('data-testid')}"]`;
-      else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
+      else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(el.getAttribute('aria-label') || ''))}"]`;
       else if (el.getAttribute('name')) bestSel = `${el.tagName.toLowerCase()}[name="${el.getAttribute('name')}"]`;
       else if (el.tagName === 'A') {
         const href = el.getAttribute('href') || '';
@@ -1253,7 +1830,7 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
 
     let bestSel = '';
     if ((el as HTMLElement).id) bestSel = '#' + (el as HTMLElement).id;
-    else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
+    else if (el.getAttribute('aria-label')) bestSel = `${el.tagName.toLowerCase()}[aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(el.getAttribute('aria-label') || ''))}"]`;
     else if ((el as HTMLInputElement).name) bestSel = `${el.tagName.toLowerCase()}[name="${(el as HTMLInputElement).name}"]`;
     else if (el.getAttribute('role')) bestSel = `[role="${el.getAttribute('role')}"]`;
     else bestSel = el.tagName.toLowerCase();
@@ -1342,7 +1919,7 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     const bestSelector = (el: Element): string => {
       if (el.id) return `#${el.id}`;
       const al = el.getAttribute('aria-label');
-      if (al) return `${el.tagName.toLowerCase()}[aria-label="${al.replace(/"/g, '\\"')}"]`;
+      if (al) return `${el.tagName.toLowerCase()}[aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(al))}"]`;
       const name = (el as HTMLInputElement).name;
       if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
       const role = el.getAttribute('role');
@@ -1451,7 +2028,7 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
   const keSel = (el: Element): string => {
     if (el.id) return `#${el.id}`;
     const al = el.getAttribute('aria-label');
-    if (al) return `${el.tagName.toLowerCase()}[aria-label="${al.replace(/"/g, '\\"')}"]`;
+    if (al) return `${el.tagName.toLowerCase()}[aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(al))}"]`;
     const name = (el as HTMLInputElement).name;
     if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
     const role = el.getAttribute('role');
@@ -1533,7 +2110,7 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     return {
       label: label.substring(0, 40),
       pressed: btn.getAttribute('aria-pressed') === 'true' || btn.getAttribute('aria-checked') === 'true',
-      selector: btn.id ? `#${btn.id}` : `[aria-label="${(btn.getAttribute('aria-label') || '').replace(/"/g, '\\"')}"]`,
+      selector: btn.id ? `#${btn.id}` : `[aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(btn.getAttribute('aria-label') || ''))}"]`,
     };
   });
 
@@ -1559,7 +2136,7 @@ async function handleRecon(classify?: boolean): Promise<BridgeResponse> {
     .slice(0, 30)
     .map((el) => ({
       label: (el.getAttribute('aria-label') || el.textContent?.trim() || '').substring(0, 40),
-      selector: el.id ? `#${el.id}` : `[role="menuitem"][aria-label="${el.getAttribute('aria-label') || ''}"]`,
+      selector: el.id ? `#${el.id}` : `[role="menuitem"][aria-label="${escapeCSSAttrValue(sanitizeAriaLabel(el.getAttribute('aria-label') || ''))}"]`,
     }));
 
   // App fingerprint — URL patterns + DOM signatures (generic, always runs)
