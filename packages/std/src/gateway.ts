@@ -28,6 +28,7 @@ interface PromptBody {
   timeout_ms?: number;
   conversation_id?: string;
   tool?: string;
+  model?: string;
 }
 
 interface ChatBody extends PromptBody {
@@ -248,6 +249,7 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       timeout_ms: body.timeout_ms,
       conversation_id: body.conversation_id,
       tool: body.tool,
+      model: body.model,
     };
 
     try {
@@ -280,6 +282,7 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       timeout_ms: body.timeout_ms,
       conversation_id: body.conversation_id,
       tool: body.tool,
+      model: body.model,
     };
 
     try {
