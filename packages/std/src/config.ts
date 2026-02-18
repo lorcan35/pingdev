@@ -25,12 +25,31 @@ export interface DriverConfig {
   enabled?: boolean;
 }
 
+export interface LLMProviderConfig {
+  openrouter?: {
+    apiKey: string;
+    defaultModel?: string;
+    fallbackModel?: string;
+    siteUrl?: string;
+    siteName?: string;
+  };
+  ollama?: {
+    baseUrl: string;
+    model: string;
+  };
+  lmstudio?: {
+    baseUrl: string;
+    model: string;
+  };
+}
+
 export interface PingOSConfig {
   gatewayPort: number;
   drivers: DriverConfig[];
   defaultStrategy: RoutingStrategy;
   healthIntervalMs: number;
   selfHeal: SelfHealConfig;
+  llm?: LLMProviderConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +150,7 @@ export async function loadConfig(path?: string): Promise<PingOSConfig> {
       healthIntervalMs: parsed.healthIntervalMs ?? DEFAULT_CONFIG.healthIntervalMs,
       selfHeal,
       drivers: parsed.drivers ?? DEFAULT_CONFIG.drivers,
+      llm: (parsed as any).llm as LLMProviderConfig | undefined,
     };
   } catch {
     return { ...DEFAULT_CONFIG };
