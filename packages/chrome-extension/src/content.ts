@@ -71,14 +71,17 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
     let response: BridgeResponse;
 
     switch (command.type) {
-      case 'click':
-        response = await handleClick(command.selector, command.stealth, command.x, command.y);
+      case 'click': {
+        // Support text-based targeting: {"text": "Submit"} → selector "text=Submit"
+        const clickSelector = command.selector || (command.text ? `text=${command.text}` : '');
+        response = await handleClick(clickSelector, command.stealth, command.x, command.y);
         break;
+      }
       case 'type':
         response = await handleType(command.selector, command.text, command.stealth);
         break;
       case 'read':
-        response = await handleRead(command.selector);
+        response = await handleRead(command.selector, command.limit);
         break;
       case 'extract':
         response = await handleExtract(command);
@@ -138,6 +141,22 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
       case 'scroll':
         response = await handleScroll(command);
         break;
+      case 'record_api_action': {
+        // Record an API-driven action into the recorder if recording is active
+        if (recordingEnabled && command.action) {
+          const action: RecordedAction = {
+            type: command.action.type || 'unknown',
+            selector: command.action.selector || '',
+            value: command.action.text || command.action.key || command.action.url || '',
+            timestamp: command.action.timestamp || Date.now(),
+            url: location.href,
+          };
+          recordedActions.push(action);
+          saveRecordedActions(recordedActions);
+        }
+        response = { success: true, data: { recorded: recordingEnabled } };
+        break;
+      }
       case 'screenshot':
         response = { success: false, error: 'Screenshot not implemented in content script' };
         break;
@@ -147,6 +166,23 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
     }
 
     if (command.stealth) await withJitter(async () => {});
+
+    // Auto-record successful API-driven actions when recording is active
+    if (recordingEnabled && response.success) {
+      const recordableOps = ['click', 'type', 'press', 'navigate', 'scroll', 'select', 'dblclick', 'act'];
+      if (recordableOps.includes(command.type)) {
+        const action: RecordedAction = {
+          type: command.type,
+          selector: (command as any).selector || '',
+          value: (command as any).text || (command as any).key || (command as any).url || (command as any).instruction || '',
+          timestamp: Date.now(),
+          url: location.href,
+        };
+        recordedActions.push(action);
+        saveRecordedActions(recordedActions);
+      }
+    }
+
     return response;
   } catch (err) {
     return {
@@ -372,7 +408,7 @@ async function handleType(selector: string, text: string, stealth?: boolean): Pr
   }
 }
 
-async function handleRead(selector: string): Promise<BridgeResponse> {
+async function handleRead(selector: string, limit?: number): Promise<BridgeResponse> {
   if (!selector || typeof selector !== 'string') return { success: false, error: 'Invalid selector: must be a string' };
   // Cell range reading: cell=A1:B5 → read a grid block from ARIA overlay
   const rangeMatch = selector.match(/^cell=([A-Za-z]+\d+):([A-Za-z]+\d+)$/);
@@ -400,6 +436,11 @@ async function handleRead(selector: string): Promise<BridgeResponse> {
     nodes = deepQuerySelectorAll(document, selector);
   }
   if (nodes.length === 0) return { success: false, error: `Element not found: ${selector}` };
+
+  // Enforce limit parameter
+  if (limit && limit > 0 && nodes.length > limit) {
+    nodes = nodes.slice(0, limit);
+  }
 
   const texts = nodes.map((el) => readText(el));
   if (texts.length === 1) return { success: true, data: texts[0] };
@@ -592,8 +633,145 @@ interface NLExtractResult {
   method: string;
 }
 
+/**
+ * Detect canvas-based apps (Google Sheets, Figma, etc.) where DOM text extraction fails.
+ */
+function isCanvasApp(): boolean {
+  // Google Sheets detection: name-box + formula-bar presence is definitive
+  if (document.querySelector('#t-name-box') || document.querySelector('[aria-label="Name Box"]')) {
+    return true;
+  }
+  // URL-based detection for known canvas apps
+  if (location.hostname.includes('docs.google.com') && location.pathname.includes('/spreadsheets/')) {
+    return true;
+  }
+  // Generic canvas detection: large canvas element
+  const canvas = document.querySelector('canvas');
+  if (!canvas) return false;
+  const rect = canvas.getBoundingClientRect();
+  const viewportArea = window.innerWidth * window.innerHeight;
+  const canvasArea = rect.width * rect.height;
+  return canvasArea > viewportArea * 0.3;
+}
+
+/**
+ * Detect Google Calendar pages.
+ */
+function isCalendarApp(): boolean {
+  return !!(
+    document.querySelector('[data-eventid]') ||
+    document.querySelector('[data-eventchip]') ||
+    (location.hostname.includes('calendar.google') || document.title.toLowerCase().includes('google calendar'))
+  );
+}
+
+/**
+ * Extract data from canvas apps (Google Sheets) using formula bar, name box, and sheet tabs.
+ */
+function extractCanvasAppData(description: string): NLExtractResult {
+  const items: string[] = [];
+
+  // 1. Formula bar value — what's currently in the selected cell
+  const formulaBar = document.querySelector('#t-formula-bar-input, [aria-label="Formula input"]') as HTMLElement | null;
+  if (formulaBar) {
+    const text = formulaBar.textContent?.trim() || (formulaBar as HTMLInputElement).value?.trim() || '';
+    if (text) items.push(`Formula bar: ${text}`);
+  }
+
+  // 2. Name box — current cell reference
+  const nameBox = document.querySelector('#t-name-box') as HTMLInputElement | null;
+  if (nameBox) {
+    const ref = nameBox.value?.trim() || '';
+    if (ref) items.push(`Current cell: ${ref}`);
+  }
+
+  // 3. Sheet tab names
+  const sheetTabs = document.querySelectorAll('.docs-sheet-tab .docs-sheet-tab-name, [role="tab"]');
+  for (const tab of Array.from(sheetTabs)) {
+    const text = tab.textContent?.trim();
+    if (text) items.push(`Sheet: ${text}`);
+  }
+
+  // 4. ARIA gridcell values — some cells may expose values via accessibility
+  const gridCells = document.querySelectorAll('[role="gridcell"]');
+  for (const cell of Array.from(gridCells).slice(0, 50)) {
+    const label = cell.getAttribute('aria-label') || '';
+    const text = cell.textContent?.trim() || '';
+    if (label || text) items.push(label || text);
+  }
+
+  // 5. Toolbar/header info (sheet title, menu items)
+  const sheetTitle = document.querySelector('#doc-title, [class*="docs-title"]');
+  if (sheetTitle) {
+    const text = sheetTitle.textContent?.trim();
+    if (text) items.push(`Document: ${text}`);
+  }
+
+  return { items, method: 'canvas-app-formula-bar' };
+}
+
+/**
+ * Extract events from Google Calendar using data-eventid and aria-labels.
+ */
+function extractCalendarEvents(): NLExtractResult {
+  const events: string[] = [];
+
+  // 1. Elements with data-eventid attribute
+  const eventEls = document.querySelectorAll('[data-eventid]');
+  for (const el of Array.from(eventEls)) {
+    const label = el.getAttribute('aria-label') || el.textContent?.trim() || '';
+    if (label && !events.includes(label)) events.push(label);
+  }
+
+  // 2. Event chips with aria-labels
+  const eventChips = document.querySelectorAll('[data-eventchip], [class*="event"], [class*="Event"]');
+  for (const chip of Array.from(eventChips)) {
+    const label = chip.getAttribute('aria-label') || chip.textContent?.trim() || '';
+    if (label && label.length > 2 && !events.includes(label)) events.push(label);
+  }
+
+  // 3. All-day events section
+  const allDayEls = document.querySelectorAll('[data-datekey], [class*="allday"], [class*="all-day"]');
+  for (const el of Array.from(allDayEls)) {
+    const label = el.getAttribute('aria-label') || el.textContent?.trim() || '';
+    if (label && label.length > 2 && !events.includes(label)) events.push(label);
+  }
+
+  // 4. Heading with event count info
+  const headings = document.querySelectorAll('h1, h2');
+  for (const h of Array.from(headings)) {
+    const text = h.textContent?.trim() || '';
+    if (text && /event|appointment/i.test(text) && !events.includes(text)) events.push(text);
+  }
+
+  // 5. Grid cells with event content
+  const gridCells = document.querySelectorAll('[role="gridcell"]');
+  for (const cell of Array.from(gridCells)) {
+    const label = cell.getAttribute('aria-label') || '';
+    if (label && /event|appointment|meeting/i.test(label) && !events.includes(label)) events.push(label);
+    // Check child elements
+    const inner = cell.querySelectorAll('[data-eventid], span, div');
+    for (const child of Array.from(inner)) {
+      const childLabel = child.getAttribute('aria-label') || child.textContent?.trim() || '';
+      if (childLabel && childLabel.length > 2 && !events.includes(childLabel)) events.push(childLabel);
+    }
+  }
+
+  return { items: events.slice(0, 50), method: 'calendar-events' };
+}
+
 function extractByNaturalLanguage(description: string): NLExtractResult {
   const lower = description.toLowerCase();
+
+  // Canvas app detection: Google Sheets has no DOM text, use formula bar + name box
+  if (isCanvasApp()) {
+    return extractCanvasAppData(description);
+  }
+
+  // Calendar event detection: Google Calendar uses custom [data-eventid] elements
+  if (isCalendarApp() && /\b(events?|appointments?|meetings?|schedule|calendar)\b/.test(lower)) {
+    return extractCalendarEvents();
+  }
 
   // Title/headline patterns (handle plurals: titles, headlines, headings)
   if (/\b(titles?|headlines?|headings?)\b/.test(lower)) {
@@ -652,9 +830,15 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
 function extractTitles(): NLExtractResult {
   const titles: string[] = [];
 
-  // Strategy 1: h1-h3 headings
-  const headings = document.querySelectorAll('h1, h2, h3');
+  // Scope to main content area to avoid sidebar/nav headings
+  const mainContent = getMainContentArea();
+  const searchRoot = mainContent || document;
+
+  // Strategy 1: h1-h3 headings within main content area
+  const headings = searchRoot.querySelectorAll('h1, h2, h3');
   for (const h of Array.from(headings)) {
+    // Skip headings inside nav/aside/sidebar
+    if (h.closest('nav, aside, [role="navigation"], [role="complementary"]')) continue;
     const text = h.textContent?.trim();
     if (text && text.length > 3 && text.length < 300) titles.push(text);
   }
@@ -675,21 +859,32 @@ function extractTitles(): NLExtractResult {
     }
   }
 
-  // Strategy 3: aria heading roles
+  // Strategy 3: aria heading roles within content area
   if (titles.length < 3) {
-    const ariaHeadings = document.querySelectorAll('[role="heading"]');
+    const ariaHeadings = searchRoot.querySelectorAll('[role="heading"]');
     for (const h of Array.from(ariaHeadings)) {
+      if (h.closest('nav, aside, [role="navigation"], [role="complementary"]')) continue;
       const text = h.textContent?.trim();
       if (text && text.length > 3 && !titles.includes(text)) titles.push(text);
     }
   }
 
-  // Strategy 4: links with title attributes
+  // Strategy 4: links with title attributes within content area
   if (titles.length < 3) {
-    const titledLinks = document.querySelectorAll('a[title]');
+    const titledLinks = searchRoot.querySelectorAll('a[title]');
     for (const a of Array.from(titledLinks)) {
+      if (a.closest('nav, aside, [role="navigation"], [role="complementary"]')) continue;
       const text = a.getAttribute('title')?.trim();
       if (text && text.length > 3 && !titles.includes(text)) titles.push(text);
+    }
+  }
+
+  // Strategy 5: Shadow DOM titles (Reddit shreddit-post, etc.)
+  if (titles.length < 3) {
+    const shadowTitles = deepQuerySelectorAll(document, 'a[slot="title"], [slot="title"], shreddit-post a[href*="/comments/"]');
+    for (const el of shadowTitles) {
+      const text = el.textContent?.trim();
+      if (text && text.length > 3 && text.length < 300 && !titles.includes(text)) titles.push(text);
     }
   }
 
@@ -698,10 +893,14 @@ function extractTitles(): NLExtractResult {
 
 function extractPrices(): NLExtractResult {
   const prices: string[] = [];
-  const priceRegex = /(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP)\s*[\d,]+(?:\.\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP)/;
+  const priceRegex = /(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP|AED|SAR|INR)\s*[\d,]+(?:\.\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP|AED|SAR|INR)/;
 
-  // Walk all text nodes
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  // Scope to main content area
+  const mainContent = getMainContentArea();
+  const walkRoot = mainContent || document.body;
+
+  // Walk text nodes within content area
+  const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
   let node: Node | null;
   while ((node = walker.nextNode())) {
     const text = node.textContent?.trim() || '';
@@ -754,10 +953,25 @@ function extractTextBlocks(type: string): NLExtractResult {
     ? '[class*="comment"], [class*="Comment"], [data-type="comment"], [class*="reply"], [class*="post-body"]'
     : 'p, [class*="text"], [class*="body"], [class*="content"]';
 
-  const els = document.querySelectorAll(selectors);
+  // Scope to main content area to avoid sidebar
+  const mainContent = getMainContentArea();
+  const searchRoot = mainContent || document;
+
+  const els = searchRoot.querySelectorAll(selectors);
   for (const el of Array.from(els)) {
+    // Skip nav/sidebar elements
+    if (el.closest('nav, aside, [role="navigation"], [role="complementary"]')) continue;
     const text = el.textContent?.trim();
     if (text && text.length > 10 && text.length < 2000) blocks.push(text);
+  }
+
+  // Shadow DOM fallback for sites like Reddit
+  if (blocks.length === 0) {
+    const shadowBlocks = deepQuerySelectorAll(document, selectors);
+    for (const el of shadowBlocks) {
+      const text = el.textContent?.trim();
+      if (text && text.length > 10 && text.length < 2000) blocks.push(text);
+    }
   }
 
   return { items: blocks.slice(0, 30), method: `${type}-selectors` };
@@ -792,12 +1006,17 @@ function extractDates(): NLExtractResult {
 function extractNames(): NLExtractResult {
   const names: string[] = [];
 
+  // Scope to main content area
+  const mainContent = getMainContentArea();
+  const searchRoot = mainContent || document;
+
   // Channel/author/user elements
-  const nameEls = document.querySelectorAll(
+  const nameEls = searchRoot.querySelectorAll(
     '[class*="author"], [class*="channel"], [class*="user"], [class*="creator"], [class*="byline"], ' +
     '[class*="Author"], [class*="Channel"], [class*="User"], [itemprop="author"], [rel="author"]'
   );
   for (const el of Array.from(nameEls)) {
+    if (el.closest('nav, aside, [role="navigation"], [role="complementary"]')) continue;
     const text = el.textContent?.trim();
     if (text && text.length > 1 && text.length < 100 && !names.includes(text)) names.push(text);
   }
@@ -898,10 +1117,12 @@ function extractGeneric(description: string): NLExtractResult {
   }
   if (items.length === 0) {
     // Fallback: all visible text from main content area
-    const main = document.querySelector('main, [role="main"], #content, .content, article');
+    const main = getMainContentArea() || document.querySelector('main, [role="main"], #content, .content, article');
     if (main) {
       const paragraphs = main.querySelectorAll('p, li, h1, h2, h3, h4, span');
       for (const p of Array.from(paragraphs)) {
+        // Skip nav/sidebar elements
+        if (p.closest('nav, aside, [role="navigation"], [role="complementary"]')) continue;
         const text = p.textContent?.trim();
         if (text && text.length > 5) items.push(text);
       }
@@ -911,14 +1132,61 @@ function extractGeneric(description: string): NLExtractResult {
 }
 
 /**
+ * Locate the main content area of the page (not sidebar/nav).
+ * Returns the best content root or null if none found.
+ */
+function getMainContentArea(): Element | null {
+  // Try site-specific content area selectors first
+  const siteSpecific = [
+    // GitHub
+    '[data-hpc]', 'turbo-frame#repo-content-turbo-frame', '#repo-content-pjax-container',
+    // Reddit
+    'shreddit-feed', '[data-testid="post-container"]', '.ListingLayout-outerContainer',
+    // Gmail
+    '[role="main"]', 'div.AO',
+    // Calendar
+    '[data-view-heading]', '[role="grid"]',
+    // Generic landmarks
+    'main', '[role="main"]', '#content', '#main-content', '.main-content',
+    'article', '[class*="main-content"]', '[class*="MainContent"]',
+    '[id*="content"]:not(nav):not(aside):not(header):not(footer)',
+  ];
+  for (const sel of siteSpecific) {
+    try {
+      const el = document.querySelector(sel);
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        // Ensure it has substantial size (not a hidden element)
+        if (rect.width > 100 && rect.height > 100) return el;
+      }
+    } catch { /* invalid selector */ }
+  }
+  // Shadow DOM fallback for Reddit's shreddit-post elements
+  const shadowMain = deepQuerySelector(document, 'main, [role="main"]');
+  if (shadowMain) return shadowMain;
+  return null;
+}
+
+/**
  * Find repeated sibling containers — the core pattern for feed/list pages.
  * Looks for parent elements with many same-tag children (ul>li, div>div, etc.)
+ * Scopes to main content area first to avoid grabbing sidebar/nav elements.
  */
 function findRepeatedContainers(): Element[] {
   const candidates: Element[] = [];
-  // Look for common list/feed patterns
-  const listParents = document.querySelectorAll('ul, ol, [role="list"], [role="feed"], section, main, [role="main"]');
-  for (const parent of Array.from(listParents)) {
+
+  // Scope to main content area to avoid sidebar/nav bias
+  const mainContent = getMainContentArea();
+  const searchRoot = mainContent || document;
+
+  // Look for common list/feed patterns within the content area
+  const listParents = searchRoot.querySelectorAll('ul, ol, [role="list"], [role="feed"], section, main, [role="main"]');
+  // Also include the search root itself if it matches
+  const roots = mainContent
+    ? [mainContent, ...Array.from(listParents)]
+    : Array.from(listParents);
+
+  for (const parent of roots) {
     const children = Array.from(parent.children);
     if (children.length < 2) continue;
 
@@ -938,9 +1206,18 @@ function findRepeatedContainers(): Element[] {
     if (candidates.length >= 3) break;
   }
 
-  // Fallback: find divs with many same-class siblings
+  // Shadow DOM fallback: check for shadow-hosted repeated elements (Reddit shreddit-post)
   if (candidates.length < 3) {
-    const allDivs = document.querySelectorAll('div[class]');
+    const shadowRepeated = deepQuerySelectorAll(document, 'shreddit-post, [data-testid="post-container"]');
+    if (shadowRepeated.length >= 3) {
+      candidates.push(...shadowRepeated);
+      return candidates.slice(0, 50);
+    }
+  }
+
+  // Fallback: find divs with many same-class siblings WITHIN the content area
+  if (candidates.length < 3) {
+    const allDivs = (searchRoot as Element).querySelectorAll?.('div[class]') ?? document.querySelectorAll('div[class]');
     const classCounts = new Map<string, Element[]>();
     for (const div of Array.from(allDivs)) {
       const cls = div.className;
@@ -1230,7 +1507,59 @@ interface ActStep {
   error?: string;
 }
 
+// Known key names that should never be interpreted as text to type
+const KNOWN_KEYS = new Set([
+  'tab', 'enter', 'return', 'escape', 'esc', 'backspace', 'delete', 'del',
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+  'up', 'down', 'left', 'right',
+  'space', 'home', 'end', 'pageup', 'pagedown',
+  'insert', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+]);
+
+// Map common key name aliases to canonical CDP key names
+const KEY_ALIASES: Record<string, string> = {
+  tab: 'Tab', enter: 'Enter', return: 'Enter', escape: 'Escape', esc: 'Escape',
+  backspace: 'Backspace', delete: 'Delete', del: 'Delete', space: ' ',
+  arrowup: 'ArrowUp', arrowdown: 'ArrowDown', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight',
+  up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+  home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown', insert: 'Insert',
+  f1: 'F1', f2: 'F2', f3: 'F3', f4: 'F4', f5: 'F5', f6: 'F6',
+  f7: 'F7', f8: 'F8', f9: 'F9', f10: 'F10', f11: 'F11', f12: 'F12',
+};
+
+/**
+ * Normalize a key name: strip articles ("the"), suffixes ("key"), and map aliases.
+ * "the Tab key" → "Tab", "Enter" → "Enter", "escape" → "Escape"
+ */
+function normalizeKeyName(raw: string): string {
+  // Strip articles and "key" suffix: "the Tab key" → "Tab"
+  let cleaned = raw.trim()
+    .replace(/^(?:the\s+)/i, '')
+    .replace(/\s+key$/i, '')
+    .trim();
+  const lower = cleaned.toLowerCase();
+  if (KEY_ALIASES[lower]) return KEY_ALIASES[lower];
+  // Capitalize first letter for single-word named keys
+  if (cleaned.length > 1) return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  return cleaned;
+}
+
 function parseActInstruction(instruction: string): ActStep[] {
+  // Split compound instructions: "X then Y", "X and then Y", "X; Y"
+  const compoundSplit = instruction.trim().split(/\s+then\s+|\s+and\s+then\s+|\s*;\s*/i);
+  if (compoundSplit.length > 1) {
+    const allSteps: ActStep[] = [];
+    for (const subInstr of compoundSplit) {
+      const trimmed = subInstr.trim();
+      if (!trimmed) continue;
+      allSteps.push(...parseSingleActInstruction(trimmed));
+    }
+    return allSteps;
+  }
+  return parseSingleActInstruction(instruction.trim());
+}
+
+function parseSingleActInstruction(instruction: string): ActStep[] {
   const steps: ActStep[] = [];
   const instr = instruction.trim();
 
@@ -1274,14 +1603,15 @@ function parseActInstruction(instruction: string): ActStep[] {
     return steps;
   }
 
-  // Pattern: "press Ctrl+C" / "press Enter" / "press Tab"
-  const pressMatch = lower.match(/\bpress\s+((?:(?:ctrl|shift|alt|meta|cmd)\+)*\w+)\b/i);
+  // Pattern: "press Ctrl+C" / "press Enter" / "press the Tab key"
+  const pressMatch = instr.match(/\bpress\s+((?:(?:ctrl|shift|alt|meta|cmd)\+)*(?:the\s+)?[\w]+(?:\s+key)?)\b/i);
   if (pressMatch && !cellRefPattern.test(instr)) {
-    const parts = pressMatch[1].split('+');
-    const key = parts.pop()!;
-    const modifiers = parts.length > 0 ? parts.map(m => m.toLowerCase()) : undefined;
-    // Capitalize first letter for named keys
-    const normalizedKey = key.length > 1 ? key.charAt(0).toUpperCase() + key.slice(1) : key;
+    const rawKey = pressMatch[1];
+    // Handle modifier+key combos: "Ctrl+C", "Shift+Tab"
+    const parts = rawKey.split('+');
+    const keyPart = parts.pop()!;
+    const modifiers = parts.length > 0 ? parts.map(m => m.toLowerCase().replace(/^the\s+/i, '')) : undefined;
+    const normalizedKey = normalizeKeyName(keyPart);
     steps.push({ op: 'press', key: normalizedKey, modifiers, status: 'pending' });
     return steps;
   }
@@ -2909,6 +3239,22 @@ const recordedActions: RecordedAction[] = [];
 let typeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTypeSelector = '';
 
+// Load recording state on content script init (persists across navigations)
+(async () => {
+  try {
+    const state = await chrome.storage.local.get(['recordingEnabled', 'recordedActions']);
+    if (state.recordingEnabled) {
+      recordingEnabled = true;
+      if (Array.isArray(state.recordedActions)) {
+        recordedActions.push(...state.recordedActions);
+      }
+      console.log('[Recorder] Resumed recording from storage —', recordedActions.length, 'steps so far');
+    }
+  } catch {
+    // ignore — storage may not be available
+  }
+})();
+
 async function getRecordedActions(): Promise<RecordedAction[]> {
   const result = await chrome.storage.local.get('recordedActions');
   return result.recordedActions || [];
@@ -2919,17 +3265,19 @@ async function saveRecordedActions(actions: RecordedAction[]) {
 }
 
 async function clearRecordedActions() {
-  await chrome.storage.local.set({ recordedActions: [] });
+  await chrome.storage.local.set({ recordedActions: [], recordingEnabled: false });
 }
 
 function startRecording() {
   recordedActions.length = 0;
   recordingEnabled = true;
+  chrome.storage.local.set({ recordingEnabled: true, recordedActions: [] }).catch(() => {});
   console.log('[Recorder] Recording started');
 }
 
 function stopRecording() {
   recordingEnabled = false;
+  chrome.storage.local.set({ recordingEnabled: false }).catch(() => {});
   console.log('[Recorder] Recording stopped —', recordedActions.length, 'steps');
 }
 

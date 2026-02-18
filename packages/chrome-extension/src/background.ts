@@ -298,6 +298,31 @@ function stopHeartbeat() {
   heartbeatTimer = null;
 }
 
+async function maybeRecordAction(tabId: number, command: any, response: any) {
+  if (!response?.success) return; // only record successful actions
+  const recordableOps = ['click', 'type', 'press', 'navigate', 'scroll', 'select', 'dblclick'];
+  if (!recordableOps.includes(command.type)) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'bridge_command',
+      command: {
+        type: 'record_api_action',
+        action: {
+          type: command.type,
+          selector: command.selector,
+          text: command.text,
+          key: command.key,
+          url: command.url,
+          timestamp: Date.now(),
+          source: 'api',
+        },
+      },
+    }).catch(() => {}); // non-critical, don't fail if recorder not active
+  } catch {
+    // ignore — recording is best-effort
+  }
+}
+
 async function handleDeviceRequest(request: DeviceRequest) {
   const { device, command, requestId } = request;
   
@@ -526,24 +551,51 @@ async function handleDeviceRequest(request: DeviceRequest) {
     }
   }
 
-  // Forward other commands to content script
+  // Forward other commands to content script with retry on channel errors
   try {
-    let response = await chrome.tabs.sendMessage(tabId, {
+    const sendCommand = () => chrome.tabs.sendMessage(tabId, {
       type: 'bridge_command',
       command,
-    }).catch(() => null);
+    });
 
-    // If response is null, content script may be orphaned — re-inject and retry once
-    if (!response) {
-      await injectContentScript(tabId);
-      await new Promise(r => setTimeout(r, 300));
-      response = await chrome.tabs.sendMessage(tabId, {
-        type: 'bridge_command',
-        command,
-      }).catch(() => null);
+    let response: any = null;
+    let lastError: Error | null = null;
+
+    try {
+      response = await sendCommand();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
     }
 
-    sendDeviceResponse(requestId, response ?? { success: false, error: 'Content script not responding' });
+    // Retry on null response OR channel errors (bfcache, SPA navigation, orphaned script)
+    const isChannelError = lastError && (
+      lastError.message.includes('message channel closed') ||
+      lastError.message.includes('Could not establish connection') ||
+      lastError.message.includes('Receiving end does not exist') ||
+      lastError.message.includes('message port closed')
+    );
+
+    if (!response || isChannelError) {
+      await injectContentScript(tabId);
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        response = await sendCommand();
+        lastError = null;
+      } catch (retryErr) {
+        lastError = retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+        response = null;
+      }
+    }
+
+    if (response) {
+      await maybeRecordAction(tabId, command, response);
+      sendDeviceResponse(requestId, response);
+    } else {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: lastError?.message || 'Content script not responding after retry',
+      });
+    }
   } catch (err) {
     sendDeviceResponse(requestId, {
       success: false,
@@ -849,6 +901,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       await injectContentScript(tabId);
     }
   })();
+});
+
+// Re-inject content script when page is restored from bfcache
+chrome.webNavigation?.onCommitted?.addListener(async (details) => {
+  if (details.frameId !== 0) return; // only main frame
+  const { tabId, transitionType } = details;
+  // bfcache restore shows up as transitionType 'reload' or via the back_forward qualifier
+  if (transitionType === 'reload' || details.transitionQualifiers?.includes('from_address_bar')) return;
+  // Always re-inject on navigation commit to handle SPA navigations
+  await injectContentScript(tabId);
 });
 
 async function injectAntiFingerprint(tabId: number) {
