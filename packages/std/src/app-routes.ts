@@ -131,27 +131,46 @@ const EXTRACTORS = {
   amazonSearch: `(() => {
     const cleanPrice = (text) => {
       if (!text) return '';
-      const compact = text.replace(/\s+/g, ' ').trim();
-      const moneyMatch = compact.match(/(?:AED|\$|€|£|₹)\s*\d+[\d,]*(?:\.\d{1,2})?/i);
-      if (moneyMatch) return moneyMatch[0].replace(/\s+/g, ' ').trim();
-      const trailing = compact.match(/\d+[\d,]*(?:\.\d{1,2})?/);
+      const compact = text.replace(/\\s+/g, ' ').trim();
+      const moneyMatch = compact.match(/(?:AED|\\$|€|£|₹|SAR|EGP)\\s*\\d+[\\d,]*(?:\\.\\d{1,2})?/i);
+      if (moneyMatch) return moneyMatch[0].replace(/\\s+/g, ' ').trim();
+      const trailing = compact.match(/\\d+[\\d,]*(?:\\.\\d{1,2})?/);
       return trailing ? trailing[0] : compact;
     };
 
+    const baseUrl = location.origin;
     const items = [];
-    document.querySelectorAll('[data-asin]').forEach(el => {
+    // Prefer the specific search-result component type; fall back to any [data-asin]
+    let cards = document.querySelectorAll('[data-component-type="s-search-result"][data-asin]');
+    if (!cards.length) cards = document.querySelectorAll('.s-result-item[data-asin]');
+    if (!cards.length) cards = document.querySelectorAll('[data-asin]');
+    cards.forEach(el => {
       const asin = el.getAttribute('data-asin');
       if (!asin || asin.length < 5) return;
-      const title = el.querySelector('h2, [class*=title]')?.textContent?.trim() || '';
-      const primaryPrice = el.querySelector('.a-price .a-offscreen, .a-price-whole, [data-cy="price-recipe"] .a-offscreen')?.textContent?.trim() || '';
-      const fallbackPrice = el.querySelector('[class*=price]')?.textContent?.trim() || '';
-      const price = cleanPrice(primaryPrice || fallbackPrice);
-      const rating = el.querySelector('[class*=rating], .a-icon-alt')?.textContent?.trim() || '';
-      const reviews = el.querySelector('[class*=review], [aria-label*=stars]')?.getAttribute('aria-label') || '';
+      // Title: Amazon.ae puts brand in h2 and product name in a.s-line-clamp link
+      const brand = el.querySelector('h2')?.textContent?.trim() || '';
+      const titleLink = el.querySelector('a[class*="s-line-clamp"], a[class*="s-link-style"]');
+      const linkText = titleLink?.textContent?.trim() || '';
+      const title = brand && linkText && !linkText.toLowerCase().startsWith(brand.toLowerCase()) ? (brand + ' ' + linkText) : (linkText || brand);
+      // Price: find the first link/span with a currency pattern in the card
+      const priceEl = el.querySelector('.a-price .a-offscreen') || el.querySelector('.a-price-whole');
+      let primaryPrice = priceEl?.textContent?.trim() || '';
+      if (!primaryPrice) {
+        var allLinks = el.querySelectorAll('a, span');
+        for (var li = 0; li < allLinks.length; li++) {
+          var lt = allLinks[li].textContent || '';
+          if (/(?:AED|\\$|€|£|₹)\s*\d/.test(lt) && lt.length < 40) { primaryPrice = lt.trim(); break; }
+        }
+      }
+      const price = cleanPrice(primaryPrice);
+      const rating = el.querySelector('.a-icon-alt')?.textContent?.trim() || el.querySelector('[class*=rating]')?.textContent?.trim() || '';
+      const reviewsEl = el.querySelector('[aria-label*=star]') || el.querySelector('[class*=review]');
+      const reviews = reviewsEl?.getAttribute('aria-label') || reviewsEl?.textContent?.trim() || '';
       const img = el.querySelector('img')?.src || '';
-      const prime = !!el.querySelector('[class*=prime], [aria-label*=Prime]');
-      if (title.length > 5 && price) {
-        items.push({ asin, title: title.substring(0, 100), price, rating: rating.substring(0, 20), reviews: reviews.substring(0, 30), img: img.substring(0, 150), prime, url: 'https://www.amazon.ae/dp/' + asin });
+      const prime = !!el.querySelector('[class*=prime], [aria-label*="Prime"]');
+      // Accept products with a title even if price is missing (some results show "See options")
+      if (title.length > 3) {
+        items.push({ asin, title: title.substring(0, 120), price: price || 'N/A', rating: rating.substring(0, 30), reviews: reviews.substring(0, 40), img: img.substring(0, 200), prime, url: baseUrl + '/dp/' + asin });
       }
     });
     return items.slice(0, 20);
@@ -404,12 +423,18 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     if (!query) return reply.code(400).send({ ok: false, error: 'query required' });
     const deviceId = await findAmazonDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Amazon tab open' });
-    
+
+    // Detect the current Amazon domain (amazon.com, amazon.ae, etc.) from the tab URL
     const encoded = encodeURIComponent(query);
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://www.amazon.ae/s?k=${encoded}"` });
+    const urlResult = await deviceOp(gatewayUrl, deviceId, 'getUrl', {});
+    const currentUrl = urlResult?.result || '';
+    const domainMatch = currentUrl.match(/https?:\/\/(www\.amazon\.[a-z.]+)/);
+    const amazonHost = domainMatch ? domainMatch[1] : 'www.amazon.com';
+
+    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://${amazonHost}/s?k=${encoded}"` });
     await delay(5000);
-    await deviceOp(gatewayUrl, deviceId, 'clean', { mode: 'full' });
-    
+    // Note: skip 'clean' for search results — fullCleanup strips price/rating elements
+
     const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.amazonSearch });
     return { ok: true, action: 'search', query, products: result?.result || [], deviceId };
   });
