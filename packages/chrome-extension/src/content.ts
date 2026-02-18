@@ -641,17 +641,39 @@ function isCanvasApp(): boolean {
   if (document.querySelector('#t-name-box') || document.querySelector('[aria-label="Name Box"]')) {
     return true;
   }
+  // Formula bar is another strong Sheets/canvas-app indicator
+  if (document.querySelector('#t-formula-bar-input') || document.querySelector('[aria-label="Formula input"]')) {
+    return true;
+  }
   // URL-based detection for known canvas apps
   if (location.hostname.includes('docs.google.com') && location.pathname.includes('/spreadsheets/')) {
     return true;
   }
-  // Generic canvas detection: large canvas element
+  // Known canvas-based design/whiteboard tools
+  const canvasAppHosts = ['figma.com', 'excalidraw.com', 'miro.com', 'lucid.app', 'draw.io', 'canva.com'];
+  if (canvasAppHosts.some(h => location.hostname.includes(h))) {
+    return true;
+  }
+  // Exclude known video/media sites — they use <canvas> for video rendering, NOT as a spreadsheet/design canvas
+  const videoHosts = ['youtube.com', 'youtu.be', 'vimeo.com', 'dailymotion.com', 'twitch.tv', 'netflix.com', 'hulu.com', 'disneyplus.com'];
+  if (videoHosts.some(h => location.hostname.includes(h))) {
+    return false;
+  }
+  // Generic canvas detection: only if a large canvas is present AND no standard DOM content exists
+  // A page with normal text content, links, buttons is NOT a canvas app even if it has a large canvas
   const canvas = document.querySelector('canvas');
   if (!canvas) return false;
   const rect = canvas.getBoundingClientRect();
   const viewportArea = window.innerWidth * window.innerHeight;
   const canvasArea = rect.width * rect.height;
-  return canvasArea > viewportArea * 0.3;
+  if (canvasArea <= viewportArea * 0.3) return false;
+  // Large canvas exists — but only classify as canvas app if the page lacks substantial DOM content
+  // (real canvas apps like Sheets/Figma render everything on canvas, so DOM has minimal text)
+  const textContent = document.body?.innerText?.trim() || '';
+  const hasSubstantialText = textContent.length > 2000;
+  const hasArticleContent = !!document.querySelector('article, [role="article"], [role="feed"], [role="grid"]');
+  if (hasSubstantialText || hasArticleContent) return false;
+  return true;
 }
 
 /**
@@ -760,6 +782,140 @@ function extractCalendarEvents(): NLExtractResult {
   return { items: events.slice(0, 50), method: 'calendar-events' };
 }
 
+/**
+ * Extract emails from Gmail — returns sender + subject lines from the inbox grid.
+ */
+function extractGmailEmails(description: string): NLExtractResult {
+  const items: string[] = [];
+
+  // Strategy 1: Email rows in the grid — each <tr> is an email
+  const grid = document.querySelector('[role="main"] [role="grid"]') || document.querySelector('[role="grid"]');
+  if (grid) {
+    const rows = grid.querySelectorAll('tr');
+    for (const row of Array.from(rows)) {
+      // Gmail email rows have sender info and subject
+      const senderEl = row.querySelector('.yW span[email], .yW span, td.xY a span');
+      const subjectEl = row.querySelector('.y6 span, .bog span, td.xY span[data-thread-id]');
+      const snippetEl = row.querySelector('.y2, .xT .y2');
+      const sender = senderEl?.textContent?.trim() || '';
+      const subject = subjectEl?.textContent?.trim() || '';
+      const snippet = snippetEl?.textContent?.trim() || '';
+      if (sender || subject) {
+        const parts = [sender, subject, snippet].filter(Boolean);
+        items.push(parts.join(' — '));
+      }
+    }
+  }
+
+  // Strategy 2: Fallback — scan for elements with email-like structure
+  if (items.length === 0) {
+    const mainEl = document.querySelector('[role="main"]');
+    if (mainEl) {
+      // Try tr elements directly within main
+      const allRows = mainEl.querySelectorAll('tr');
+      for (const row of Array.from(allRows)) {
+        const text = row.textContent?.trim() || '';
+        // Skip very short rows (tab labels like "Primary") or very long ones (body text)
+        if (text.length > 15 && text.length < 500) {
+          // Collapse whitespace
+          const cleaned = text.replace(/\s+/g, ' ').substring(0, 200);
+          items.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Strategy 3: aria-label on rows
+  if (items.length === 0) {
+    const rows = document.querySelectorAll('[role="row"]');
+    for (const row of Array.from(rows)) {
+      const label = row.getAttribute('aria-label') || '';
+      if (label && label.length > 10) {
+        items.push(label);
+      }
+    }
+  }
+
+  return { items: items.slice(0, 50), method: 'gmail-email-rows' };
+}
+
+/**
+ * Extract post titles from Reddit using shreddit-post custom elements and other selectors.
+ * Works across different subreddit layouts (old/new/redesign).
+ */
+function extractRedditPosts(description: string): NLExtractResult {
+  const items: string[] = [];
+
+  // Strategy 1: shreddit-post custom elements — each has title as attribute or in shadow DOM
+  const shredditPosts = document.querySelectorAll('shreddit-post');
+  for (const post of Array.from(shredditPosts)) {
+    // shreddit-post often has post-title, content-href, or aria-label attributes
+    const title = post.getAttribute('post-title') || post.getAttribute('aria-label') || '';
+    if (title && title.length > 3 && !items.includes(title)) {
+      items.push(title);
+      continue;
+    }
+    // Try shadow DOM: look for title link inside
+    if (post.shadowRoot) {
+      const titleEl = post.shadowRoot.querySelector('a[slot="title"], [slot="title"], a[href*="/comments/"]');
+      const text = titleEl?.textContent?.trim() || '';
+      if (text && text.length > 3 && !items.includes(text)) items.push(text);
+    }
+    // Try slotted elements
+    const slottedTitle = post.querySelector('a[slot="title"], [slot="title"]');
+    if (slottedTitle) {
+      const text = slottedTitle.textContent?.trim() || '';
+      if (text && text.length > 3 && !items.includes(text)) items.push(text);
+    }
+  }
+
+  // Strategy 2: Deep shadow DOM piercing for shreddit-post titles
+  if (items.length === 0) {
+    const shadowTitles = deepQuerySelectorAll(document, 'a[slot="title"], [slot="title"]');
+    for (const el of shadowTitles) {
+      const text = el.textContent?.trim() || '';
+      if (text && text.length > 3 && text.length < 300 && !items.includes(text)) items.push(text);
+    }
+  }
+
+  // Strategy 3: Post title links with Reddit-specific IDs/selectors
+  if (items.length === 0) {
+    const titleSelectors = [
+      'a[id^="post-title"]',             // new Reddit
+      'a[data-click-id="body"]',         // redesign
+      'a[href*="/comments/"] h3',        // title inside link
+      '.Post a h3',                      // old redesign
+      'article a h3',                    // article-based layout
+      '[data-testid="post-title"]',      // test IDs
+    ];
+    for (const sel of titleSelectors) {
+      const els = document.querySelectorAll(sel);
+      for (const el of Array.from(els)) {
+        const text = el.textContent?.trim() || '';
+        if (text && text.length > 3 && text.length < 300 && !items.includes(text)) items.push(text);
+      }
+      if (items.length >= 3) break;
+    }
+  }
+
+  // Strategy 4: Links to /comments/ paths (Reddit post URLs always contain /comments/)
+  if (items.length === 0) {
+    const commentLinks = document.querySelectorAll('a[href*="/comments/"]');
+    for (const link of Array.from(commentLinks)) {
+      const text = link.textContent?.trim() || '';
+      // Filter out short links (like "N comments") and nav elements
+      if (text && text.length > 10 && text.length < 300 &&
+          !text.toLowerCase().includes('comment') &&
+          !link.closest('nav, aside, [role="navigation"]') &&
+          !items.includes(text)) {
+        items.push(text);
+      }
+    }
+  }
+
+  return { items: items.slice(0, 50), method: 'reddit-shreddit-posts' };
+}
+
 function extractByNaturalLanguage(description: string): NLExtractResult {
   const lower = description.toLowerCase();
 
@@ -771,6 +927,18 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
   // Calendar event detection: Google Calendar uses custom [data-eventid] elements
   if (isCalendarApp() && /\b(events?|appointments?|meetings?|schedule|calendar)\b/.test(lower)) {
     return extractCalendarEvents();
+  }
+
+  // Gmail extraction: return email subjects/senders instead of tab labels
+  if (location.hostname === 'mail.google.com') {
+    return extractGmailEmails(description);
+  }
+
+  // Reddit extraction: use shreddit-post elements directly to avoid UI chrome
+  if (location.hostname.includes('reddit.com')) {
+    const redditResult = extractRedditPosts(description);
+    if (redditResult.items.length > 0) return redditResult;
+    // Fall through to generic extraction if Reddit-specific fails
   }
 
   // Title/headline patterns (handle plurals: titles, headlines, headings)
@@ -1136,14 +1304,54 @@ function extractGeneric(description: string): NLExtractResult {
  * Returns the best content root or null if none found.
  */
 function getMainContentArea(): Element | null {
+  // Gmail: scope to email grid/table to avoid tab bar (Primary/Social/etc.)
+  if (location.hostname === 'mail.google.com') {
+    // The email list is a table with role="grid" inside [role="main"]
+    const gmailSelectors = [
+      '[role="main"] [role="grid"]',     // email list grid
+      '[role="main"] table.F',           // alternative email table
+      'div.AO [role="grid"]',            // nested grid
+      'div.AO',                          // email content pane
+    ];
+    for (const sel of gmailSelectors) {
+      try {
+        const el = document.querySelector(sel);
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 50) return el;
+        }
+      } catch { /* invalid selector */ }
+    }
+  }
+
+  // Reddit: find the feed container, trying multiple selectors across old/new Reddit
+  if (location.hostname.includes('reddit.com')) {
+    const redditSelectors = [
+      'shreddit-feed',                   // new Reddit custom element
+      '[data-testid="posts-list"]',      // post list container
+      'main [slot="content"]',           // slotted content
+      '[data-testid="post-container"]',  // individual post containers' parent
+      '.ListingLayout-outerContainer',   // old Reddit listing
+      'main',                            // generic main
+    ];
+    for (const sel of redditSelectors) {
+      try {
+        const el = document.querySelector(sel);
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 50) return el;
+        }
+      } catch { /* invalid selector */ }
+    }
+    // Shadow DOM fallback: look for shreddit-feed in shadow roots
+    const shadowFeed = deepQuerySelector(document, 'shreddit-feed');
+    if (shadowFeed) return shadowFeed;
+  }
+
   // Try site-specific content area selectors first
   const siteSpecific = [
     // GitHub
     '[data-hpc]', 'turbo-frame#repo-content-turbo-frame', '#repo-content-pjax-container',
-    // Reddit
-    'shreddit-feed', '[data-testid="post-container"]', '.ListingLayout-outerContainer',
-    // Gmail
-    '[role="main"]', 'div.AO',
     // Calendar
     '[data-view-heading]', '[role="grid"]',
     // Generic landmarks
@@ -1545,11 +1753,17 @@ function normalizeKeyName(raw: string): string {
 }
 
 function parseActInstruction(instruction: string): ActStep[] {
-  // Split compound instructions: "X then Y", "X and then Y", "X; Y"
-  const compoundSplit = instruction.trim().split(/\s+then\s+|\s+and\s+then\s+|\s*;\s*/i);
-  if (compoundSplit.length > 1) {
+  // Split compound instructions: "X then Y", "X and then Y", "X; Y", "X and press/click/scroll Y"
+  const compoundSplit = instruction.trim().split(/\s+and\s+then\s+|\s+then\s+|\s+and\s+(?=(?:press|click|tap|scroll|select|open|type|enter|hit)\s)/i)
+    .map(s => s.trim()).filter(s => s.length > 0);
+  // Also split on semicolons
+  const finalParts: string[] = [];
+  for (const part of compoundSplit) {
+    finalParts.push(...part.split(/\s*;\s*/).map(s => s.trim()).filter(s => s.length > 0));
+  }
+  if (finalParts.length > 1) {
     const allSteps: ActStep[] = [];
-    for (const subInstr of compoundSplit) {
+    for (const subInstr of finalParts) {
       const trimmed = subInstr.trim();
       if (!trimmed) continue;
       allSteps.push(...parseSingleActInstruction(trimmed));
@@ -1665,12 +1879,26 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
   // Generic fallback: works on ANY page, not just Sheets
   // -----------------------------------------------------------------------
   if (steps.length === 0) {
+    // Pattern: "scroll down" / "scroll up" / "scroll to top" / "scroll to bottom"
+    const scrollMatch = instr.match(/\bscroll\s+(down|up|left|right|to\s+(?:the\s+)?(?:top|bottom))\b/i);
+    if (scrollMatch) {
+      const scrollArg = scrollMatch[1].toLowerCase();
+      if (scrollArg.includes('top')) {
+        steps.push({ op: 'scroll', text: 'top', status: 'pending' } as ActStep);
+      } else if (scrollArg.includes('bottom')) {
+        steps.push({ op: 'scroll', text: 'bottom', status: 'pending' } as ActStep);
+      } else {
+        steps.push({ op: 'scroll', text: scrollArg, status: 'pending' } as ActStep);
+      }
+      return steps;
+    }
+
     const actions = scanPageActions();
 
-    // Pattern: "type X in Y" / "type X into Y" / "enter X in Y"
-    const typeInMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:["']([^"']+)["']|(\S+))\s+(?:in|into)\s+(?:the\s+)?(.+)$/i);
+    // Pattern: "type X into Y" / "type X in Y" / "enter X in Y" (multi-word text support)
+    const typeInMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:["']([^"']+)["']|(.+?))\s+(?:in|into)\s+(?:the\s+)?(.+)$/i);
     if (typeInMatch) {
-      const textVal = typeInMatch[1] || typeInMatch[2];
+      const textVal = (typeInMatch[1] || typeInMatch[2]).trim();
       const targetDesc = typeInMatch[3].trim();
       // Find best matching input
       const inputs = actions.filter(a => a.purpose === 'input' || a.purpose === 'search');
@@ -1696,6 +1924,96 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
     if (typeOnlyMatch) {
       const textVal = typeOnlyMatch[1] || typeOnlyMatch[2].trim();
       steps.push({ op: 'type', text: textVal, status: 'pending' });
+      return steps;
+    }
+
+    // Pattern: "click the first/second/third/1st/2nd/3rd/Nth [noun]" — ordinal resolution
+    const ordinalMatch = instr.match(/\b(?:click|press|tap|select|open|hit)\s+(?:on\s+)?(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|\d+(?:st|nd|rd|th))\s+(.+)$/i);
+    if (ordinalMatch) {
+      const ordinalStr = ordinalMatch[1].toLowerCase();
+      const nounDesc = ordinalMatch[2].trim().replace(/\s+(?:button|link)$/i, '');
+      const ordinalMap: Record<string, number> = {
+        first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2,
+        fourth: 3, '4th': 3, fifth: 4, '5th': 4,
+      };
+      let idx = ordinalMap[ordinalStr];
+      if (idx === undefined) {
+        // Parse numeric ordinals like "6th", "10th"
+        const numMatch = ordinalStr.match(/^(\d+)/);
+        idx = numMatch ? parseInt(numMatch[1], 10) - 1 : 0;
+      }
+      // Find all elements matching the noun in main content area
+      const mainContent = getMainContentArea();
+      const searchRoot = mainContent || document.body;
+      const nounLower = nounDesc.toLowerCase();
+      const matchingEls: Element[] = [];
+      // Known noun-to-selector mappings for common content types
+      const nounSelectors: Record<string, string[]> = {
+        video: ['a#video-title', 'h3 a', 'a[href*="watch"]', 'a[href*="video"]', '[data-testid="video-title"]'],
+        product: ['[data-component-type="s-search-result"] h2 a', '.s-result-item h2 a', 'h2 a[href*="/dp/"]', '[data-testid="product-title"]', 'h2 a', 'h3 a'],
+        post: ['shreddit-post a[slot="title"]', 'a[href*="/comments/"]', '[data-testid="post-title"]', 'a[id^="post-title"]', 'article a h3', 'article a h2', '.Post a h3'],
+        link: ['a[href]'],
+        result: ['h3 a', '.result a', '[data-testid="result"] a', 'h2 a'],
+        item: ['li a', '.item a', 'article a'],
+        email: ['tr[role="row"] td a', 'tr td .y6 span', 'tr[jscontroller]', '[role="row"]'],
+        story: ['a.storylink', 'a[href*="story"]', 'article a h2', 'h3 a'],
+        repo: ['a[href*="github.com/"]', 'h3 a', '[data-hovercard-type="repository"] a'],
+        button: ['button', '[role="button"]'],
+      };
+      // Try noun-specific selectors first
+      const specificSels = nounSelectors[nounLower] || [];
+      for (const sel of specificSels) {
+        try {
+          const els = searchRoot.querySelectorAll(sel);
+          for (const el of Array.from(els)) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && rect.top < window.innerHeight * 3) {
+              matchingEls.push(el);
+            }
+          }
+          // Also try shadow DOM
+          if (matchingEls.length === 0) {
+            const shadowEls = deepQuerySelectorAll(document, sel);
+            for (const el of shadowEls) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) matchingEls.push(el);
+            }
+          }
+          if (matchingEls.length > idx) break;
+        } catch { /* invalid selector */ }
+      }
+      // Fallback: search by text content / aria-label matching the noun
+      if (matchingEls.length <= idx) {
+        const allInteractive = searchRoot.querySelectorAll('a[href], button, [role="button"], [role="link"], h2 a, h3 a');
+        for (const el of Array.from(allInteractive)) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          const text = (el.textContent?.trim() || '').toLowerCase();
+          const label = (el.getAttribute('aria-label') || '').toLowerCase();
+          const role = (el.getAttribute('role') || '').toLowerCase();
+          if (text.includes(nounLower) || label.includes(nounLower) || role.includes(nounLower)) {
+            if (!matchingEls.includes(el)) matchingEls.push(el);
+          }
+        }
+      }
+      if (matchingEls.length > idx) {
+        const targetEl = matchingEls[idx] as HTMLElement;
+        // Build a selector for this specific element
+        let targetSel = '';
+        if (targetEl.id && !/^[a-z]{1,2}-[0-9a-f]{4,}/i.test(targetEl.id)) {
+          targetSel = '#' + targetEl.id;
+        } else if (targetEl.getAttribute('data-testid')) {
+          targetSel = `[data-testid="${targetEl.getAttribute('data-testid')}"]`;
+        } else {
+          // Use text= selector with the element's own text
+          const elText = (targetEl.textContent?.trim() || '').substring(0, 60);
+          targetSel = elText ? `text=${elText}` : targetEl.tagName.toLowerCase();
+        }
+        steps.push({ op: 'click-selector', selector: targetSel, status: 'pending' });
+      } else {
+        steps.push({ op: 'click-selector', selector: `text=${nounDesc}`, status: 'pending',
+          error: `Only found ${matchingEls.length} ${nounDesc} elements, wanted index ${idx}` } as ActStep);
+      }
       return steps;
     }
 
@@ -1785,6 +2103,18 @@ async function executeActStep(step: ActStep): Promise<void> {
       const clickRes = await handleClick(step.selector);
       step.status = clickRes.success ? 'done' : 'failed';
       if (!clickRes.success) step.error = clickRes.error;
+      break;
+    }
+    case 'scroll': {
+      const dir = step.text || 'down';
+      let scrollRes: BridgeResponse;
+      if (dir === 'top' || dir === 'bottom') {
+        scrollRes = await handleScroll({ to: dir as 'top' | 'bottom' });
+      } else {
+        scrollRes = await handleScroll({ direction: dir as 'up' | 'down' | 'left' | 'right' });
+      }
+      step.status = scrollRes.success ? 'done' : 'failed';
+      if (!scrollRes.success) step.error = scrollRes.error;
       break;
     }
     default:
