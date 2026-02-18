@@ -2,6 +2,7 @@
 // Attempts to repair broken CSS selectors using a DOM excerpt + an LLM.
 
 import type { ExtensionBridge } from './ext-bridge.js';
+import type { ModelRegistry } from './registry.js';
 import { logGateway, serializeError } from './gw-log.js';
 
 export interface HealRequest {
@@ -57,12 +58,15 @@ export const DEFAULT_SELF_HEAL_CONFIG: SelfHealConfig = {
 
 let _extBridge: ExtensionBridge | null = null;
 let _config: SelfHealConfig = { ...DEFAULT_SELF_HEAL_CONFIG };
+let _registry: ModelRegistry | null = null;
 
 export function configureSelfHeal(opts: {
   extBridge: ExtensionBridge;
   config?: Partial<SelfHealConfig>;
+  registry?: ModelRegistry;
 }): void {
   _extBridge = opts.extBridge;
+  _registry = opts.registry ?? null;
   _config = {
     ...DEFAULT_SELF_HEAL_CONFIG,
     ...(opts.config ?? {}),
@@ -366,9 +370,24 @@ export async function attemptHeal(req: HealRequest): Promise<HealResult | null> 
     model: _config.llm.model,
     baseUrl: _config.llm.baseUrl,
     promptLength: prompt.length,
+    usingRegistry: !!_registry,
   });
 
-  const text = await callLLM(prompt, _config.llm);
+  // Try registry-based LLM first, fall back to direct callLLM
+  let text: string | null = null;
+  if (_registry) {
+    try {
+      const driver = _registry.resolve({ prompt, require: { llm: true } });
+      const result = await driver.execute({ prompt, timeout_ms: _config.llm.timeoutMs ?? 15_000 });
+      text = result.text || null;
+      logGateway('[heal] used registry driver', { driver: driver.registration.id });
+    } catch (err) {
+      logGateway('[heal] registry LLM failed, falling back to direct', serializeError(err));
+      text = await callLLM(prompt, _config.llm);
+    }
+  } else {
+    text = await callLLM(prompt, _config.llm);
+  }
 
   if (!text) {
     logGateway('[heal] LLM returned no text');

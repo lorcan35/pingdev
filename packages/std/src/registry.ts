@@ -34,6 +34,11 @@ export class ModelRegistry {
     this.healthCache.delete(id);
   }
 
+  /** Return all registered drivers. */
+  listDrivers(): Driver[] {
+    return Array.from(this.drivers.values());
+  }
+
   /** Resolve the best driver for a request. Throws PingError (ENOENT) on failure. */
   resolve(request: DeviceRequest): Driver {
     // 1. If a specific driver is requested, return it directly

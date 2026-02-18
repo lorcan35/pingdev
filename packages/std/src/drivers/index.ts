@@ -8,3 +8,6 @@ export type { OpenAICompatAdapterOptions } from './openai-compat.js';
 
 export { AnthropicAdapter } from './anthropic.js';
 export type { AnthropicAdapterOptions } from './anthropic.js';
+
+export { OpenRouterAdapter } from './openrouter.js';
+export type { OpenRouterAdapterOptions } from './openrouter.js';

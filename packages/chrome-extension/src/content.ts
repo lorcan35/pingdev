@@ -779,7 +779,20 @@ function extractCalendarEvents(): NLExtractResult {
     }
   }
 
-  return { items: events.slice(0, 50), method: 'calendar-events' };
+  // Deduplicate: normalize text and remove shorter substrings that are part of longer entries
+  const unique: string[] = [];
+  const normalized = events.map(e => e.replace(/\s+/g, ' ').trim());
+  for (const event of normalized) {
+    // Skip if this event text is a substring of an already-added event
+    if (unique.some(u => u.includes(event))) continue;
+    // Remove previously added events that are substrings of this one
+    for (let i = unique.length - 1; i >= 0; i--) {
+      if (event.includes(unique[i])) unique.splice(i, 1);
+    }
+    unique.push(event);
+  }
+
+  return { items: unique.slice(0, 50), method: 'calendar-events' };
 }
 
 /**
@@ -825,13 +838,40 @@ function extractGmailEmails(description: string): NLExtractResult {
     }
   }
 
-  // Strategy 3: aria-label on rows
+  // Strategy 3: [role="row"] elements — Gmail renders emails as table rows with role="row"
   if (items.length === 0) {
     const rows = document.querySelectorAll('[role="row"]');
     for (const row of Array.from(rows)) {
-      const label = row.getAttribute('aria-label') || '';
-      if (label && label.length > 10) {
-        items.push(label);
+      // Skip category tabs (Primary, Social, etc.) — they have very short text
+      const text = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+      if (text.length > 20 && text.length < 500) {
+        // Extract structured data: look for sender, subject, date within row
+        const senderEl = row.querySelector('span[email], .yW span, td span[data-hovercard-id]');
+        const sender = senderEl?.textContent?.trim() || '';
+        // Subject is usually in a <span> inside a link or specific class
+        const subjectEl = row.querySelector('.y6 span, .bog span, span[data-thread-id] span');
+        const subject = subjectEl?.textContent?.trim() || '';
+        if (sender && subject) {
+          items.push(`${sender} — ${subject}`);
+        } else if (text.length > 30) {
+          // Fallback: use full row text but clean it up
+          const cleaned = text.substring(0, 200);
+          items.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Strategy 4: tr elements within main content area
+  if (items.length === 0) {
+    const mainEl = document.querySelector('[role="main"]');
+    if (mainEl) {
+      const allRows = mainEl.querySelectorAll('tr');
+      for (const row of Array.from(allRows)) {
+        const text = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (text.length > 30 && text.length < 500) {
+          items.push(text.substring(0, 200));
+        }
       }
     }
   }
@@ -924,7 +964,7 @@ function extractRedditPosts(description: string): NLExtractResult {
 
 function detectCompoundFields(lower: string): string[] {
   const fieldPatterns: [string, RegExp][] = [
-    ['title', /\b(titles?|headlines?|headings?|names?|subjects?)\b/],
+    ['title', /\b(titles?|headlines?|headings?|subjects?)\b/],
     ['price', /\b(prices?|costs?|amounts?|fees?)\b/],
     ['score', /\b(scores?|votes?|upvotes?|downvotes?|ratings?|points?|karma)\b/],
     ['author', /\b(authors?|creators?|posters?|usernames?|senders?|channels?)\b/],
@@ -934,10 +974,35 @@ function detectCompoundFields(lower: string): string[] {
     ['description', /\b(descriptions?|summar(?:y|ies)|excerpts?|snippets?)\b/],
   ];
 
+  // "names" is ambiguous: "product names" = titles, "channel names" = authors.
+  // Only add it to title if no author field already matched.
   const matched: string[] = [];
   for (const [name, pattern] of fieldPatterns) {
     if (pattern.test(lower)) matched.push(name);
   }
+
+  // Add "names" to the title field only if it appears AND author wasn't already matched
+  if (/\bnames?\b/.test(lower) && !matched.includes('author') && !matched.includes('title')) {
+    matched.push('title');
+  }
+
+  // Adjacency check: "channel names" is a single concept (author), not compound.
+  // If a matched author word is immediately adjacent to a matched title word, it's not compound.
+  if (matched.includes('title') && matched.includes('author')) {
+    // Check if title and author matches overlap (e.g., "channel names" → both match)
+    const titleWords = lower.match(/\b(titles?|headlines?|headings?|subjects?|names?)\b/g) || [];
+    const authorWords = lower.match(/\b(authors?|creators?|posters?|usernames?|senders?|channels?)\b/g) || [];
+    for (const tw of titleWords) {
+      for (const aw of authorWords) {
+        // If they're adjacent (e.g., "channel names", "author name"), it's one concept
+        if (lower.includes(`${aw} ${tw}`) || lower.includes(`${tw} ${aw}`)) {
+          // Treat as author only (the modifier + "names" = author field)
+          matched.splice(matched.indexOf('title'), 1);
+        }
+      }
+    }
+  }
+
   return matched;
 }
 
@@ -950,7 +1015,11 @@ function extractFieldFromContainer(container: Element, field: string): string {
   switch (field) {
     case 'title': {
       for (const el of searchIn) {
-        const heading = el.querySelector('h1, h2, h3, h4, .titleline > a, .storylink, a.storylink');
+        // Amazon: h2 often contains the product title in a span
+        const heading = el.querySelector(
+          'h1, h2, h3, h4, .titleline > a, .storylink, a.storylink, ' +
+          'a#video-title, #video-title, .a-text-normal'
+        );
         if (heading) return heading.textContent?.trim() || '';
       }
       const link = container.querySelector('a[href]');
@@ -1037,10 +1106,10 @@ function extractCompound(description: string, fields: string[]): NLExtractResult
   }
 
   // For HN table layout, filter to only the main item rows (athing)
-  // since metadata rows are accessed via nextElementSibling
+  // since metadata rows are accessed via nextElementSibling in extractFieldFromContainer
   const isTableLayout = containers[0]?.tagName === 'TR';
   const filteredContainers = isTableLayout
-    ? containers.filter(c => c.classList.contains('athing') || c.querySelector('.titleline, .storylink, a[href]'))
+    ? containers.filter(c => c.classList.contains('athing') || c.querySelector('.titleline, .storylink'))
     : containers;
 
   const items: string[] = [];
@@ -1076,15 +1145,9 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
     return extractGmailEmails(description);
   }
 
-  // Reddit extraction: use shreddit-post elements directly to avoid UI chrome
-  if (location.hostname.includes('reddit.com')) {
-    const redditResult = extractRedditPosts(description);
-    if (redditResult.items.length > 0) return redditResult;
-    // Fall through to generic extraction if Reddit-specific fails
-  }
-
   // Compound query detection: if 2+ field types are mentioned, extract all fields
-  // per repeated container instead of dispatching to a single-field extractor
+  // per repeated container instead of dispatching to a single-field extractor.
+  // Runs BEFORE site-specific extractors so compound queries on Reddit/etc. work.
   const compoundFields = detectCompoundFields(lower);
   if (compoundFields.length >= 2) {
     const compoundResult = extractCompound(description, compoundFields);
@@ -1092,8 +1155,22 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
     // Fall through to single-field extraction if compound fails
   }
 
-  // Title/headline patterns (handle plurals: titles, headlines, headings)
-  if (/\b(titles?|headlines?|headings?)\b/.test(lower)) {
+  // Reddit extraction: use shreddit-post elements directly to avoid UI chrome
+  if (location.hostname.includes('reddit.com')) {
+    const redditResult = extractRedditPosts(description);
+    if (redditResult.items.length > 0) return redditResult;
+    // Fall through to generic extraction if Reddit-specific fails
+  }
+
+  // Author/user/channel patterns — check BEFORE titles because "channel names" means authors
+  if (/\b(authors?|users?|channels?|creators?|posters?|usernames?|handles?)\b/.test(lower)) {
+    return extractNames();
+  }
+
+  // Title/headline/name patterns (handle plurals: titles, headlines, headings, names)
+  // "names" routes here because "list product names", "list repo names" means item titles
+  // But "channel names", "user names" already handled above by author pattern
+  if (/\b(titles?|headlines?|headings?|names?|subjects?)\b/.test(lower)) {
     return extractTitles();
   }
 
@@ -1115,11 +1192,6 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
   // Date/time patterns
   if (/\b(dates?|times?|when|posted|published|created|updated|ago)\b/.test(lower)) {
     return extractDates();
-  }
-
-  // Name/author/user/channel patterns
-  if (/\b(names?|authors?|users?|channels?|creators?|by|posters?|usernames?|handles?)\b/.test(lower)) {
-    return extractNames();
   }
 
   // Link/URL patterns
@@ -1148,6 +1220,49 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
 
 function extractTitles(): NLExtractResult {
   const titles: string[] = [];
+
+  // HN-specific: use .titleline > a which reliably selects story titles
+  if (location.hostname === 'news.ycombinator.com' || location.hostname === 'hn.algolia.com') {
+    const hnTitles = document.querySelectorAll('.titleline > a, a.storylink');
+    for (const el of Array.from(hnTitles)) {
+      const text = el.textContent?.trim();
+      if (text && text.length > 3) titles.push(text);
+    }
+    if (titles.length > 0) return { items: titles.slice(0, 50), method: 'hn-titleline' };
+  }
+
+  // GitHub-specific: trending repos, explore page, search results
+  if (location.hostname === 'github.com') {
+    // Trending repos: h2 > a with repo paths
+    const repoLinks = document.querySelectorAll(
+      'article h2 a, h3 a[href*="/"], .Box-row h3 a, [data-hpc] h3 a, ' +
+      'a[data-hovercard-type="repository"], .repo-list h3 a'
+    );
+    for (const el of Array.from(repoLinks)) {
+      const text = el.textContent?.trim().replace(/\s+/g, ' ');
+      if (text && text.length > 1 && text.length < 200 && !titles.includes(text)) {
+        titles.push(text);
+      }
+    }
+    if (titles.length > 0) return { items: titles.slice(0, 50), method: 'github-repo-links' };
+  }
+
+  // Amazon-specific: use product title elements directly
+  if (location.hostname.includes('amazon.')) {
+    const productTitles = document.querySelectorAll(
+      '[data-component-type="s-search-result"] h2 a span, ' +
+      '[data-component-type="s-search-result"] h2, ' +
+      '.s-result-item h2 a span, .a-link-normal .a-text-normal, ' +
+      '[data-asin] h2 a span, [data-asin] h2'
+    );
+    for (const el of Array.from(productTitles)) {
+      const text = el.textContent?.trim();
+      if (text && text.length > 10 && text.length < 500 && !titles.includes(text)) {
+        titles.push(text);
+      }
+    }
+    if (titles.length > 0) return { items: titles.slice(0, 50), method: 'amazon-product-titles' };
+  }
 
   // Scope to main content area to avoid sidebar/nav headings
   const mainContent = getMainContentArea();
@@ -1324,6 +1439,21 @@ function extractDates(): NLExtractResult {
 
 function extractNames(): NLExtractResult {
   const names: string[] = [];
+
+  // YouTube-specific: use ytd channel name elements
+  if (location.hostname.includes('youtube.com')) {
+    const ytChannels = document.querySelectorAll(
+      'ytd-channel-name a, #channel-name a, #text.ytd-channel-name, ' +
+      'a[href*="/@"], #owner-name a, .ytd-channel-name'
+    );
+    for (const el of Array.from(ytChannels)) {
+      const text = el.textContent?.trim();
+      if (text && text.length > 1 && text.length < 100 && !names.includes(text)) {
+        names.push(text);
+      }
+    }
+    if (names.length > 0) return { items: names.slice(0, 50), method: 'youtube-channel-names' };
+  }
 
   // Scope to main content area
   const mainContent = getMainContentArea();
@@ -1546,6 +1676,10 @@ function findRepeatedContainers(): Element[] {
     ? [mainContent, ...Array.from(listParents)]
     : Array.from(listParents);
 
+  // Collect ALL candidate groups from all parents and pick the LARGEST one.
+  // Previously broke on the first parent with 3+ children, which often matched
+  // nav elements instead of the main content list (e.g., HN nav table vs story tbody).
+  let bestGroup: Element[] = [];
   for (const parent of roots) {
     const children = Array.from(parent.children);
     if (children.length < 2) continue;
@@ -1557,13 +1691,65 @@ function findRepeatedContainers(): Element[] {
       tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
     }
 
-    // If a tag appears 3+ times, those children are our repeated containers
+    // If a tag appears 3+ times, those children are candidate containers
     for (const [tag, count] of tagCounts) {
       if (count >= 3) {
-        candidates.push(...children.filter(c => c.tagName === tag));
+        const group = children.filter(c => c.tagName === tag);
+        if (group.length > bestGroup.length) {
+          bestGroup = group;
+        }
       }
     }
-    if (candidates.length >= 3) break;
+  }
+  if (bestGroup.length >= 3) {
+    candidates.push(...bestGroup);
+  }
+
+  // Site-specific overrides: these produce better results than generic repeated containers
+  // YouTube custom element: ytd-rich-item-renderer, ytd-video-renderer
+  if (location.hostname.includes('youtube.com')) {
+    const ytRenderers = document.querySelectorAll(
+      'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, ' +
+      'ytd-grid-video-renderer, ytd-playlist-video-renderer'
+    );
+    if (ytRenderers.length >= 3) {
+      return Array.from(ytRenderers).slice(0, 50);
+    }
+  }
+
+  // Amazon product grid: prefer [data-asin] product cards over generic divs
+  if (location.hostname.includes('amazon.')) {
+    const amazonProducts = document.querySelectorAll(
+      '[data-component-type="s-search-result"], .s-result-item[data-asin], ' +
+      '.zg-item-immersion, [data-asin]:not(#nav-search-submit-button):not([data-asin=""])'
+    );
+    if (amazonProducts.length >= 3) {
+      return Array.from(amazonProducts).slice(0, 50);
+    }
+  }
+
+  // Generic YouTube fallback (in case hostname check missed)
+  if (candidates.length < 3) {
+    const ytRenderers = document.querySelectorAll(
+      'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, ' +
+      'ytd-grid-video-renderer, ytd-playlist-video-renderer'
+    );
+    if (ytRenderers.length >= 3) {
+      candidates.push(...Array.from(ytRenderers));
+      return candidates.slice(0, 50);
+    }
+  }
+
+  // Amazon fallback
+  if (candidates.length < 3) {
+    const amazonProducts = document.querySelectorAll(
+      '[data-component-type="s-search-result"], .zg-item-immersion, ' +
+      '.a-carousel-card, [data-asin], .s-result-item[data-asin]'
+    );
+    if (amazonProducts.length >= 3) {
+      candidates.push(...Array.from(amazonProducts));
+      return candidates.slice(0, 50);
+    }
   }
 
   // Shadow DOM fallback: check for shadow-hosted repeated elements (Reddit shreddit-post)
@@ -1990,41 +2176,38 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
   }
 
   // Pattern: combined "click/go/select/navigate cell X and/then type Y"
+  // Only applies to Sheets/canvas pages with cell refs — skip on generic pages
   const refs = instr.match(cellRefPattern);
-  const typeMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:(?:the\s+)?(?:value|text|formula)\s+)?(.+?)(?:\s+(?:in|into|to|at)\s+(?:cell\s+)?[A-Z]{1,3}\d{1,7})?$/i);
   let textToType: string | null = null;
 
-  if (typeMatch) {
-    let raw = typeMatch[1].trim();
-    // Remove trailing "in X" if cell ref is at end
-    raw = raw.replace(/\s+(?:in|into|to|at)\s+(?:cell\s+)?[A-Z]{1,3}\d{1,7}\s*$/i, '').trim();
-    // Remove surrounding quotes
-    raw = raw.replace(/^["']|["']$/g, '');
-    textToType = raw;
-  }
-
-  // Prefer quoted text if available — typeMatch regex can corrupt text with trailing punctuation
-  if (quotedMatch) {
-    textToType = quotedMatch[1];
-  }
-
-  // Navigate to cell if a reference was found
   if (refs && refs.length > 0) {
+    const typeMatch = instr.match(/\b(?:type|enter|input|write)\s+(?:(?:the\s+)?(?:value|text|formula)\s+)?(.+?)(?:\s+(?:in|into|to|at)\s+(?:cell\s+)?[A-Z]{1,3}\d{1,7})?$/i);
+
+    if (typeMatch) {
+      let raw = typeMatch[1].trim();
+      // Remove trailing "in X" if cell ref is at end
+      raw = raw.replace(/\s+(?:in|into|to|at)\s+(?:cell\s+)?[A-Z]{1,3}\d{1,7}\s*$/i, '').trim();
+      // Remove surrounding quotes
+      raw = raw.replace(/^["']|["']$/g, '');
+      textToType = raw;
+    }
+
+    // Prefer quoted text if available — typeMatch regex can corrupt text with trailing punctuation
+    if (quotedMatch) {
+      textToType = quotedMatch[1];
+    }
+
+    // Navigate to cell if a reference was found
     // If there are multiple refs and we're typing, navigate to the last one mentioned
     // "type Hello in B2" → B2 is the target
     const targetRef = refs[refs.length > 1 && textToType ? refs.length - 1 : 0].toUpperCase();
     steps.push({ op: 'navigate', ref: targetRef, status: 'pending' });
-  }
 
-  // Type text if found
-  if (textToType) {
-    steps.push({ op: 'type', text: textToType, target: 'formulaBar', status: 'pending' });
-    steps.push({ op: 'press', key: 'Enter', status: 'pending' });
-  }
-
-  // If no steps were generated, try simple click/navigate
-  if (steps.length === 0 && refs && refs.length > 0) {
-    steps.push({ op: 'navigate', ref: refs[0].toUpperCase(), status: 'pending' });
+    // Type text if found
+    if (textToType) {
+      steps.push({ op: 'type', text: textToType, target: 'formulaBar', status: 'pending' });
+      steps.push({ op: 'press', key: 'Enter', status: 'pending' });
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -2103,7 +2286,7 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
       const nounSelectors: Record<string, string[]> = {
         video: ['a#video-title', 'h3 a', 'a[href*="watch"]', 'a[href*="video"]', '[data-testid="video-title"]'],
         product: ['[data-component-type="s-search-result"] h2 a', '.s-result-item h2 a', 'h2 a[href*="/dp/"]', '[data-testid="product-title"]', 'h2 a', 'h3 a'],
-        post: ['shreddit-post a[slot="title"]', 'a[href*="/comments/"]', '[data-testid="post-title"]', 'a[id^="post-title"]', 'article a h3', 'article a h2', '.Post a h3'],
+        post: ['a[slot="title"]', 'a[href*="/comments/"]', '[data-testid="post-title"]', 'a[id^="post-title"]', 'article a h3', 'article a h2', '.Post a h3'],
         link: ['a[href]'],
         result: ['h3 a', '.result a', '[data-testid="result"] a', 'h2 a'],
         item: ['li a', '.item a', 'article a'],
@@ -2128,10 +2311,11 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
               matchingEls.push(el);
             }
           }
-          // Also try shadow DOM
-          if (matchingEls.length === 0) {
+          // Also try shadow DOM for EACH selector (not just when nothing found)
+          if (matchingEls.length <= idx) {
             const shadowEls = deepQuerySelectorAll(document, sel);
             for (const el of shadowEls) {
+              if (matchingEls.includes(el)) continue; // skip duplicates
               const rect = el.getBoundingClientRect();
               if (rect.width > 0 && rect.height > 0) matchingEls.push(el);
             }
@@ -2211,8 +2395,7 @@ async function executeActStep(step: ActStep): Promise<void> {
     }
     case 'type': {
       if (!step.text) { step.status = 'failed'; step.error = 'No text'; return; }
-      // Use CDP insertText to type into whatever is focused (usually the formula bar or cell editor)
-      // Retry once after a pause — CDP debugger may still be detaching from the previous step
+      // Try CDP insertText first (needed for canvas/Sheets apps)
       let typed = await cdpKeys([
         { action: 'insertText', text: step.text },
       ]);
@@ -2222,8 +2405,20 @@ async function executeActStep(step: ActStep): Promise<void> {
           { action: 'insertText', text: step.text },
         ]);
       }
-      step.status = typed ? 'done' : 'failed';
-      if (!typed) step.error = 'CDP type failed';
+      // Fallback to handleType for regular pages where CDP isn't available
+      if (!typed) {
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl !== document.body) {
+          const typeRes = await handleType('', step.text);
+          step.status = typeRes.success ? 'done' : 'failed';
+          if (!typeRes.success) step.error = typeRes.error || 'Type fallback failed';
+        } else {
+          step.status = 'failed';
+          step.error = 'CDP type failed and no focused element for fallback';
+        }
+      } else {
+        step.status = 'done';
+      }
       break;
     }
     case 'press': {
@@ -2343,13 +2538,10 @@ async function handleAct(instruction: string): Promise<BridgeResponse> {
         steps[0].status = 'done';
         steps[1].status = 'done';
         if (hasEnter) steps[2].status = 'done';
-        const completed = hasEnter ? 3 : 2;
-        return {
-          success: true,
-          data: { instruction, steps, stepsCompleted: completed, stepsTotal: steps.length },
-        };
+        // Don't return early — fall through to sequential execution
+        // so remaining steps (e.g., "then press Tab then type Y") also run
       }
-      // Fall through to sequential execution if batched CDP fails
+      // Fall through to sequential execution for remaining steps
     }
   }
 

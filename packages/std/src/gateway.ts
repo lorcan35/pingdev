@@ -87,7 +87,7 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
 
   const selectorCache = new SelectorCache();
   await selectorCache.load();
-  configureSelfHeal({ extBridge, config: selfHealCfg });
+  configureSelfHeal({ extBridge, config: selfHealCfg, registry });
 
   const healStats = {
     attempts: 0,
@@ -286,6 +286,26 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       const driver = registry.resolve(deviceReq);
       const result: DeviceResponse = await driver.execute(deviceReq);
       return result;
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  // ---- GET /v1/llm/models — List models from all registered LLM drivers ----
+  app.get('/v1/llm/models', async (_request, reply) => {
+    try {
+      const allModels: Array<{ driver: string; models: import('./types.js').ModelInfo[] }> = [];
+      for (const driver of registry.listDrivers()) {
+        if (driver.registration.capabilities.llm && typeof driver.listModels === 'function') {
+          try {
+            const models = await driver.listModels();
+            allModels.push({ driver: driver.registration.id, models });
+          } catch {
+            allModels.push({ driver: driver.registration.id, models: [] });
+          }
+        }
+      }
+      return { drivers: allModels };
     } catch (err) {
       return sendPingError(reply, err);
     }
