@@ -1,680 +1,205 @@
 # PingOS
 
-**An Ahead-of-Time Web-to-API Compiler — the operating system for the web.**
+**Browser automation OS — control any website through a REST API.**
 
-<!-- ![CI](https://img.shields.io/github/actions/workflow/status/pingdev/pingos/ci.yml?branch=main&label=CI) -->
-<!-- ![License](https://img.shields.io/badge/license-MIT-blue) -->
-<!-- ![Version](https://img.shields.io/badge/version-0.1.0-green) -->
-<!-- ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue) -->
-<!-- ![Node](https://img.shields.io/badge/Node-20+-green) -->
-
-PingOS turns any website into a programmable REST API — at compile time, not runtime. Instead of scraping pages on every request, PingOS **compiles** a website's UI into a structured "PingApp": a browser-automated shim that maps CSS selectors, state machines, and completion signals into a clean HTTP contract. A central POSIX-inspired gateway routes requests across browser-backed PingApps, local models (Ollama, LM Studio), and cloud APIs (OpenAI, Anthropic) using capability-based routing, health monitoring, and session affinity. One API. Every AI on the web.
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)
+![Node](https://img.shields.io/badge/Node-20+-green)
+![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-yellow)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
-## Why PingOS?
+## What is PingOS?
 
-Most "web automation" tools work at runtime: they launch a browser, navigate to a page, click buttons, and scrape the result — every single time. AI web agents go further, burning tokens on every interaction to figure out what to click. This is slow, fragile, and expensive.
+PingOS turns any website into a programmable REST API. A POSIX-inspired gateway routes requests through a Chrome MV3 extension bridge to control real browser tabs — your already-open, already-authenticated sessions. No separate browser instance, no puppeted windows — just your Chrome, exposed as HTTP endpoints.
 
-PingOS takes a fundamentally different approach: **ahead-of-time compilation**.
+## Why?
 
-1. **Snapshot** — Capture a website's interactive surface once: buttons, inputs, dynamic regions, ARIA tree, state indicators
-2. **Analyze** — An LLM reads the snapshot and produces a `SiteDefinition`: tiered CSS selectors, action mappings, state machines, completion signals
-3. **Generate** — A code generator scaffolds a complete TypeScript PingApp with typed action handlers, tests, and health checks
-4. **Run** — The PingApp runs as a persistent daemon with a live browser session. No AI inference at runtime — just deterministic selector lookups and state machine transitions
+Most automation tools launch a fresh browser for every task. AI web agents burn tokens on every click. PingOS takes a different approach: **ahead-of-time compilation**. An LLM analyzes a website once, generating a typed PingApp with CSS selectors, state machines, and completion signals. After that, every request is deterministic — zero AI cost at runtime.
 
-The result: **zero AI tax at runtime**. The LLM does its work once during compilation. After that, every request is a fast, deterministic browser automation — no token costs, no hallucination risk, no latency from model inference.
+| | PingOS | Selenium / Playwright | AI Web Agents | Screen Scrapers |
+|---|---|---|---|---|
+| **Uses your real browser** | ✅ Any open tab | ❌ New session each time | ❌ New session | ❌ No browser |
+| **Works with auth/SSO/MFA** | ✅ Already logged in | ❌ Must re-auth | ❌ Must re-auth | ❌ No auth |
+| **Runtime AI cost** | ✅ None (compiled out) | ✅ None | ❌ Every request | ✅ None |
+| **Deterministic** | ✅ Selector-based | ⚠️ Script-dependent | ❌ LLM-dependent | ⚠️ Fragile |
+| **Latency** | Low | High (browser startup) | Very high | Medium |
+| **Self-heals broken selectors** | ✅ LLM-assisted | ❌ Manual fix | ✅ Re-infers | ❌ Breaks |
 
-### How PingOS compares
+---
 
-| Approach | Runtime AI? | Browser per request? | Deterministic? | Latency |
-|----------|-------------|---------------------|----------------|---------|
-| Selenium/Playwright scripts | No | Yes (new session) | Depends on script | High |
-| AI web agents (Browser Use, etc.) | **Yes, every request** | Yes | No | Very high |
-| Screen-scraping APIs | No | No | Fragile | Medium |
-| **PingOS** | **No (compiled out)** | **No (persistent session)** | **Yes** | **Low** |
+## Quick Start
+
+```bash
+git clone <repo-url> pingos && cd pingos
+npm install
+npm run build
+# Load packages/chrome-extension/dist in chrome://extensions (Developer Mode → Load Unpacked)
+npx tsx packages/std/src/main.ts
+```
+
+Verify:
+
+```bash
+curl http://localhost:3500/v1/health
+# {"status":"healthy","timestamp":"..."}
+```
+
+Share a browser tab via the extension popup, then:
+
+```bash
+curl -X POST http://localhost:3500/v1/dev/chrome-{tabId}/recon
+```
+
+See [docs/INSTALL.md](docs/INSTALL.md) for the full setup guide.
+
+---
+
+## Feature Matrix
+
+| Feature | Status | Description |
+|---|---|---|
+| Device operations (click, type, read, eval) | ✅ Stable | Control any shared browser tab via REST |
+| Extract engine | ✅ Stable | Pull structured data from live pages |
+| Act engine | ✅ Stable | Click, type, navigate, upload — stealth mode |
+| PingApps | ✅ Stable | Compiled website drivers (AliExpress, Amazon, Claude) |
+| Self-heal | 🔶 Beta | LLM-assisted selector repair with caching |
+| Recorder | 🔶 Beta | Record browser interactions as replayable workflows |
+| LLM routing | ✅ Stable | Capability-based routing across local and cloud models |
+| Ad blocking / page cleanup | ✅ Stable | Remove clutter before extraction |
+| Recon (snapshot + analysis) | ✅ Stable | Full-page interactive element discovery |
 
 ---
 
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph Clients
-        CLI["CLI / curl"]
-        SDK["SDK / Application"]
-        Agent["AI Agent"]
-    end
-
-    subgraph Gateway["PingOS Gateway :3500"]
-        Router["Request Router"]
-        Registry["ModelRegistry"]
-        Health["Health Monitor"]
-        Strategies["Routing Strategies<br/>best · fastest · cheapest · round-robin"]
-        ExtBridge["ExtensionBridge<br/>WebSocket /ext"]
-    end
-
-    subgraph Drivers["Driver Adapters"]
-        PA["PingAppAdapter"]
-        OAI["OpenAICompatAdapter<br/>Ollama · LM Studio · OpenRouter"]
-        ANT["AnthropicAdapter"]
-    end
-
-    subgraph PingApps["PingApps — Browser Shims"]
-        Gemini[":3456 Gemini<br/>6 tools · streaming · vision"]
-        AIS[":3457 AI Studio<br/>21 models · app builder"]
-        GPT[":3458 ChatGPT<br/>chat · search · image gen"]
-    end
-
-    subgraph Engine["PingApp Engine — @pingdev/core"]
-        FastifyS["Fastify HTTP Server"]
-        BullMQ["BullMQ Job Queue"]
-        WorkerP["Worker Process"]
-        CDPB["CDP Browser Session"]
-        SM["State Machine<br/>idle → typing → generating → done"]
-    end
-
-    subgraph APIs["Cloud / Local APIs"]
-        Ollama["Ollama :11434"]
-        OpenAI["OpenAI API"]
-        AnthropicAPI["Anthropic API"]
-        LMS["LM Studio :1234"]
-    end
-
-    subgraph Chrome["Authenticated Chrome (User)"]
-        CExt["Chrome MV3 Extension"]
-        CTab["Shared Tab<br/>chrome-{tabId}"]
-        CS["Content Script"]
-    end
-
-    CLI --> Router
-    SDK --> Router
-    Agent --> Router
-
-    Router --> Registry
-    Registry --> Strategies
-    Registry --> Health
-
-    Router --> ExtBridge
-
-    Router --> PA
-    Router --> OAI
-    Router --> ANT
-
-    PA --> Gemini
-    PA --> AIS
-    PA --> GPT
-
-    Gemini --> FastifyS --> BullMQ --> WorkerP --> CDPB --> SM
-
-    ExtBridge <--> |"WS /ext"| CExt
-    CExt --> |"sendMessage"| CS --> CTab
-
-    OAI --> Ollama
-    OAI --> OpenAI
-    OAI --> LMS
-    ANT --> AnthropicAPI
+graph LR
+    Client["curl / SDK / Agent"] -->|HTTP| Gateway["Gateway :3500"]
+    Gateway -->|WS /ext| Ext["Chrome Extension"]
+    Ext -->|sendMessage| CS["Content Script"]
+    CS --> Tab["Browser Tab"]
+    Gateway -->|HTTP| App["PingApps :3456+"]
+    Gateway -->|HTTP| LLM["Ollama / OpenAI / Anthropic"]
 ```
 
-### Chrome Extension Auth Bridge (authenticated tabs)
-
-PingOS can also control a **real logged-in Chrome tab** via the MV3 extension bridge:
-
-- The gateway exposes `ws://localhost:3500/ext` and maintains an ownership map of shared tabs.
-- Shared tabs become devices named `chrome-{tabId}`.
-- HTTP requests to `/v1/dev/chrome-{tabId}/{op}` are forwarded: gateway → WS `/ext` → extension → content script → DOM.
-
-This path is ideal for auth-heavy sites (SSO/MFA) and for recording real interactions to bootstrap PingApps.
-
----
-
-## Concepts
-
-### PingApps
-
-A PingApp is a browser-automated shim that turns a website into a REST API. Each PingApp:
-
-- Runs as a standalone Node.js process on its own port
-- Maintains a persistent Chrome browser session via CDP (Chrome DevTools Protocol)
-- Exposes standardized HTTP endpoints: `/v1/health`, `/v1/chat`, `/v1/jobs`
-- Uses a compiled `SiteDefinition` that maps CSS selectors to interactive elements
-- Manages concurrency through BullMQ job queues (typically single-concurrency for browser-backed apps)
-- Has a state machine that tracks UI state: `idle → typing → generating → done`
-
-PingApps are created through the **recon pipeline**: snapshot a website, analyze the snapshot with an LLM, generate the TypeScript project. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow.
-
-### Drivers
-
-A Driver is any backend that can handle a `DeviceRequest` and return a `DeviceResponse`. The gateway treats all drivers identically through a unified interface:
-
-| Type | Examples | How it works | Concurrency |
-|------|----------|--------------|-------------|
-| `pingapp` | Gemini, AI Studio, ChatGPT | HTTP → BullMQ → CDP browser automation | Single (1 browser tab) |
-| `api` | OpenAI, Anthropic, OpenRouter | Direct HTTP API call | High (parallel) |
-| `local` | Ollama, LM Studio | Local inference server (OpenAI-compatible) | Depends on hardware |
-| `extension` | `chrome-{tabId}` shared tabs | HTTP → WS `/ext` → content script DOM ops | Per shared tab |
-
-### Capabilities
-
-Every driver declares what it can do through a `DriverCapabilities` object:
-
-| Capability | Description | Example drivers |
-|------------|-------------|-----------------|
-| `llm` | Natural language prompt → text response | All |
-| `streaming` | Streaming partial responses via SSE | Gemini, Ollama, OpenAI |
-| `vision` | Image understanding (multimodal input) | Gemini, GPT-4o |
-| `toolCalling` | Function/tool calling support | Gemini, Claude, GPT |
-| `imageGen` | Image generation | Gemini, ChatGPT, DALL-E |
-| `search` | Web search and retrieval | Gemini, ChatGPT |
-| `deepResearch` | Multi-step autonomous research | Gemini, ChatGPT |
-| `thinking` | Reasoning chain / chain-of-thought | Gemini, Claude, DeepSeek |
-
-When you send a request with `"require": {"thinking": true, "vision": true}`, the gateway only considers drivers that have both capabilities.
-
-### Routing Strategies
-
-When multiple drivers match the required capabilities, the gateway applies a routing strategy:
-
-| Strategy | Algorithm | Best for |
-|----------|-----------|----------|
-| `best` (default) | Lowest priority number among healthy (online) drivers | Production — favors your preferred driver |
-| `fastest` | Lowest latency from recent health checks | Latency-sensitive applications |
-| `cheapest` | Lowest priority number (priority = cost rank) | Cost optimization |
-| `round-robin` | Rotates through all matching drivers | Load distribution across providers |
-
----
-
-## Current PingApps
-
-| PingApp | Port | Website | Tools | Tests | Status |
-|---------|------|---------|-------|-------|--------|
-| **Gemini** | 3456 | gemini.google.com | Chat, Deep Think, Deep Research, Image Gen, Canvas, Learning | 19/19 | Active |
-| **AI Studio** | 3457 | aistudio.google.com | 10 actions, 13 features, app builder, 21 models | — | Active |
-| **ChatGPT** | 3458 | chatgpt.com | Chat, Search, Image Gen, Deep Research | — | In Progress |
-
----
-
-## Getting Started from Scratch
-
-This guide takes you from zero to a running PingOS gateway in about 10 minutes.
-
-### Step 0: Prerequisites
-
-| Dependency | Version | Purpose | Install |
-|------------|---------|---------|---------|
-| **Node.js** | 20+ | Runtime | [nodejs.org](https://nodejs.org) or `nvm install 20` |
-| **npm** | 10+ | Package manager | Bundled with Node.js |
-| **Redis** | 7.0+ | Job queue backend (for PingApps) | `sudo apt install redis-server` / `brew install redis` |
-| **Chrome/Chromium** | Latest | Browser for PingApps | `sudo apt install chromium-browser` / already installed on macOS |
-| **TypeScript** | 5.9+ | Compiler (installed via npm) | Included in devDependencies |
-
-**Runtime dependencies (installed via `npm install`):**
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `fastify` | ^5.7.4 | HTTP server for gateway and PingApps |
-| `bullmq` | ^5.69.1 | Job queue for browser automation pipeline |
-| `ioredis` | ^5.6.1 | Redis client |
-| `playwright` | ^1.58.2 | Browser automation (used by `@pingdev/core`) |
-| `pino` | ^10.3.1 | Structured JSON logger |
-| `uuid` | ^13.0.0 | Job ID generation |
-
-**Dev dependencies:**
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `typescript` | ^5.9.3 | TypeScript compiler |
-| `vitest` | ^4.0.18 | Test framework |
-| `@types/node` | ^25.2.3 | Node.js type definitions |
-
-### Step 1: Clone and install
-
-```bash
-git clone <repo-url> pingos
-cd pingos
-npm install
-```
-
-### Step 2: Build all packages
-
-```bash
-npm run build
-```
-
-This compiles TypeScript across all workspace packages (`core`, `std`, `cli`, `recon`, `dashboard`).
-
-### Step 3: Start Redis
-
-PingApps use BullMQ which requires Redis:
-
-```bash
-# Check if Redis is already running
-redis-cli ping
-# Should respond: PONG
-
-# If not running:
-# Linux
-sudo systemctl start redis-server
-
-# macOS
-brew services start redis
-
-# Docker
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-```
-
-### Step 4: Start Chrome with remote debugging
-
-PingApps control Chrome via CDP (Chrome DevTools Protocol):
-
-```bash
-# Linux
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/pingos-chrome &
-
-# macOS
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-port=9222 --user-data-dir=/tmp/pingos-chrome &
-
-# Verify CDP is accessible
-curl -s http://127.0.0.1:9222/json/version | jq .title
-```
-
-### Step 5: Start a PingApp (e.g., Gemini)
-
-If you have a Gemini PingApp shim project:
-
-```bash
-cd ~/projects/gemini-ui-shim
-npm start
-# Gemini PingApp now listening on http://localhost:3456
-```
-
-Verify it's healthy:
-
-```bash
-curl -s http://localhost:3456/v1/health | jq .status
-# "healthy"
-```
-
-### Step 6: Start the PingOS gateway
-
-Create `start-gateway.ts` in the project root:
-
-```typescript
-import { createGateway, ModelRegistry, PingAppAdapter } from '@pingdev/std';
-
-const registry = new ModelRegistry('best');
-
-registry.register(new PingAppAdapter({
-  id: 'gemini',
-  name: 'Gemini PingApp',
-  endpoint: 'http://localhost:3456',
-  capabilities: {
-    llm: true, streaming: true, vision: true, toolCalling: true,
-    imageGen: true, search: true, deepResearch: true, thinking: true,
-  },
-  priority: 1,
-}));
-
-const app = await createGateway({ port: 3500, registry });
-console.log('PingOS gateway listening on http://localhost:3500');
-```
-
-```bash
-npx tsx start-gateway.ts
-```
-
-### Step 7: Verify everything works
-
-```bash
-# Health check
-curl -s http://localhost:3500/v1/health | jq .
-# {"status":"healthy","timestamp":"2026-02-15T..."}
-
-# Check registered drivers
-curl -s http://localhost:3500/v1/registry | jq '.drivers[].id'
-# "gemini"
-
-# Send a prompt
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Say hello"}' | jq .text
-# "Hello! How can I help you today?"
-```
-
-### Step 8 (Optional): Load the Chrome Extension Auth Bridge
-
-This enables controlling an *already-authenticated* Chrome tab via device IDs like `chrome-{tabId}`.
-
-#### Build + load the extension
-
-```bash
-cd packages/chrome-extension
-npm run build
-```
-
-Then:
-
-1. Open `chrome://extensions/`
-2. Enable **Developer mode**
-3. Click **Load unpacked**
-4. Select `packages/chrome-extension/dist/`
-
-#### Share a tab + test
-
-1. Open the extension popup
-2. Toggle **Share** on the tab you want
-3. Use the device ID shown in the popup (`chrome-{tabId}`)
-
-```bash
-# Example: read a DOM node from a shared tab
-curl -X POST http://localhost:3500/v1/dev/chrome-2114771645/read \
-  -d '{"selector":"h1"}'
-```
-
-You're up and running.
-
----
-
-## Authentication & API Keys
-
-### Cloud API providers
-
-Cloud API drivers authenticate via API keys passed at adapter construction time. The recommended pattern is environment variables:
-
-```bash
-# Add to your shell profile (~/.bashrc, ~/.zshrc) or .env file
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
-export OPENROUTER_API_KEY="sk-or-..."
-```
-
-Then reference them when registering drivers:
-
-```typescript
-import { OpenAICompatAdapter, AnthropicAdapter } from '@pingdev/std';
-
-// Anthropic
-registry.register(new AnthropicAdapter({
-  id: 'claude',
-  name: 'Claude Sonnet',
-  endpoint: 'https://api.anthropic.com',
-  apiKey: process.env.ANTHROPIC_API_KEY!,
-  model: 'claude-sonnet-4-5-20250929',
-  capabilities: { llm: true, streaming: true, vision: true, toolCalling: true,
-    imageGen: false, search: false, deepResearch: false, thinking: true },
-  priority: 5,
-}));
-
-// OpenAI (or any OpenAI-compatible API)
-registry.register(new OpenAICompatAdapter({
-  id: 'gpt4o',
-  name: 'GPT-4o',
-  endpoint: 'https://api.openai.com',
-  apiKey: process.env.OPENAI_API_KEY!,
-  model: 'gpt-4o',
-  capabilities: { llm: true, streaming: true, vision: true, toolCalling: true,
-    imageGen: false, search: false, deepResearch: false, thinking: false },
-  priority: 10,
-}));
-
-// Local Ollama (no API key needed)
-registry.register(new OpenAICompatAdapter({
-  id: 'ollama-llama3',
-  name: 'Ollama Llama 3',
-  endpoint: 'http://localhost:11434',
-  model: 'llama3:8b',
-  capabilities: { llm: true, streaming: true, vision: false, toolCalling: false,
-    imageGen: false, search: false, deepResearch: false, thinking: false },
-  priority: 20,
-}));
-```
-
-### PingApp drivers
-
-PingApp drivers don't use API keys — they connect to locally running PingApp processes via HTTP. Authentication to the underlying website (e.g., logging into Gemini) is handled by the browser session managed by the PingApp.
-
-### Config file
-
-Alternatively, configure drivers in `~/.pingos/config.json`:
-
-```jsonc
-{
-  "gatewayPort": 3500,
-  "defaultStrategy": "best",
-  "healthIntervalMs": 30000,
-  "drivers": [
-    {
-      "id": "gemini",
-      "type": "pingapp",
-      "endpoint": "http://localhost:3456",
-      "priority": 1,
-      "capabilities": { "llm": true, "streaming": true, "vision": true,
-        "toolCalling": true, "imageGen": true, "search": true,
-        "deepResearch": true, "thinking": true }
-    },
-    {
-      "id": "claude",
-      "type": "anthropic",
-      "endpoint": "https://api.anthropic.com",
-      "apiKeyEnv": "ANTHROPIC_API_KEY",
-      "model": "claude-sonnet-4-5-20250929",
-      "priority": 5
-    },
-    {
-      "id": "ollama-llama3",
-      "type": "openai_compat",
-      "endpoint": "http://localhost:11434",
-      "model": "llama3:8b",
-      "priority": 20
-    }
-  ]
-}
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Default | Used by | Description |
-|----------|----------|---------|---------|-------------|
-| `PINGDEV_CDP_URL` | No | `http://127.0.0.1:9222` | `@pingdev/core`, `@pingdev/cli`, `@pingdev/recon` | Chrome DevTools Protocol WebSocket URL for browser automation |
-| `PINGDEV_LLM_URL` | No | Auto-detected | `@pingdev/recon` | LLM endpoint for snapshot analysis (recon pipeline) |
-| `PINGDEV_LLM_MODEL` | No | Auto-detected | `@pingdev/recon` | Model name for snapshot analysis |
-| `ANTHROPIC_API_KEY` | For Anthropic driver | — | `@pingdev/std`, `@pingdev/recon` | Anthropic API key for Claude models |
-| `OPENAI_API_KEY` | For OpenAI driver | — | `@pingdev/std`, `@pingdev/recon` | OpenAI API key (also used by OpenRouter if compatible) |
-| `OPENROUTER_API_KEY` | For OpenRouter | — | `@pingdev/std` | OpenRouter API key |
-| `REDIS_URL` | No | `redis://127.0.0.1:6379` | `@pingdev/core` | Redis connection URL for BullMQ job queue |
+The gateway is the single entry point. It routes requests to:
+
+- **Extension bridge** — controls real Chrome tabs via WebSocket (`chrome-{tabId}` devices)
+- **PingApps** — compiled website drivers with persistent browser sessions
+- **LLM adapters** — local (Ollama, LM Studio) and cloud (OpenAI, Anthropic) models
 
 ---
 
 ## API Quick Reference
 
-All endpoints are served on port `3500` by default. See [docs/API.md](docs/API.md) for full schemas.
+All endpoints served on `http://localhost:3500`.
 
-### POST /v1/dev/llm/prompt
+### Core Gateway
 
-Send a prompt, get a response from the best available driver.
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/health` | GET | Gateway health check |
+| `/v1/registry` | GET | List all registered drivers |
+| `/v1/devices` | GET | List shared browser tabs |
+| `/v1/apps` | GET | List registered PingApps |
+| `/v1/dev/:device/status` | GET | Device connection status |
+| `/v1/dev/:device/:op` | POST | Generic device operation (click, type, read, eval, recon, clean, ...) |
+| `/v1/dev/:device/suggest` | POST | LLM-assisted suggestion for a device |
+| `/v1/dev/llm/prompt` | POST | Send prompt to best available driver |
+| `/v1/dev/llm/chat` | POST | Multi-turn chat with message history |
+
+### Recording
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/record/start` | POST | Start recording interactions on a device |
+| `/v1/record/stop` | POST | Stop recording |
+| `/v1/record/export` | POST | Export recording as workflow |
+| `/v1/record/status` | GET | Check recording status |
+
+### Self-Heal
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/heal/cache` | GET | View cached selector repairs |
+| `/v1/heal/stats` | GET | Self-heal success rates |
+
+### PingApp Routes
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/app/aliexpress/search` | POST | Search AliExpress products |
+| `/v1/app/aliexpress/product` | POST | Get product details |
+| `/v1/app/aliexpress/cart` | GET | View cart |
+| `/v1/app/aliexpress/cart/add` | POST | Add current product to cart |
+| `/v1/app/aliexpress/cart/remove` | POST | Remove item from cart |
+| `/v1/app/aliexpress/orders` | GET | List orders |
+| `/v1/app/aliexpress/wishlist` | GET | View wishlist |
+| `/v1/app/amazon/search` | POST | Search Amazon products |
+| `/v1/app/amazon/product` | POST | Get product by ASIN |
+| `/v1/app/amazon/cart` | GET | View cart |
+| `/v1/app/amazon/cart/add` | POST | Add to cart |
+| `/v1/app/amazon/orders` | GET | List orders |
+| `/v1/app/amazon/deals` | GET | View deals page |
+| `/v1/app/claude/chat` | POST | Send message to Claude |
+| `/v1/app/claude/chat/new` | POST | Start new conversation |
+| `/v1/app/claude/chat/read` | GET | Read last response |
+| `/v1/app/claude/conversations` | GET | List conversations |
+| `/v1/app/claude/model` | GET/POST | Get or set current model |
+| `/v1/app/claude/projects` | GET | List projects |
+| `/v1/app/claude/artifacts` | GET | List artifacts |
+| `/v1/app/claude/search` | GET | Search conversations |
+| `/v1/extension/reload` | POST | Reload the Chrome extension |
+
+See [docs/API.md](docs/API.md) for full schemas, request/response examples, and error codes.
+
+---
+
+## PingApp Showcase
+
+Search Amazon from the command line:
 
 ```bash
-curl -s http://localhost:3500/v1/dev/llm/prompt \
+curl -s -X POST http://localhost:3500/v1/app/amazon/search \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain quantum entanglement in one paragraph"}' | jq .
+  -d '{"query": "mechanical keyboard"}' | jq '.products[:2]'
 ```
 
 ```json
-{
-  "text": "Quantum entanglement is a phenomenon where two particles become linked...",
-  "driver": "gemini",
-  "durationMs": 12345
-}
-```
-
-### POST /v1/dev/llm/chat
-
-Multi-turn chat with full message history.
-
-```bash
-curl -s http://localhost:3500/v1/dev/llm/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Now explain it to a 5-year-old",
-    "messages": [
-      {"role": "user", "content": "Explain quantum entanglement"},
-      {"role": "assistant", "content": "Quantum entanglement is..."},
-      {"role": "user", "content": "Now explain it to a 5-year-old"}
-    ]
-  }' | jq .
-```
-
-### GET /v1/registry
-
-List all registered drivers with capabilities.
-
-```bash
-curl -s http://localhost:3500/v1/registry | jq '.drivers[] | {id, type, capabilities}'
-```
-
-### GET /v1/health
-
-Gateway health check.
-
-```bash
-curl -s http://localhost:3500/v1/health | jq .
-# {"status":"healthy","timestamp":"2026-02-15T12:00:00.000Z"}
-```
-
-### Capability-based routing
-
-```bash
-# Only route to drivers with thinking support
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Think step by step: what is 127 * 43?", "require": {"thinking": true}}' | jq .
-
-# Choose the fastest driver
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Quick answer: capital of France?", "strategy": "fastest"}' | jq .
-
-# Target a specific driver by ID
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Hello", "driver": "gemini"}' | jq .
-```
-
-### Error responses
-
-```bash
-# Request an impossible capability combination
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "test", "require": {"snapshotting": true}}' | jq .
-```
-
-```json
-{
-  "errno": "ENOENT",
-  "code": "ping.router.no_driver",
-  "message": "No driver available for test",
-  "retryable": false
-}
+[
+  {
+    "asin": "B09HKF1DQM",
+    "title": "Keychron K2 V2 Wireless Mechanical Keyboard",
+    "price": "AED 349.00",
+    "rating": "4.6 out of 5 stars",
+    "prime": true,
+    "url": "https://www.amazon.ae/dp/B09HKF1DQM"
+  },
+  {
+    "asin": "B0CLKV25Z1",
+    "title": "Royal Kludge RK84 Pro Wireless Mechanical Gaming Keyboard",
+    "price": "AED 189.00",
+    "rating": "4.4 out of 5 stars",
+    "prime": true,
+    "url": "https://www.amazon.ae/dp/B0CLKV25Z1"
+  }
+]
 ```
 
 ---
 
-## Troubleshooting
+## Featured in NVIDIA's Official Guide
 
-### Gateway won't start: "EADDRINUSE: address already in use :::3500"
+PingOS is featured in **NVIDIA's DGX Spark developer guide** as a reference architecture for local AI infrastructure. The DGX Spark's 128 GB unified memory enables running PingOS gateway + local LLMs (Ollama) + multiple browser sessions on a single machine — an always-on local AI stack with no cloud dependency.
 
-Port 3500 is already occupied. Find and kill the process:
+---
 
-```bash
-lsof -ti:3500 | xargs kill -9
-# Or use a different port:
-# createGateway({ port: 3501, registry })
-```
+## Battle Test Results
 
-### PingApp health check fails: "Connection refused" or "ECONNREFUSED"
+Tested across **9 live production websites** (YouTube, Hacker News, Amazon, Reddit, Gmail, Wikipedia, GitHub, Google, Claude) with compound extract, act, and click operations.
 
-The PingApp process is not running or is on a different port.
-
-```bash
-# Verify PingApp is running
-curl -s http://localhost:3456/v1/health | jq .
-
-# If not running, start it
-cd ~/projects/gemini-ui-shim && npm start
-```
-
-### PingApp returns `ETIMEDOUT` after 120 seconds
-
-The browser automation is hanging. Common causes:
-- Chrome is not running with `--remote-debugging-port=9222`
-- The website requires re-authentication (login session expired)
-- A modal/popup is blocking the page
-
-```bash
-# Verify Chrome CDP is reachable
-curl -s http://127.0.0.1:9222/json/version | jq .
-
-# Check PingApp health for details
-curl -s http://localhost:3456/v1/health | jq .
-```
-
-### Redis connection error: "ECONNREFUSED 127.0.0.1:6379"
-
-Redis is not running. PingApps require Redis for BullMQ job queues.
-
-```bash
-# Start Redis
-sudo systemctl start redis-server   # Linux
-brew services start redis            # macOS
-docker run -d -p 6379:6379 redis:7-alpine  # Docker
-
-# Verify
-redis-cli ping
-# PONG
-```
-
-### TypeScript compilation errors after `npm install`
-
-Try a clean build:
-
-```bash
-npm run clean
-npm run build
-```
-
-If errors persist in `tsconfig.tsbuildinfo` files:
-
-```bash
-rm -f packages/*/tsconfig.tsbuildinfo
-npm run build
-```
-
-### Tests fail with "fetch failed" or "ECONNREFUSED"
-
-Integration tests in `packages/std` require a live Gemini PingApp on port 3456. Make sure it's running before running tests:
-
-```bash
-# Verify
-curl -s http://localhost:3456/v1/health | jq .status
-# "healthy"
-
-# Then run tests
-cd packages/std && npm test
-```
-
-### "No driver available" (ENOENT) even though drivers are registered
-
-The driver's capabilities don't match the request's `require` field. Check what's registered:
-
-```bash
-curl -s http://localhost:3500/v1/registry | jq '.drivers[] | {id, capabilities}'
-```
-
-And compare with what you're requesting. The `require` field does exact boolean matching — if you require `{ "imageGen": true }`, only drivers with `imageGen: true` qualify.
+**~92% overall pass rate** across all battle test rounds.
 
 ---
 
@@ -682,22 +207,23 @@ And compare with what you're requesting. The `require` field does exact boolean 
 
 ```
 packages/
-  core/          @pingdev/core     Browser PingApp engine (CDP, BullMQ, state machine)
-  std/           @pingdev/std      POSIX layer — types, registry, gateway, drivers, routing
-  cli/           @pingdev/cli      CLI tools (snapshot, generate, recon)
-  recon/         @pingdev/recon    Snapshot engine + PingApp code generator
-  dashboard/     @pingdev/dash     React 19 monitoring dashboard
+  core/           @pingdev/core     PingApp engine (CDP, BullMQ, state machine)
+  std/            @pingdev/std      Gateway, drivers, registry, routing
+  cli/            pingdev           CLI tools (snapshot, generate)
+  recon/          @pingdev/recon    Snapshot engine + PingApp code generator
+  chrome-extension                  Chrome MV3 extension (auth bridge, recorder, ad block)
+  dashboard/      @pingdev/dash     React 19 monitoring dashboard
+  python-sdk/                       Python SDK for PingOS
 ```
 
-### Key commands
+### Key Commands
 
 | Command | Description |
-|---------|-------------|
+|---|---|
 | `npm run build` | Build all packages |
 | `npm run dev` | Watch mode for all packages |
 | `npm test` | Run all tests (vitest) |
-| `npm run test:watch` | Watch mode for tests |
-| `npm run lint` | TypeScript type checking (`tsc --noEmit`) |
+| `npm run lint` | TypeScript type check (`tsc --noEmit`) |
 | `npm run clean` | Remove all `dist/` directories |
 
 ---
@@ -705,14 +231,13 @@ packages/
 ## Documentation
 
 | Document | Description |
-|----------|-------------|
-| [Architecture](docs/ARCHITECTURE.md) | System design, data flows, capability routing, browser lifecycle |
-| [API Reference](docs/API.md) | Full HTTP API with schemas, examples, and error codes |
-| [Drivers](docs/DRIVERS.md) | Driver catalog with capabilities, config, and limitations |
-| [Chrome Extension Bridge](packages/chrome-extension/README.md) | Authenticated tab devices (`chrome-{tabId}`), WS `/ext` protocol, recorder |
-| [Contributing](docs/CONTRIBUTING.md) | How to add drivers and PingApps, code style, PR process |
-| [Phase 1 Requirements](requirements/PHASE1.md) | Architecture decisions, success criteria, build order |
-| [Changelog](CHANGELOG.md) | Version history |
+|---|---|
+| [Installation Guide](docs/INSTALL.md) | From zero to first API call |
+| [Architecture](docs/ARCHITECTURE.md) | System design, data flows, extension bridge protocol |
+| [API Reference](docs/API.md) | Full HTTP API with schemas and examples |
+| [Extract Engine](docs/EXTRACT-ENGINE.md) | Structured data extraction from live pages |
+| [Act Engine](docs/ACT-ENGINE.md) | Click, type, navigate — stealth interaction |
+| [PingApps Guide](docs/PINGAPPS.md) | Building and running compiled website drivers |
 
 ---
 
