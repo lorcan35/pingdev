@@ -916,6 +916,148 @@ function extractRedditPosts(description: string): NLExtractResult {
   return { items: items.slice(0, 50), method: 'reddit-shreddit-posts' };
 }
 
+// ---------------------------------------------------------------------------
+// Compound query extraction: when a query asks for multiple field types
+// (e.g. "list stories with titles, points, and authors"), extract all fields
+// per repeated container instead of dispatching to a single-field extractor.
+// ---------------------------------------------------------------------------
+
+function detectCompoundFields(lower: string): string[] {
+  const fieldPatterns: [string, RegExp][] = [
+    ['title', /\b(titles?|headlines?|headings?|names?|subjects?)\b/],
+    ['price', /\b(prices?|costs?|amounts?|fees?)\b/],
+    ['score', /\b(scores?|votes?|upvotes?|downvotes?|ratings?|points?|karma)\b/],
+    ['author', /\b(authors?|creators?|posters?|usernames?|senders?|channels?)\b/],
+    ['date', /\b(dates?|timestamps?|posted|published)\b/],
+    ['views', /\b(views?|view\s*counts?)\b/],
+    ['link', /\b(links?|urls?)\b/],
+    ['description', /\b(descriptions?|summar(?:y|ies)|excerpts?|snippets?)\b/],
+  ];
+
+  const matched: string[] = [];
+  for (const [name, pattern] of fieldPatterns) {
+    if (pattern.test(lower)) matched.push(name);
+  }
+  return matched;
+}
+
+function extractFieldFromContainer(container: Element, field: string): string {
+  // For HN table layout: <tr class="athing"> has the title, and the NEXT sibling
+  // <tr> has score, author, date in a <td class="subtext">
+  const metaRow = container.tagName === 'TR' ? container.nextElementSibling : null;
+  const searchIn = metaRow ? [container, metaRow] : [container];
+
+  switch (field) {
+    case 'title': {
+      for (const el of searchIn) {
+        const heading = el.querySelector('h1, h2, h3, h4, .titleline > a, .storylink, a.storylink');
+        if (heading) return heading.textContent?.trim() || '';
+      }
+      const link = container.querySelector('a[href]');
+      if (link) return link.textContent?.trim() || '';
+      return '';
+    }
+    case 'price': {
+      const priceRegex = /(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP|AED|SAR|INR)\s*[\d,]+(?:\.\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:[\$\u00A3\u20AC\u00A5]|USD|EUR|GBP|AED|SAR|INR)/;
+      for (const el of searchIn) {
+        const priceEl = el.querySelector('[class*="price"], [class*="Price"], [data-price], [itemprop="price"]');
+        if (priceEl) return priceEl.textContent?.trim() || '';
+        const text = el.textContent || '';
+        const match = text.match(priceRegex);
+        if (match) return match[0];
+      }
+      return '';
+    }
+    case 'score': {
+      for (const el of searchIn) {
+        const scoreEl = el.querySelector('.score, [class*="score"], [class*="vote"], [class*="point"]');
+        if (scoreEl) return scoreEl.textContent?.trim() || '';
+      }
+      for (const el of searchIn) {
+        const text = el.textContent || '';
+        const match = text.match(/\b(\d+)\s*(points?|votes?|upvotes?|score)/i);
+        if (match) return match[0];
+      }
+      return '';
+    }
+    case 'author': {
+      for (const el of searchIn) {
+        const authorEl = el.querySelector(
+          '[class*="author"], [class*="user"], .hnuser, a[href*="user"], [rel="author"], ' +
+          '#channel-name, ytd-channel-name, a[href*="/@"]'
+        );
+        if (authorEl) return authorEl.textContent?.trim() || '';
+      }
+      return '';
+    }
+    case 'date': {
+      for (const el of searchIn) {
+        const dateEl = el.querySelector('time, [datetime], [class*="date"], [class*="time"], .age, [class*="ago"]');
+        if (dateEl) return dateEl.getAttribute('title') || dateEl.textContent?.trim() || '';
+      }
+      return '';
+    }
+    case 'views': {
+      for (const el of searchIn) {
+        const viewEl = el.querySelector('[class*="view"], [aria-label*="view"], #metadata-line');
+        if (viewEl) {
+          const label = viewEl.getAttribute('aria-label');
+          if (label && /\d/.test(label) && /view/i.test(label)) return label;
+          const text = viewEl.textContent?.trim();
+          if (text && /\d/.test(text)) return text;
+        }
+      }
+      for (const el of searchIn) {
+        const text = el.textContent || '';
+        const match = text.match(/[\d,.]+[KMB]?\s*views?/i);
+        if (match) return match[0];
+      }
+      return '';
+    }
+    case 'link': {
+      const link = container.querySelector('a[href]') as HTMLAnchorElement;
+      return link ? link.href : '';
+    }
+    case 'description': {
+      for (const el of searchIn) {
+        const descEl = el.querySelector('p, [class*="description"], [class*="summary"], [class*="snippet"], [class*="preview"]');
+        if (descEl) return descEl.textContent?.trim().slice(0, 200) || '';
+      }
+      return '';
+    }
+    default:
+      return '';
+  }
+}
+
+function extractCompound(description: string, fields: string[]): NLExtractResult {
+  const containers = findRepeatedContainers();
+  if (containers.length === 0) {
+    return { items: [], method: 'compound-no-containers' };
+  }
+
+  // For HN table layout, filter to only the main item rows (athing)
+  // since metadata rows are accessed via nextElementSibling
+  const isTableLayout = containers[0]?.tagName === 'TR';
+  const filteredContainers = isTableLayout
+    ? containers.filter(c => c.classList.contains('athing') || c.querySelector('.titleline, .storylink, a[href]'))
+    : containers;
+
+  const items: string[] = [];
+  for (const container of filteredContainers) {
+    const parts: string[] = [];
+    for (const field of fields) {
+      const value = extractFieldFromContainer(container, field);
+      if (value) parts.push(value);
+    }
+    if (parts.length > 0) {
+      items.push(parts.join(' | '));
+    }
+  }
+
+  return { items: items.slice(0, 50), method: `compound-${fields.join('+')}` };
+}
+
 function extractByNaturalLanguage(description: string): NLExtractResult {
   const lower = description.toLowerCase();
 
@@ -939,6 +1081,15 @@ function extractByNaturalLanguage(description: string): NLExtractResult {
     const redditResult = extractRedditPosts(description);
     if (redditResult.items.length > 0) return redditResult;
     // Fall through to generic extraction if Reddit-specific fails
+  }
+
+  // Compound query detection: if 2+ field types are mentioned, extract all fields
+  // per repeated container instead of dispatching to a single-field extractor
+  const compoundFields = detectCompoundFields(lower);
+  if (compoundFields.length >= 2) {
+    const compoundResult = extractCompound(description, compoundFields);
+    if (compoundResult.items.length > 0) return compoundResult;
+    // Fall through to single-field extraction if compound fails
   }
 
   // Title/headline patterns (handle plurals: titles, headlines, headings)
@@ -1388,7 +1539,8 @@ function findRepeatedContainers(): Element[] {
   const searchRoot = mainContent || document;
 
   // Look for common list/feed patterns within the content area
-  const listParents = searchRoot.querySelectorAll('ul, ol, [role="list"], [role="feed"], section, main, [role="main"]');
+  // Include table/tbody for sites like Hacker News that use table-based layouts
+  const listParents = searchRoot.querySelectorAll('ul, ol, table, tbody, [role="list"], [role="feed"], section, main, [role="main"]');
   // Also include the search root itself if it matches
   const roots = mainContent
     ? [mainContent, ...Array.from(listParents)]
@@ -1851,8 +2003,8 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
     textToType = raw;
   }
 
-  // If quoted text found but typeMatch missed it, use quoted text
-  if (!textToType && quotedMatch) {
+  // Prefer quoted text if available — typeMatch regex can corrupt text with trailing punctuation
+  if (quotedMatch) {
     textToType = quotedMatch[1];
   }
 
@@ -1956,12 +2108,17 @@ function parseSingleActInstruction(instruction: string): ActStep[] {
         result: ['h3 a', '.result a', '[data-testid="result"] a', 'h2 a'],
         item: ['li a', '.item a', 'article a'],
         email: ['tr[role="row"] td a', 'tr td .y6 span', 'tr[jscontroller]', '[role="row"]'],
-        story: ['a.storylink', 'a[href*="story"]', 'article a h2', 'h3 a'],
+        story: ['.titleline > a', 'a.storylink', '.athing .title a', 'a[href*="story"]', 'article a h2', 'h3 a'],
         repo: ['a[href*="github.com/"]', 'h3 a', '[data-hovercard-type="repository"] a'],
         button: ['button', '[role="button"]'],
       };
-      // Try noun-specific selectors first
-      const specificSels = nounSelectors[nounLower] || [];
+      // Try noun-specific selectors first (check if any key appears in the noun description)
+      let specificSels: string[] = nounSelectors[nounLower] || [];
+      if (specificSels.length === 0) {
+        for (const [key, sels] of Object.entries(nounSelectors)) {
+          if (nounLower.includes(key)) { specificSels = sels; break; }
+        }
+      }
       for (const sel of specificSels) {
         try {
           const els = searchRoot.querySelectorAll(sel);
