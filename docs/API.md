@@ -1,439 +1,74 @@
 # PingOS API Reference
 
-Base URL: `http://localhost:3500`
-
-The PingOS gateway exposes a POSIX-inspired HTTP API for routing requests to LLM drivers. All request and response bodies are JSON. All endpoints use the `/v1/` version prefix.
+> **Base URL:** `http://localhost:3500`
+> All request/response bodies are JSON. All endpoints use the `/v1/` version prefix.
+> Source: `packages/std/src/gateway.ts`, `packages/std/src/app-routes.ts`
 
 ---
 
 ## Table of Contents
 
-- [POST /v1/dev/llm/prompt](#post-v1devllmprompt)
-- [POST /v1/dev/llm/chat](#post-v1devllmchat)
-- [POST /v1/dev/:device/:op](#post-v1devdeviceop)
-- [Chrome Extension Devices (`chrome-{tabId}`)](#chrome-extension-devices-chrome-tabid)
-  - [op: `read`](#op-read)
-  - [op: `click`](#op-click)
-  - [op: `type`](#op-type)
-  - [op: `extract`](#op-extract)
-  - [op: `eval`](#op-eval)
-- [GET /v1/registry](#get-v1registry)
-- [GET /v1/health](#get-v1health)
-- [WebSocket `/ext` (Chrome Extension Bridge)](#websocket-ext-chrome-extension-bridge)
-- [Common Request Fields](#common-request-fields)
-- [Response Schema](#response-schema)
-- [Error Reference](#error-reference)
-- [Type Definitions](#type-definitions)
+1. [System](#1-system)
+   - [GET /v1/health](#get-v1health)
+   - [GET /v1/registry](#get-v1registry)
+   - [GET /v1/devices](#get-v1devices)
+   - [GET /v1/dev/:device/status](#get-v1devdevicestatus)
+   - [POST /v1/extension/reload](#post-v1extensionreload)
+   - [GET /v1/apps](#get-v1apps)
+2. [Device Operations](#2-device-operations)
+   - [POST /v1/dev/:device/:op](#post-v1devdeviceop)
+   - [recon](#op-recon) | [observe](#op-observe) | [read](#op-read) | [extract](#op-extract) | [act](#op-act) | [click](#op-click) | [type](#op-type) | [scroll](#op-scroll) | [navigate](#op-navigate) | [press](#op-press) | [dblclick](#op-dblclick) | [select](#op-select) | [eval](#op-eval) | [waitFor](#op-waitfor) | [getUrl](#op-geturl) | [clean](#op-clean) | [screenshot](#op-screenshot) | [record_api_action](#op-record_api_action)
+3. [LLM Routing](#3-llm-routing)
+   - [POST /v1/dev/llm/prompt](#post-v1devllmprompt)
+   - [POST /v1/dev/llm/chat](#post-v1devllmchat)
+   - [POST /v1/dev/:device/suggest](#post-v1devdevicesuggest)
+4. [Recorder](#4-recorder)
+   - [POST /v1/record/start](#post-v1recordstart)
+   - [POST /v1/record/stop](#post-v1recordstop)
+   - [POST /v1/record/export](#post-v1recordexport)
+   - [GET /v1/record/status](#get-v1recordstatus)
+5. [Self-Heal](#5-self-heal)
+   - [GET /v1/heal/cache](#get-v1healcache)
+   - [GET /v1/heal/stats](#get-v1healstats)
+6. [PingApps: Amazon](#6-pingapps-amazon)
+7. [PingApps: AliExpress](#7-pingapps-aliexpress)
+8. [PingApps: Claude](#8-pingapps-claude)
+9. [WebSocket Protocol](#9-websocket-protocol)
+10. [Error Reference](#10-error-reference)
 
 ---
 
-## POST /v1/dev/llm/prompt
+## 1. System
 
-Send a single prompt to the best available LLM driver. The gateway resolves the target driver based on required capabilities, routing strategy, and driver health.
+### GET /v1/health
 
-### Request Schema
-
-```typescript
-interface PromptRequest {
-  // Required
-  prompt: string;                          // The prompt text to send
-
-  // Optional — routing
-  driver?: string;                         // Target a specific driver by ID (bypasses routing)
-  require?: Partial<DriverCapabilities>;   // Required capability flags for filtering drivers
-  strategy?: 'best' | 'fastest' | 'cheapest' | 'round-robin';  // Routing strategy (default: 'best')
-
-  // Optional — execution
-  timeout_ms?: number;                     // Request timeout in milliseconds (default: 120000)
-  conversation_id?: string;                // Continue an existing conversation (PingApp drivers)
-  tool?: string;                           // Activate a PingApp tool (e.g., 'deep-research', 'image-gen')
-}
-```
-
-### Example: Basic prompt
+Gateway health check. Returns 200 if the gateway process is running.
 
 ```bash
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain quantum entanglement in one paragraph"}' | jq .
+curl -s http://localhost:3500/v1/health | jq .
 ```
 
 **Response (200):**
 
 ```json
 {
-  "text": "Quantum entanglement is a phenomenon in quantum mechanics where two or more particles become interconnected in such a way that the quantum state of each particle cannot be described independently of the others, even when separated by large distances. When a measurement is performed on one entangled particle, it instantaneously affects the state of its partner particle, regardless of the distance between them — a phenomenon Einstein famously called \"spooky action at a distance.\"",
-  "driver": "gemini",
-  "durationMs": 15432
+  "status": "healthy",
+  "timestamp": "2026-02-18T12:00:00.000Z"
 }
 ```
 
-### Example: Capability-based routing
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `"healthy"` | Always `"healthy"` if the process is up |
+| `timestamp` | `string` | ISO 8601 timestamp |
 
-```bash
-# Only route to drivers with thinking/reasoning support
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Think step by step: what is the derivative of x^3 * sin(x)?",
-    "require": {"thinking": true}
-  }' | jq .
-```
-
-**Response (200):**
-
-```json
-{
-  "text": "Using the product rule: d/dx[x³·sin(x)] = 3x²·sin(x) + x³·cos(x)",
-  "driver": "gemini",
-  "thinking": "I need to apply the product rule. Let u = x³ and v = sin(x)...",
-  "durationMs": 8200
-}
-```
-
-### Example: Target a specific driver
-
-```bash
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Hello", "driver": "gemini"}' | jq .
-```
-
-### Example: Choose routing strategy
-
-```bash
-# Fastest available driver
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Capital of France?", "strategy": "fastest"}' | jq .
-```
-
-### Example: Use a PingApp tool
-
-```bash
-# Activate Gemini's Deep Research tool
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Research the latest advances in quantum computing in 2026",
-    "driver": "gemini",
-    "tool": "deep-research",
-    "timeout_ms": 300000
-  }' | jq .
-```
-
-### Error Cases
-
-| Scenario | HTTP Status | errno | code |
-|----------|-------------|-------|------|
-| Missing `prompt` field | 400 | `ENOSYS` | `ping.gateway.bad_request` |
-| No driver matches `require` capabilities | 404 | `ENOENT` | `ping.router.no_driver` |
-| Specified `driver` ID not found | 404 | `ENOENT` | `ping.router.no_driver` |
-| PingApp busy (processing another request) | 409 | `EBUSY` | `ping.driver.concurrency_exceeded` |
-| Request timed out | 503 | `ETIMEDOUT` | `ping.driver.timeout` |
-| PingApp unreachable | 502 | `EIO` | `ping.driver.io_error` |
+> Source: `gateway.ts:135`
 
 ---
 
-## POST /v1/dev/llm/chat
+### GET /v1/registry
 
-Multi-turn chat with full message history. Accepts all the same fields as `/prompt` plus a `messages` array. This endpoint is designed for conversational AI workflows where context from previous turns must be preserved.
-
-### Request Schema
-
-```typescript
-interface ChatRequest {
-  // At least one of prompt or messages is required
-  prompt?: string;                         // Current turn prompt (can be empty if messages provided)
-  messages?: Message[];                    // Full conversation history
-
-  // Same optional fields as /prompt
-  driver?: string;
-  require?: Partial<DriverCapabilities>;
-  strategy?: 'best' | 'fastest' | 'cheapest' | 'round-robin';
-  timeout_ms?: number;
-  conversation_id?: string;
-  tool?: string;
-}
-
-interface Message {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | ContentPart[];
-}
-
-type ContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image_url'; url: string; detail?: 'low' | 'high' }
-  | { type: 'tool_call'; id: string; name: string; arguments: unknown }
-  | { type: 'tool_result'; toolCallId: string; content: unknown };
-```
-
-### Example: Multi-turn conversation
-
-```bash
-curl -s http://localhost:3500/v1/dev/llm/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Now explain it to a 5-year-old",
-    "messages": [
-      {"role": "system", "content": "You are a helpful physics tutor."},
-      {"role": "user", "content": "What is gravity?"},
-      {"role": "assistant", "content": "Gravity is the force that pulls objects toward each other..."},
-      {"role": "user", "content": "Now explain it to a 5-year-old"}
-    ]
-  }' | jq .
-```
-
-**Response (200):**
-
-```json
-{
-  "text": "You know how when you jump, you always come back down? That's gravity! It's like the Earth is giving you a big hug and pulling you close.",
-  "driver": "gemini",
-  "durationMs": 9800
-}
-```
-
-### Example: Multi-modal message with image
-
-```bash
-curl -s http://localhost:3500/v1/dev/llm/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {"type": "text", "text": "What do you see in this image?"},
-          {"type": "image_url", "url": "https://example.com/photo.jpg", "detail": "high"}
-        ]
-      }
-    ],
-    "require": {"vision": true}
-  }' | jq .
-```
-
-### Behavior Notes
-
-- If both `prompt` and `messages` are provided, the driver receives both. For PingApp drivers, `prompt` is sent as the primary input. For API drivers, messages take precedence.
-- The `conversation_id` field enables multi-turn conversations on PingApp drivers (which maintain browser tab state). API drivers are stateless and use the `messages` array for context.
-- If neither `prompt` nor `messages` is provided, the request returns 400.
-
-### Error Cases
-
-Same as [/v1/dev/llm/prompt](#error-cases), plus:
-
-| Scenario | HTTP Status | errno | code |
-|----------|-------------|-------|------|
-| Neither `prompt` nor `messages` provided | 400 | `ENOSYS` | `ping.gateway.bad_request` |
-
----
-
-## POST /v1/dev/:device/:op
-
-Generic device operation endpoint.
-
-This route is the gateway's unified "device file" interface:
-
-- If the device is **owned by the Chrome extension bridge**, the request is forwarded over WebSocket `/ext` to the owning extension client.
-- Otherwise, the gateway falls back to built-in device handlers (currently only `llm/prompt` + `llm/chat`).
-
-### Request
-
-```http
-POST /v1/dev/:device/:op
-Content-Type: application/json
-
-{ ... }
-```
-
-### Response (Extension-owned device)
-
-```json
-{ "ok": true, "result": "..." }
-```
-
-### Response (Unknown device)
-
-```json
-{
-  "errno": "ENODEV",
-  "code": "ping.gateway.device_not_found",
-  "message": "Device <device> not found",
-  "retryable": false
-}
-```
-
----
-
-## Chrome Extension Devices (`chrome-{tabId}`)
-
-When the PingOS Chrome extension is connected and a tab is **shared** in the extension popup, that tab becomes an addressable device:
-
-- Device ID format: `chrome-{tabId}` (example: `chrome-2114771645`)
-- Execution path:
-  - HTTP `POST /v1/dev/chrome-{tabId}/{op}` → gateway → WS `/ext` → extension background → content script → DOM
-
-If the tab is not shared (or the extension is not connected), the gateway returns `ENODEV`.
-
-Operational notes:
-
-- The gateway correlates each forwarded command with a `requestId` over `/ext` and applies a timeout (currently ~20 seconds). Timeouts return `ETIMEDOUT`.
-- If the extension reports an execution error, the gateway returns `EIO`.
-
-All operations below use the same base form:
-
-```bash
-curl -sS -X POST http://localhost:3500/v1/dev/chrome-<tabId>/<op> \
-  -H 'Content-Type: application/json' \
-  -d '{ ... }'
-```
-
-### op: `read`
-
-Read `textContent` from the first element matching `selector`.
-
-**Request body**:
-
-```json
-{ "selector": "h1" }
-```
-
-**Example** (E2E):
-
-```bash
-curl -X POST http://localhost:3500/v1/dev/chrome-2114771645/read \
-  -d '{"selector":"h1"}'
-```
-
-**Response**:
-
-```json
-{ "ok": true, "result": "Example Domain" }
-```
-
-### op: `click`
-
-Click the first element matching `selector`.
-
-**Request body**:
-
-```json
-{ "selector": "button[type=submit]" }
-```
-
-**Example**:
-
-```bash
-curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/click \
-  -H 'Content-Type: application/json' \
-  -d '{"selector":"#submit"}' | jq .
-```
-
-### op: `type`
-
-Type text into an input/textarea matching `selector`.
-
-**Request body**:
-
-```json
-{ "selector": "input[name=\"q\"]", "text": "pingos" }
-```
-
-**Example**:
-
-```bash
-curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/type \
-  -H 'Content-Type: application/json' \
-  -d '{"selector":"input[name=\"q\"]","text":"pingos"}' | jq .
-```
-
-### op: `extract`
-
-Extract structured text fields using a selector map (`schema`).
-
-**Request body**:
-
-```json
-{ "schema": { "title": "h1", "price": ".price" } }
-```
-
-**Example**:
-
-```bash
-curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/extract \
-  -H 'Content-Type: application/json' \
-  -d '{"schema":{"title":"h1","price":".price"}}' | jq .
-```
-
-### op: `eval`
-
-Evaluate JavaScript in the page context.
-
-**Request body**:
-
-```json
-{ "code": "return document.title" }
-```
-
-**Example**:
-
-```bash
-curl -sS -X POST http://localhost:3500/v1/dev/chrome-123/eval \
-  -H 'Content-Type: application/json' \
-  -d '{"code":"return document.title"}' | jq .
-```
-
----
-
-## GET /v1/registry
-
-List all registered drivers with their capabilities, backend type, endpoint, and priority.
-
-### Response Schema
-
-```typescript
-interface RegistryResponse {
-  drivers: DriverRegistration[];
-}
-
-interface DriverRegistration {
-  id: string;                          // Unique driver identifier
-  name: string;                        // Human-readable name
-  type: 'pingapp' | 'api' | 'local';  // Backend type
-  capabilities: DriverCapabilities;    // What this driver can do
-  endpoint: string;                    // Where this driver lives
-  priority: number;                    // Lower = preferred (used by routing)
-  tools?: string[];                    // Available tools (PingApps)
-  modes?: string[];                    // Available modes (PingApps)
-  model?: ModelInfo;                   // Model info (API drivers)
-}
-
-interface DriverCapabilities {
-  llm: boolean;
-  streaming: boolean;
-  vision: boolean;
-  toolCalling: boolean;
-  imageGen: boolean;
-  search: boolean;
-  deepResearch: boolean;
-  thinking: boolean;
-  snapshotting?: boolean;
-  sessionAffinity?: boolean;
-  maxContextTokens?: number;
-  concurrency?: number;
-}
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  provider?: string;
-  contextWindow?: number;
-  maxOutputTokens?: number;
-}
-```
-
-### Example
+List all registered LLM drivers with capabilities, backend type, endpoint, and priority.
 
 ```bash
 curl -s http://localhost:3500/v1/registry | jq .
@@ -460,132 +95,2226 @@ curl -s http://localhost:3500/v1/registry | jq .
       },
       "endpoint": "http://localhost:3456",
       "priority": 1
-    },
-    {
-      "id": "ollama-llama3",
-      "name": "Ollama Llama 3",
-      "type": "api",
-      "capabilities": {
-        "llm": true,
-        "streaming": true,
-        "vision": false,
-        "toolCalling": false,
-        "imageGen": false,
-        "search": false,
-        "deepResearch": false,
-        "thinking": false
-      },
-      "endpoint": "http://localhost:11434",
-      "priority": 20,
-      "model": {
-        "id": "llama3:8b",
-        "name": "llama3:8b"
-      }
     }
   ]
 }
 ```
 
-### Filtering tips
-
-```bash
-# List just driver IDs and types
-curl -s http://localhost:3500/v1/registry | jq '.drivers[] | {id, type}'
-
-# Find drivers with a specific capability
-curl -s http://localhost:3500/v1/registry | jq '.drivers[] | select(.capabilities.thinking == true) | .id'
-
-# Show only PingApp drivers
-curl -s http://localhost:3500/v1/registry | jq '.drivers[] | select(.type == "pingapp")'
-```
-
----
-
-## GET /v1/health
-
-Gateway health check. Returns the operational status of the gateway server itself (not individual drivers).
-
-### Response Schema
+**TypeScript interfaces:**
 
 ```typescript
-interface HealthResponse {
-  status: 'healthy';
-  timestamp: string;    // ISO 8601 timestamp
+interface DriverRegistration {
+  id: string;
+  name: string;
+  type: 'pingapp' | 'api' | 'local';
+  capabilities: DriverCapabilities;
+  endpoint: string;
+  priority: number;         // lower = preferred
+  tools?: string[];
+  modes?: string[];
+  model?: ModelInfo;
+}
+
+interface DriverCapabilities {
+  llm: boolean;
+  streaming: boolean;
+  vision: boolean;
+  toolCalling: boolean;
+  imageGen: boolean;
+  search: boolean;
+  deepResearch: boolean;
+  thinking: boolean;
+  snapshotting?: boolean;
+  sessionAffinity?: boolean;
+  maxContextTokens?: number;
+  concurrency?: number;
 }
 ```
 
-### Example
+**Filtering examples:**
 
 ```bash
-curl -s http://localhost:3500/v1/health | jq .
+# List driver IDs and types
+curl -s http://localhost:3500/v1/registry | jq '.drivers[] | {id, type}'
+
+# Find drivers with thinking capability
+curl -s http://localhost:3500/v1/registry | jq '.drivers[] | select(.capabilities.thinking) | .id'
+```
+
+> Source: `gateway.ts:140`, `types.ts:50-60`
+
+---
+
+### GET /v1/devices
+
+List all devices connected via the Chrome extension bridge. Each shared browser tab becomes a device with ID `chrome-{tabId}`.
+
+```bash
+curl -s http://localhost:3500/v1/devices | jq .
 ```
 
 **Response (200):**
 
 ```json
 {
-  "status": "healthy",
-  "timestamp": "2026-02-15T12:00:00.000Z"
+  "extension": {
+    "clients": [
+      {
+        "clientId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "tabs": [
+          {
+            "deviceId": "chrome-2114771645",
+            "tabId": 2114771645,
+            "url": "https://www.amazon.ae/",
+            "title": "Amazon.ae"
+          },
+          {
+            "deviceId": "chrome-2114771700",
+            "tabId": 2114771700,
+            "url": "https://claude.ai/new",
+            "title": "Claude"
+          }
+        ]
+      }
+    ],
+    "devices": [
+      {
+        "deviceId": "chrome-2114771645",
+        "tabId": 2114771645,
+        "url": "https://www.amazon.ae/",
+        "title": "Amazon.ae",
+        "clientId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      }
+    ]
+  }
 }
 ```
 
-This endpoint always returns 200 if the gateway process is running. For individual driver health, check the driver's own health endpoint (e.g., `curl http://localhost:3456/v1/health` for the Gemini PingApp).
+| Field | Type | Description |
+|-------|------|-------------|
+| `extension.clients` | `array` | Connected extension instances, each with its tabs |
+| `extension.devices` | `array` | Flattened list of all shared tabs across all clients |
+
+> Source: `gateway.ts:179`
 
 ---
 
-## WebSocket `/ext` (Chrome Extension Bridge)
+### GET /v1/dev/:device/status
 
-The gateway exposes a WebSocket endpoint at:
+Check the connection status of a specific device.
 
-- `ws://localhost:3500/ext`
+```bash
+curl -s http://localhost:3500/v1/dev/chrome-2114771645/status | jq .
+```
 
-This is used by the PingOS Chrome extension (MV3) to:
+**Response (200):**
 
-1. Announce which tabs are shared as devices (`chrome-{tabId}`)
-2. Receive device commands from the gateway
-3. Send command results back to the gateway
+```json
+{
+  "ok": true,
+  "device": "chrome-2114771645",
+  "status": {
+    "owned": true,
+    "clientId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  }
+}
+```
 
-### Messages (Extension → Gateway)
+**Error (404) — device not found:**
 
-**hello** (sent immediately on connect):
+```json
+{
+  "errno": "ENODEV",
+  "code": "ping.gateway.device_not_found",
+  "message": "Device chrome-999 not found",
+  "retryable": false
+}
+```
+
+> Source: `gateway.ts:193`
+
+---
+
+### POST /v1/extension/reload
+
+Send a reload signal to the first connected Chrome extension client. Useful for development.
+
+```bash
+curl -s -X POST http://localhost:3500/v1/extension/reload | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "message": "Reload signal sent"
+}
+```
+
+**Error (503) — no extension connected:**
+
+```json
+{
+  "ok": false,
+  "error": "No extension client connected"
+}
+```
+
+> Source: `gateway.ts:167`
+
+---
+
+### GET /v1/apps
+
+List all registered PingApp modules and their available actions.
+
+```bash
+curl -s http://localhost:3500/v1/apps | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "apps": [
+    {
+      "name": "aliexpress",
+      "displayName": "AliExpress",
+      "version": "0.1.0",
+      "actions": [
+        "POST /v1/app/aliexpress/search { query }",
+        "POST /v1/app/aliexpress/product { id }",
+        "..."
+      ]
+    },
+    {
+      "name": "amazon",
+      "displayName": "Amazon UAE",
+      "version": "0.1.0",
+      "actions": ["..."]
+    },
+    {
+      "name": "claude",
+      "displayName": "Claude.ai",
+      "version": "0.1.0",
+      "actions": ["..."]
+    }
+  ]
+}
+```
+
+> Source: `app-routes.ts:753`
+
+---
+
+## 2. Device Operations
+
+### POST /v1/dev/:device/:op
+
+The gateway's unified "device file" interface. Routes requests to browser tabs via the Chrome extension bridge.
+
+**Execution path:**
+
+```
+HTTP POST /v1/dev/chrome-{tabId}/{op}
+  → gateway
+  → WebSocket /ext
+  → extension background.ts
+  → content script (content.ts)
+  → DOM
+```
+
+**Common behavior:**
+
+- If the extension bridge **owns** the device, the command is forwarded over WebSocket with a 20-second timeout.
+- If the device is not found, returns `404 ENODEV`.
+- If the content script fails, returns `502 EIO`.
+- **Self-healing**: When `selfHeal` is enabled and a selector-based op (`read`, `click`, `type`, `waitFor`) returns "element not found", the gateway automatically retries with a cached or LLM-suggested replacement selector. Healed responses include a `_healed` metadata object.
+
+**Base request pattern:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-{tabId}/{op} \
+  -H 'Content-Type: application/json' \
+  -d '{ ... }' | jq .
+```
+
+**Base response:**
+
+```json
+{ "ok": true, "result": "..." }
+```
+
+**Self-healed response:**
+
+```json
+{
+  "ok": true,
+  "result": "...",
+  "_healed": {
+    "from": "original-selector",
+    "to": "new-selector",
+    "cached": false,
+    "confidence": 0.85,
+    "reasoning": "The ID changed from #old to #new"
+  }
+}
+```
+
+> Source: `gateway.ts:296`, `background.ts:326`
+
+---
+
+Below are all 18 device operations. Each is invoked as `POST /v1/dev/:device/{op}`.
+
+### op: `recon`
+
+Run reconnaissance on the current page. Returns interactive elements, page structure, and ARIA tree information.
+
+**Request:**
+
+```typescript
+{ classify?: boolean; stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/recon \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "elements": [...],
+    "regions": [...],
+    "dynamicAreas": [...],
+    "ariaTree": [...]
+  }
+}
+```
+
+> Source: `chrome-extension/src/types.ts:13`
+
+---
+
+### op: `observe`
+
+Observe the current page state. Returns a snapshot of visible content and dynamic areas.
+
+**Request:**
+
+```typescript
+{ stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/observe \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+---
+
+### op: `read`
+
+Read `textContent` from elements matching a CSS selector.
+
+**Request:**
+
+```typescript
+{ selector: string; limit?: number; stealth?: boolean }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `selector` | `string` | Yes | CSS selector to match |
+| `limit` | `number` | No | Max number of characters to return |
+| `stealth` | `boolean` | No | Use stealth interaction mode |
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/read \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": "h1"}' | jq .
+```
+
+**Response:**
+
+```json
+{ "ok": true, "result": "Example Domain" }
+```
+
+> Supports self-healing when the selector fails.
+
+---
+
+### op: `extract`
+
+Extract structured data from the page using CSS selectors or natural-language queries.
+
+**Request:**
+
+```typescript
+{
+  range?: string;                          // CSS selector scope
+  format?: 'array' | 'object' | 'csv';    // Output format
+  schema?: Record<string, string>;         // Field → selector map
+  query?: string;                          // Natural language extraction query
+  limit?: number;                          // Max items
+  stealth?: boolean;
+}
+```
+
+**Example — schema-based extraction:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/extract \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schema": {"title": "h1", "price": ".price", "rating": ".stars"},
+    "format": "object"
+  }' | jq .
+```
+
+**Example — query-based extraction:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/extract \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "all product names and prices in the table",
+    "format": "array",
+    "limit": 10
+  }' | jq .
+```
+
+---
+
+### op: `act`
+
+Execute a natural-language instruction on the page. The engine interprets the instruction and performs the corresponding DOM actions (click, type, scroll, etc.).
+
+**Request:**
+
+```typescript
+{ instruction: string; stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/act \
+  -H 'Content-Type: application/json' \
+  -d '{"instruction": "click the Sign In button"}' | jq .
+```
+
+---
+
+### op: `click`
+
+Click an element by CSS selector, text content, or CDP coordinates.
+
+**Request:**
+
+```typescript
+{
+  selector?: string;       // CSS selector
+  text?: string;           // Match by visible text (e.g., "text=Add to cart")
+  x?: number;              // Viewport X coordinate (CDP click)
+  y?: number;              // Viewport Y coordinate (CDP click)
+  stealth?: boolean;
+}
+```
+
+**Example — CSS selector:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/click \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": "#submit-button"}' | jq .
+```
+
+**Example — text match:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/click \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Add to cart"}' | jq .
+```
+
+**Example — CDP coordinate click (trusted events for canvas apps):**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/click \
+  -H 'Content-Type: application/json' \
+  -d '{"x": 400, "y": 300, "cdp": true}' | jq .
+```
+
+> CDP clicks use `Input.dispatchMouseEvent` via Chrome DevTools Protocol for trusted events. Supports self-healing when the selector fails.
+
+> Source: `background.ts:439`
+
+---
+
+### op: `type`
+
+Type text into an input element matching a selector.
+
+**Request:**
+
+```typescript
+{
+  selector: string;
+  text: string;
+  stealth?: boolean;
+  clear?: boolean;        // Clear existing content first
+  cdp?: boolean;          // Use CDP Input.insertText for trusted events
+}
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/type \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": "input[name=\"q\"]", "text": "pingos", "clear": true}' | jq .
+```
+
+> When `cdp: true`, uses `Input.insertText` via Chrome DevTools Protocol to produce trusted keyboard events that canvas apps (e.g., Google Sheets) require.
+
+> Source: `background.ts:529`
+
+---
+
+### op: `scroll`
+
+Scroll the page or a specific element.
+
+**Request:**
+
+```typescript
+{
+  direction?: 'up' | 'down' | 'left' | 'right';
+  amount?: number;           // Scroll amount in pixels
+  selector?: string;         // Element to scroll (defaults to page)
+  to?: 'top' | 'bottom';    // Scroll to absolute position
+  stealth?: boolean;
+}
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/scroll \
+  -H 'Content-Type: application/json' \
+  -d '{"direction": "down", "amount": 500}' | jq .
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/scroll \
+  -H 'Content-Type: application/json' \
+  -d '{"to": "bottom"}' | jq .
+```
+
+---
+
+### op: `navigate`
+
+Navigate the tab to a new URL. Uses `chrome.tabs.update()` internally, which works even when the content script is stale.
+
+**Request:**
+
+```typescript
+{ url: string; stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/navigate \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}' | jq .
+```
+
+**Behavior:** Waits for page load to complete (up to 15s), then re-injects the content script.
+
+> Source: `background.ts:352`
+
+---
+
+### op: `press`
+
+Press a keyboard key, optionally with modifier keys.
+
+**Request:**
+
+```typescript
+{
+  key: string;                // Key name: "Enter", "Tab", "a", "Escape", etc.
+  modifiers?: string[];       // ["ctrl"], ["shift"], ["alt"], ["meta"/"cmd"]
+  selector?: string;          // Focus element first
+  cdp?: boolean;              // Use CDP for trusted events
+  stealth?: boolean;
+}
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/press \
+  -H 'Content-Type: application/json' \
+  -d '{"key": "Enter"}' | jq .
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/press \
+  -H 'Content-Type: application/json' \
+  -d '{"key": "a", "modifiers": ["ctrl"], "cdp": true}' | jq .
+```
+
+> CDP press dispatches `keyDown` → `char` (for printable keys) → `keyUp` via `Input.dispatchKeyEvent`.
+
+> Source: `background.ts:469`
+
+---
+
+### op: `dblclick`
+
+Double-click an element matching a CSS selector.
+
+**Request:**
+
+```typescript
+{ selector: string; stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/dblclick \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": ".editable-cell"}' | jq .
+```
+
+---
+
+### op: `select`
+
+Select text within the page or a specific element.
+
+**Request:**
+
+```typescript
+{
+  from?: string;            // Start selector
+  to?: string;              // End selector
+  selector?: string;        // Element to select within
+  startOffset?: number;     // Text offset start
+  endOffset?: number;       // Text offset end
+  stealth?: boolean;
+}
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/select \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": "p.content", "startOffset": 0, "endOffset": 50}' | jq .
+```
+
+---
+
+### op: `eval`
+
+Evaluate JavaScript in the page context via Chrome DevTools Protocol (`Runtime.evaluate`). Bypasses CSP restrictions.
+
+**Request:**
+
+```typescript
+{
+  expression?: string;     // JS expression (canonical field name)
+  code?: string;           // Alias for expression (backwards-compatible)
+  stealth?: boolean;
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `expression` | `string` | Yes* | JavaScript expression to evaluate. *Either `expression` or `code` is required |
+| `code` | `string` | No | Backwards-compatible alias for `expression` |
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/eval \
+  -H 'Content-Type: application/json' \
+  -d '{"expression": "document.title"}' | jq .
+```
+
+**Response:**
+
+```json
+{ "ok": true, "result": "Example Domain" }
+```
+
+**Example — extract data with an IIFE:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/eval \
+  -H 'Content-Type: application/json' \
+  -d '{"expression": "(() => { return Array.from(document.querySelectorAll(\"h2\")).map(h => h.textContent) })()"}' | jq .
+```
+
+**Behavior:** Attaches the Chrome debugger (`chrome.debugger.attach`), evaluates via `Runtime.evaluate` with `returnByValue: true` and `awaitPromise: true`, then detaches. Promises are automatically awaited.
+
+> Source: `background.ts:389`
+
+---
+
+### op: `waitFor`
+
+Wait for an element matching a CSS selector to appear in the DOM.
+
+**Request:**
+
+```typescript
+{ selector: string; timeoutMs?: number; stealth?: boolean }
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `selector` | `string` | Yes | — | CSS selector to wait for |
+| `timeoutMs` | `number` | No | 5000 | Max wait time in ms |
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/waitFor \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": ".results-loaded", "timeoutMs": 10000}' | jq .
+```
+
+> Supports self-healing when the selector fails.
+
+---
+
+### op: `getUrl`
+
+Get the current URL of the tab.
+
+**Request:**
+
+```typescript
+{ stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/getUrl \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response:**
+
+```json
+{ "ok": true, "result": "https://example.com/page" }
+```
+
+---
+
+### op: `clean`
+
+Remove ads, overlays, popups, and other noise from the page.
+
+**Request:**
+
+```typescript
+{ mode?: 'css' | 'remove' | 'detect' | 'full'; stealth?: boolean }
+```
+
+| Mode | Description |
+|------|-------------|
+| `css` | Hide elements with CSS (`display: none`) |
+| `remove` | Remove elements from DOM entirely |
+| `detect` | Detect and report noise elements without removing |
+| `full` | Aggressive cleanup: CSS hide + DOM remove + overlay dismissal |
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/clean \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "full"}' | jq .
+```
+
+---
+
+### op: `screenshot`
+
+Capture a screenshot of the current tab.
+
+**Request:**
+
+```typescript
+{ stealth?: boolean }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/screenshot \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+---
+
+### op: `record_api_action`
+
+Record a user action for workflow recording. Typically called internally by the recording system.
+
+**Request:**
+
+```typescript
+{
+  action: {
+    type: string;            // "click", "type", "navigate", etc.
+    selector?: string;
+    text?: string;
+    key?: string;
+    url?: string;
+    timestamp: number;
+    source: string;          // "api" or "user"
+  };
+  stealth?: boolean;
+}
+```
+
+> Source: `chrome-extension/src/types.ts:22`, `background.ts:301`
+
+---
+
+## 3. LLM Routing
+
+### POST /v1/dev/llm/prompt
+
+Send a prompt to the best available LLM driver. The gateway resolves the target driver based on capability requirements, routing strategy, and driver health.
+
+**Request:**
+
+```typescript
+interface PromptBody {
+  prompt: string;                          // Required
+  driver?: string;                         // Target specific driver by ID
+  require?: Partial<DriverCapabilities>;   // Filter by capabilities
+  strategy?: RoutingStrategy;              // 'best' | 'fastest' | 'cheapest' | 'round-robin'
+  timeout_ms?: number;                     // Default: 120000
+  conversation_id?: string;               // Continue conversation (PingApp drivers)
+  tool?: string;                           // Activate tool (e.g., 'deep-research')
+}
+```
+
+**Example — basic prompt:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/llm/prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Explain quantum entanglement in one paragraph"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "text": "Quantum entanglement is a phenomenon where particles become interconnected...",
+  "driver": "gemini",
+  "durationMs": 15432
+}
+```
+
+**Example — capability-based routing:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/llm/prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Think step by step: derivative of x^3 * sin(x)?", "require": {"thinking": true}}' | jq .
+```
+
+**Example — specific driver:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/llm/prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Hello", "driver": "gemini"}' | jq .
+```
+
+**Example — PingApp tool activation:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/llm/prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Research quantum computing 2026", "driver": "gemini", "tool": "deep-research", "timeout_ms": 300000}' | jq .
+```
+
+**Response interface:**
+
+```typescript
+interface DeviceResponse {
+  text: string;
+  driver: string;
+  model?: string;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  thinking?: string;
+  artifacts?: Array<{ type: 'image' | 'code' | 'file' | 'json'; data: string; mimeType?: string; filename?: string }>;
+  conversation_id?: string;
+  durationMs?: number;
+}
+```
+
+**Errors:**
+
+| Scenario | HTTP | errno | code |
+|----------|------|-------|------|
+| Missing `prompt` | 400 | `ENOSYS` | `ping.gateway.bad_request` |
+| No matching driver | 404 | `ENOENT` | `ping.router.no_driver` |
+| Driver busy | 409 | `EBUSY` | `ping.driver.concurrency_exceeded` |
+| Timeout | 503 | `ETIMEDOUT` | `ping.driver.timeout` |
+| I/O error | 502 | `EIO` | `ping.driver.io_error` |
+
+> Source: `gateway.ts:232`
+
+---
+
+### POST /v1/dev/llm/chat
+
+Multi-turn chat with message history. Accepts all `prompt` fields plus a `messages` array.
+
+**Request:**
+
+```typescript
+interface ChatBody extends PromptBody {
+  messages?: Message[];    // Full conversation history
+}
+
+interface Message {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | ContentPart[];
+}
+
+type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; url: string; detail?: 'low' | 'high' }
+  | { type: 'tool_call'; id: string; name: string; arguments: unknown }
+  | { type: 'tool_result'; toolCallId: string; content: unknown };
+```
+
+**Example — multi-turn:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/llm/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "Now explain it to a 5-year-old",
+    "messages": [
+      {"role": "system", "content": "You are a helpful physics tutor."},
+      {"role": "user", "content": "What is gravity?"},
+      {"role": "assistant", "content": "Gravity is the force that pulls objects toward each other..."},
+      {"role": "user", "content": "Now explain it to a 5-year-old"}
+    ]
+  }' | jq .
+```
+
+**Example — vision (multimodal):**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/llm/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "messages": [{"role": "user", "content": [
+      {"type": "text", "text": "What do you see in this image?"},
+      {"type": "image_url", "url": "https://example.com/photo.jpg", "detail": "high"}
+    ]}],
+    "require": {"vision": true}
+  }' | jq .
+```
+
+**Validation:** At least one of `prompt` or `messages` must be provided, otherwise returns 400.
+
+> Source: `gateway.ts:263`
+
+---
+
+### POST /v1/dev/:device/suggest
+
+Get an LLM-powered contextual suggestion for a device interaction.
+
+**Request:**
+
+```typescript
+{ context?: string; question: string }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `question` | `string` | Yes | What you need help with |
+| `context` | `string` | No | Current page context for the LLM |
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/suggest \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "How do I add this item to cart?", "context": "Amazon product page with Add to Cart button"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "suggestion": "Click the 'Add to Cart' button using selector #add-to-cart-button",
+  "confidence": 0.9
+}
+```
+
+**Errors:**
+
+| Scenario | HTTP | errno | code |
+|----------|------|-------|------|
+| Missing `question` | 400 | `ENOSYS` | `ping.gateway.bad_request` |
+
+> Source: `gateway.ts:208`, `llm.ts:104`
+
+---
+
+## 4. Recorder
+
+The recorder captures user and API interactions on a shared tab to build replayable workflows.
+
+### POST /v1/record/start
+
+Start recording on a device.
+
+**Request:**
+
+```typescript
+{ device: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/record/start \
+  -H 'Content-Type: application/json' \
+  -d '{"device": "chrome-123"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "result": { "recording": true } }
+```
+
+**Errors:**
+
+| Scenario | HTTP | errno |
+|----------|------|-------|
+| Missing `device` | 400 | `ENOSYS` |
+| Device not found | 404 | `ENODEV` |
+
+> Source: `gateway.ts:439`
+
+---
+
+### POST /v1/record/stop
+
+Stop recording on a device.
+
+**Request:**
+
+```typescript
+{ device: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/record/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"device": "chrome-123"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "result": { "recording": false, "actions": 12 } }
+```
+
+> Source: `gateway.ts:470`
+
+---
+
+### POST /v1/record/export
+
+Export the recorded workflow as a PingOS workflow definition.
+
+**Request:**
+
+```typescript
+{ device: string; name?: string }
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `device` | `string` | Yes | — | Device ID |
+| `name` | `string` | No | `"recording"` | Workflow name |
+
+```bash
+curl -s -X POST http://localhost:3500/v1/record/export \
+  -H 'Content-Type: application/json' \
+  -d '{"device": "chrome-123", "name": "checkout-flow"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "name": "checkout-flow",
+    "steps": [
+      { "op": "navigate", "url": "https://example.com/cart" },
+      { "op": "click", "selector": "#checkout-btn" },
+      { "op": "type", "selector": "#email", "text": "user@example.com" }
+    ],
+    "inputs": {},
+    "outputs": {}
+  }
+}
+```
+
+> Source: `gateway.ts:501`
+
+---
+
+### GET /v1/record/status
+
+Get the current recording status for a device.
+
+**Query parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `device` | `string` | Yes | Device ID |
+
+```bash
+curl -s "http://localhost:3500/v1/record/status?device=chrome-123" | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "recording": true,
+    "actions": 5,
+    "startedAt": 1708272000000
+  }
+}
+```
+
+> Source: `gateway.ts:532`
+
+---
+
+## 5. Self-Heal
+
+The self-heal system automatically repairs broken CSS selectors at runtime using a cache + LLM fallback strategy.
+
+### GET /v1/heal/cache
+
+Dump the current selector healing cache.
+
+```bash
+curl -s http://localhost:3500/v1/heal/cache | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "cache": {
+    "#old-selector||https://example.com": {
+      "replacement": "#new-selector",
+      "confidence": 0.92,
+      "hits": 5
+    }
+  }
+}
+```
+
+> Source: `gateway.ts:145`
+
+---
+
+### GET /v1/heal/stats
+
+Get self-heal performance statistics.
+
+```bash
+curl -s http://localhost:3500/v1/heal/stats | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "enabled": true,
+  "stats": {
+    "attempts": 42,
+    "successes": 35,
+    "cacheHits": 20,
+    "cacheHitSuccesses": 18,
+    "llmAttempts": 22,
+    "llmSuccesses": 17,
+    "successRate": 0.833,
+    "cacheHitRate": 0.476,
+    "cacheHitSuccessRate": 0.9,
+    "llmSuccessRate": 0.773
+  }
+}
+```
+
+| Stat | Description |
+|------|-------------|
+| `attempts` | Total heal attempts |
+| `successes` | Successful heals (cache + LLM) |
+| `cacheHits` | Times a cached replacement was tried |
+| `cacheHitSuccesses` | Cache replacements that worked |
+| `llmAttempts` | Times the LLM was consulted |
+| `llmSuccesses` | LLM suggestions that worked |
+| `successRate` | `successes / attempts` |
+| `cacheHitRate` | `cacheHits / attempts` |
+| `cacheHitSuccessRate` | `cacheHitSuccesses / cacheHits` |
+| `llmSuccessRate` | `llmSuccesses / llmAttempts` |
+
+> Source: `gateway.ts:149`
+
+---
+
+## 6. PingApps: Amazon
+
+High-level Amazon actions. Requires an Amazon tab open and shared in the Chrome extension.
+
+All Amazon PingApp routes auto-detect the Amazon domain from the current tab URL (amazon.com, amazon.ae, etc.).
+
+### POST /v1/app/amazon/search
+
+Search for products on Amazon.
+
+**Request:**
+
+```typescript
+{ query: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/amazon/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "wireless headphones"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "search",
+  "query": "wireless headphones",
+  "products": [
+    {
+      "asin": "B09WX4GJ1S",
+      "title": "Sony WH-1000XM5 Wireless Noise Cancelling Headphones",
+      "price": "AED 1,299.00",
+      "rating": "4.6 out of 5 stars",
+      "reviews": "12,345 ratings",
+      "img": "https://m.media-amazon.com/images/...",
+      "prime": true,
+      "url": "https://www.amazon.ae/dp/B09WX4GJ1S"
+    }
+  ],
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:421`
+
+---
+
+### POST /v1/app/amazon/product
+
+Get details for a specific product by ASIN.
+
+**Request:**
+
+```typescript
+{ asin: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/amazon/product \
+  -H 'Content-Type: application/json' \
+  -d '{"asin": "B09WX4GJ1S"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "product",
+  "product": {
+    "title": "Sony WH-1000XM5 Wireless Noise Cancelling Headphones",
+    "price": "AED 1,299.00",
+    "rating": "4.6 out of 5 stars",
+    "reviews": "12,345 ratings",
+    "seller": "Amazon.ae",
+    "availability": "In Stock",
+    "prime": true,
+    "images": ["https://..."],
+    "features": ["Industry-leading noise cancellation", "..."],
+    "asin": "B09WX4GJ1S",
+    "url": "https://www.amazon.ae/dp/B09WX4GJ1S"
+  },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:443`
+
+---
+
+### POST /v1/app/amazon/cart/add
+
+Add the currently viewed product to cart. Must be on a product detail page.
+
+**Request:** _(empty body)_
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/amazon/cart/add \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "addToCart", "deviceId": "chrome-123" }
+```
+
+**Behavior:** Clicks the `#add-to-cart-button` element.
+
+> Source: `app-routes.ts:458`
+
+---
+
+### GET /v1/app/amazon/cart
+
+View the current shopping cart.
+
+```bash
+curl -s http://localhost:3500/v1/app/amazon/cart | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "cart",
+  "content": "Shopping Cart\n1 item...",
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:467`
+
+---
+
+### GET /v1/app/amazon/orders
+
+View order history.
+
+```bash
+curl -s http://localhost:3500/v1/app/amazon/orders | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "orders",
+  "content": "Your Orders\nOrder #123-456...",
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:477`
+
+---
+
+### GET /v1/app/amazon/deals
+
+View current deals page.
+
+```bash
+curl -s http://localhost:3500/v1/app/amazon/deals | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "deals",
+  "content": "Today's Deals\n...",
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:487`
+
+---
+
+### POST /v1/app/amazon/clean
+
+Remove ads and visual noise from the current Amazon page.
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/amazon/clean \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "clean", "result": {}, "deviceId": "chrome-123" }
+```
+
+> Source: `app-routes.ts:498`
+
+---
+
+### GET /v1/app/amazon/recon
+
+Run reconnaissance on the current Amazon page.
+
+```bash
+curl -s http://localhost:3500/v1/app/amazon/recon | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "recon",
+  "recon": { "elements": [...], "regions": [...] },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:506`
+
+---
+
+**Common Amazon errors:**
+
+| Scenario | HTTP | Response |
+|----------|------|----------|
+| Missing required field | 400 | `{ "ok": false, "error": "query required" }` |
+| No Amazon tab open | 404 | `{ "ok": false, "error": "No Amazon tab open" }` |
+
+---
+
+## 7. PingApps: AliExpress
+
+High-level AliExpress actions. Requires an AliExpress tab open and shared.
+
+Locale is automatically set to `en_US` / `USD` before each operation.
+
+### POST /v1/app/aliexpress/search
+
+Search for products on AliExpress.
+
+**Request:**
+
+```typescript
+{ query: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/aliexpress/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "bluetooth earbuds"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "search",
+  "query": "bluetooth earbuds",
+  "products": [
+    {
+      "id": "1005006789012345",
+      "title": "Wireless Bluetooth 5.3 Earbuds...",
+      "price": "$12.99",
+      "rating": "4.8",
+      "sold": "5000+ sold",
+      "img": "https://ae01.alicdn.com/...",
+      "url": "https://www.aliexpress.com/item/1005006789012345.html"
+    }
+  ],
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:274`
+
+---
+
+### POST /v1/app/aliexpress/product
+
+Get details for a specific product by ID.
+
+**Request:**
+
+```typescript
+{ id: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/aliexpress/product \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "1005006789012345"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "product",
+  "product": {
+    "title": "Wireless Bluetooth 5.3 Earbuds",
+    "price": "$12.99",
+    "originalPrice": "$25.99",
+    "rating": "4.8",
+    "reviews": "2,345 reviews",
+    "store": "TechStore Official",
+    "shipping": "Free shipping",
+    "sold": "5000+ sold",
+    "variants": [
+      { "name": "Color", "options": ["Black", "White", "Blue"] }
+    ],
+    "url": "https://www.aliexpress.com/item/1005006789012345.html",
+    "id": "1005006789012345"
+  },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:296`
+
+---
+
+### POST /v1/app/aliexpress/cart/add
+
+Add the currently viewed product to cart. Must be on a product detail page.
+
+**Request:** _(empty body)_
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/aliexpress/cart/add \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "addToCart", "deviceId": "chrome-123" }
+```
+
+**Behavior:** Clicks the "Add to cart" button by text match.
+
+> Source: `app-routes.ts:313`
+
+---
+
+### POST /v1/app/aliexpress/cart/remove
+
+Remove an item from the cart by its index position.
+
+**Request:**
+
+```typescript
+{ index?: number }   // default: 0 (first item)
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/aliexpress/cart/remove \
+  -H 'Content-Type: application/json' \
+  -d '{"index": 0}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "removeFromCart", "index": 0, "deviceId": "chrome-123" }
+```
+
+**Behavior:** Navigates to the cart page, finds the nth remove/delete button, and clicks it.
+
+> Source: `app-routes.ts:324`
+
+---
+
+### GET /v1/app/aliexpress/cart
+
+View the current shopping cart with item details.
+
+```bash
+curl -s http://localhost:3500/v1/app/aliexpress/cart | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "cart",
+  "cart": {
+    "items": [
+      {
+        "title": "Wireless Bluetooth 5.3 Earbuds",
+        "price": "$12.99",
+        "quantity": "1",
+        "store": "TechStore Official"
+      }
+    ],
+    "count": 1,
+    "total": "$12.99"
+  },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:342`
+
+---
+
+### GET /v1/app/aliexpress/orders
+
+View order history.
+
+```bash
+curl -s http://localhost:3500/v1/app/aliexpress/orders | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "orders",
+  "orders": {
+    "orders": [
+      {
+        "orderId": "8012345678901234",
+        "date": "Jan 15, 2026",
+        "total": "$25.98",
+        "status": "Completed"
+      }
+    ],
+    "count": 1
+  },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:354`
+
+---
+
+### GET /v1/app/aliexpress/orders/:orderId
+
+View details for a specific order.
+
+**Path parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `orderId` | `string` | AliExpress order ID |
+
+```bash
+curl -s http://localhost:3500/v1/app/aliexpress/orders/8012345678901234 | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "trackOrder",
+  "orderId": "8012345678901234",
+  "details": "Order ID: 8012345678901234\nStatus: Shipped...",
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:366`
+
+---
+
+### GET /v1/app/aliexpress/wishlist
+
+View the wishlist.
+
+```bash
+curl -s http://localhost:3500/v1/app/aliexpress/wishlist | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "wishlist",
+  "content": "My Wishlist\n...",
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:379`
+
+---
+
+### POST /v1/app/aliexpress/clean
+
+Remove ads and visual noise from the current AliExpress page.
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/aliexpress/clean \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "clean", "result": {}, "deviceId": "chrome-123" }
+```
+
+> Source: `app-routes.ts:391`
+
+---
+
+### GET /v1/app/aliexpress/recon
+
+Run reconnaissance on the current AliExpress page.
+
+```bash
+curl -s http://localhost:3500/v1/app/aliexpress/recon | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "recon",
+  "recon": { "elements": [...], "regions": [...] },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:400`
+
+---
+
+**Common AliExpress errors:**
+
+| Scenario | HTTP | Response |
+|----------|------|----------|
+| Missing required field | 400 | `{ "ok": false, "error": "query required" }` |
+| No AliExpress tab open | 404 | `{ "ok": false, "error": "No AliExpress tab open" }` |
+
+---
+
+## 8. PingApps: Claude
+
+High-level Claude.ai actions. Requires a Claude.ai tab open and shared.
+
+### POST /v1/app/claude/chat
+
+Send a message in the current Claude conversation.
+
+**Request:**
+
+```typescript
+{ message: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "What is the capital of France?"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "chat", "sent": "What is the capital of France?" }
+```
+
+**Behavior:** Types the message into `[data-testid="chat-input"]`, then clicks `button[aria-label="Send message"]`. Falls back to dispatching an Enter keydown event if the button click fails.
+
+> Source: `app-routes.ts:519`
+
+---
+
+### POST /v1/app/claude/chat/new
+
+Start a new conversation on Claude.ai.
+
+**Request:** _(empty body)_
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/chat/new \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "newChat" }
+```
+
+> Source: `app-routes.ts:555`
+
+---
+
+### GET /v1/app/claude/chat/read
+
+Read the latest assistant response from the current conversation.
+
+```bash
+curl -s http://localhost:3500/v1/app/claude/chat/read | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "read",
+  "response": "The capital of France is Paris. It is the largest city in France and serves as..."
+}
+```
+
+> Returns up to 5,000 characters of the last message.
+
+> Source: `app-routes.ts:565`
+
+---
+
+### GET /v1/app/claude/conversations
+
+List recent conversations from the sidebar.
+
+```bash
+curl -s http://localhost:3500/v1/app/claude/conversations | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "conversations": [
+    {
+      "title": "Quantum Computing Discussion",
+      "url": "https://claude.ai/chat/abc123",
+      "id": "abc123"
+    }
+  ]
+}
+```
+
+> Returns up to 20 conversations, filtered to exclude navigation items.
+
+> Source: `app-routes.ts:581`
+
+---
+
+### POST /v1/app/claude/conversation
+
+Navigate to a specific conversation by ID.
+
+**Request:**
+
+```typescript
+{ id: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/conversation \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "abc123"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "openConversation", "id": "abc123" }
+```
+
+> Source: `app-routes.ts:590`
+
+---
+
+### GET /v1/app/claude/model
+
+Get the currently selected model.
+
+```bash
+curl -s http://localhost:3500/v1/app/claude/model | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "model": "Claude 4.5 Sonnet" }
+```
+
+> Source: `app-routes.ts:603`
+
+---
+
+### POST /v1/app/claude/model
+
+Switch the active model.
+
+**Request:**
+
+```typescript
+{ model: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/model \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "opus"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "setModel", "model": "opus" }
+```
+
+**Behavior:** Opens the model selector dropdown, searches for a matching option by text, and clicks it.
+
+> Source: `app-routes.ts:612`
+
+---
+
+### GET /v1/app/claude/projects
+
+List projects from the Claude.ai sidebar.
+
+```bash
+curl -s http://localhost:3500/v1/app/claude/projects | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "projects": [
+    {
+      "title": "My Research Project",
+      "url": "https://claude.ai/project/proj_abc123",
+      "id": "proj_abc123"
+    }
+  ]
+}
+```
+
+> Returns up to 30 projects.
+
+> Source: `app-routes.ts:638`
+
+---
+
+### POST /v1/app/claude/project
+
+Navigate to a specific project.
+
+**Request:**
+
+```typescript
+{ id: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/project \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "proj_abc123"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "openProject", "id": "proj_abc123" }
+```
+
+> Source: `app-routes.ts:651`
+
+---
+
+### GET /v1/app/claude/artifacts
+
+List artifacts from the Claude.ai artifacts page.
+
+```bash
+curl -s http://localhost:3500/v1/app/claude/artifacts | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "artifacts": [
+    {
+      "title": "React Component",
+      "url": "https://claude.ai/artifacts/art_xyz789",
+      "id": "art_xyz789"
+    }
+  ]
+}
+```
+
+> Returns up to 30 artifacts.
+
+> Source: `app-routes.ts:664`
+
+---
+
+### POST /v1/app/claude/upload
+
+Upload a file to the current Claude conversation.
+
+**Request:**
+
+```typescript
+{ filePath: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/upload \
+  -H 'Content-Type: application/json' \
+  -d '{"filePath": "/path/to/document.pdf"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "upload", "filePath": "/path/to/document.pdf" }
+```
+
+**Behavior:** Targets `[data-testid="file-upload"]` input element.
+
+> Source: `app-routes.ts:677`
+
+---
+
+### GET /v1/app/claude/search
+
+Search conversations on Claude.ai.
+
+**Query parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | `string` | Yes | Search term |
+
+```bash
+curl -s "http://localhost:3500/v1/app/claude/search?query=quantum" | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "search",
+  "query": "quantum",
+  "results": [
+    {
+      "title": "Quantum Computing Discussion",
+      "url": "https://claude.ai/chat/abc123",
+      "id": "abc123"
+    }
+  ]
+}
+```
+
+> Returns up to 30 matching conversations.
+
+> Source: `app-routes.ts:704`
+
+---
+
+### POST /v1/app/claude/clean
+
+Clean the current Claude.ai page (minimal mode — less aggressive than full).
+
+```bash
+curl -s -X POST http://localhost:3500/v1/app/claude/clean \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq .
+```
+
+**Response (200):**
+
+```json
+{ "ok": true, "action": "clean", "result": {} }
+```
+
+> Source: `app-routes.ts:735`
+
+---
+
+### GET /v1/app/claude/recon
+
+Run reconnaissance on the current Claude.ai page.
+
+```bash
+curl -s http://localhost:3500/v1/app/claude/recon | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "action": "recon",
+  "recon": { "elements": [...], "regions": [...] },
+  "deviceId": "chrome-123"
+}
+```
+
+> Source: `app-routes.ts:744`
+
+---
+
+**Common Claude errors:**
+
+| Scenario | HTTP | Response |
+|----------|------|----------|
+| Missing required field | 400 | `{ "ok": false, "error": "message required" }` |
+| No Claude tab open | 404 | `{ "ok": false, "error": "No Claude tab open" }` |
+
+---
+
+## 9. WebSocket Protocol
+
+The gateway exposes a WebSocket endpoint at `ws://localhost:3500/ext` for the Chrome extension bridge.
+
+### Connection
+
+```
+ws://localhost:3500/ext
+```
+
+The extension connects on startup and reconnects with exponential backoff (1s base, 30s max).
+
+### Extension → Gateway Messages
+
+#### `hello`
+
+Sent immediately after WebSocket connection opens. Announces the client and its shared tabs.
 
 ```json
 {
   "type": "hello",
-  "clientId": "uuid",
+  "clientId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "version": "0.1.0",
   "tabs": [
-    { "deviceId": "chrome-123", "tabId": 123, "url": "https://example.com", "title": "Example" }
+    {
+      "deviceId": "chrome-123",
+      "tabId": 123,
+      "url": "https://example.com",
+      "title": "Example"
+    }
   ]
 }
 ```
 
-**share_update** (sent when the user shares/unshares tabs):
+| Field | Type | Description |
+|-------|------|-------------|
+| `clientId` | `string` | UUID generated per extension instance |
+| `version` | `string` | Extension version |
+| `tabs` | `ExtSharedTab[]` | Currently shared tabs |
+
+The `hello` message is re-sent whenever the shared tab list changes (tab created, URL updated, tab closed, manual share/unshare). This serves as both initial announcement and incremental update.
+
+> Source: `background.ts:663`
+
+---
+
+#### `ping`
+
+Heartbeat message sent every 30 seconds.
 
 ```json
-{
-  "type": "share_update",
-  "clientId": "uuid",
-  "tabs": [
-    { "deviceId": "chrome-123", "tabId": 123, "url": "https://example.com", "title": "Example" }
-  ]
-}
+{ "type": "ping", "t": 1708272000000 }
 ```
 
-**device_response** (response to a gateway command):
+If no `pong` is received within 90 seconds, the extension closes and reconnects.
+
+> Source: `background.ts:272`
+
+---
+
+#### `device_response`
+
+Response to a `device_request` from the gateway.
 
 ```json
 {
   "type": "device_response",
   "id": "request-uuid",
   "ok": true,
-  "result": "..."
+  "result": "Example Domain"
 }
 ```
 
-### Messages (Gateway → Extension)
+```json
+{
+  "type": "device_response",
+  "id": "request-uuid",
+  "ok": false,
+  "error": "Element not found: #nonexistent"
+}
+```
 
-**device_request** (execute an operation):
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Matches `requestId` from the `device_request` |
+| `ok` | `boolean` | Whether the command succeeded |
+| `result` | `any` | Command result data (when `ok: true`) |
+| `error` | `string` | Error message (when `ok: false`) |
+
+> Source: `background.ts:641`
+
+---
+
+### Gateway → Extension Messages
+
+#### `device_request`
+
+Execute a command on a specific browser tab.
 
 ```json
 {
@@ -599,135 +2328,134 @@ This is used by the PingOS Chrome extension (MV3) to:
 }
 ```
 
-### Ownership and routing
+| Field | Type | Description |
+|-------|------|-------------|
+| `requestId` | `string` | Unique ID for correlating with `device_response` |
+| `device` | `string` | Target device ID (`chrome-{tabId}`) |
+| `command` | `BridgeCommand` | The operation to execute (see [Device Operations](#2-device-operations)) |
 
-- The gateway considers a device "extension-owned" when it appears in the most recent `hello` / `share_update` tab list.
-- For extension-owned devices, `POST /v1/dev/:device/:op` is forwarded to the owning extension client.
-
----
-
-## Common Request Fields
-
-These fields are shared across `/v1/dev/llm/prompt` and `/v1/dev/llm/chat`:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `prompt` | `string` | — | The prompt text |
-| `messages` | `Message[]` | — | Full conversation history (chat endpoint only) |
-| `driver` | `string` | — | Target a specific driver by ID. Bypasses capability matching and routing strategy. |
-| `require` | `Partial<DriverCapabilities>` | — | Only consider drivers matching these capability flags |
-| `strategy` | `string` | `'best'` | Routing strategy: `best`, `fastest`, `cheapest`, `round-robin` |
-| `timeout_ms` | `number` | `120000` | Maximum time to wait for a response (milliseconds) |
-| `conversation_id` | `string` | — | Continue an existing conversation (PingApp drivers maintain tab state) |
-| `tool` | `string` | — | Activate a PingApp-specific tool (e.g., `deep-research`, `image-gen`, `canvas`) |
+> Source: `background.ts:216`
 
 ---
 
-## Response Schema
+#### `pong`
 
-All successful responses from `/prompt` and `/chat` share this shape:
+Reply to a `ping` heartbeat.
 
-```typescript
-interface DeviceResponse {
-  text: string;                 // The response text (always present)
-  driver: string;               // ID of the driver that handled the request
-  model?: string;               // Model identifier (API drivers)
-  usage?: TokenUsage;           // Token usage (API drivers only)
-  thinking?: string;            // Reasoning chain (drivers with thinking capability)
-  artifacts?: Artifact[];       // Generated artifacts (images, code, files)
-  conversation_id?: string;     // Conversation ID for multi-turn (PingApp drivers)
-  durationMs?: number;          // Total request duration in milliseconds
-}
-
-interface TokenUsage {
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-}
-
-interface Artifact {
-  type: 'image' | 'code' | 'file' | 'json';
-  data: string;
-  mimeType?: string;
-  filename?: string;
-}
+```json
+{ "type": "pong" }
 ```
 
 ---
 
-## Error Reference
+#### `reload_extension`
+
+Signal the extension to reload itself.
+
+```json
+{ "type": "reload_extension" }
+```
+
+Triggered by `POST /v1/extension/reload`. The extension calls `chrome.runtime.reload()` upon receipt.
+
+> Source: `background.ts:210`
+
+---
+
+### Command Routing in the Extension
+
+When the extension receives a `device_request`, it routes based on `command.type`:
+
+| Command Type | Handler | Notes |
+|-------------|---------|-------|
+| `navigate` | `chrome.tabs.update()` | Bypasses content script, waits for load, re-injects |
+| `eval` | `chrome.debugger` CDP `Runtime.evaluate` | Bypasses CSP, returns by value, awaits promises |
+| `click` (with `cdp: true`) | `chrome.debugger` CDP `Input.dispatchMouseEvent` | Trusted mouse events for canvas apps |
+| `press` (with `cdp: true`) | `chrome.debugger` CDP `Input.dispatchKeyEvent` | Trusted keyboard events |
+| `type` (with `cdp: true`) | `chrome.debugger` CDP `Input.insertText` | Trusted text insertion |
+| All others | `chrome.tabs.sendMessage()` → content script | Standard DOM operations with auto-retry on channel errors |
+
+> Source: `background.ts:326-605`
+
+---
+
+### Tab Sharing Model
+
+By default, **all HTTP/HTTPS tabs are automatically shared** as devices. The extension:
+
+1. Auto-shares new tabs on `chrome.tabs.onCreated`
+2. Updates device info on `chrome.tabs.onUpdated` (URL/title changes)
+3. Removes devices on `chrome.tabs.onRemoved`
+4. Users can manually unshare tabs via the popup (stored in `manualUnsharedTabs`)
+5. Manually sharing a tab clears any previous unshare override
+
+> Source: `background.ts:852-904`
+
+---
+
+## 10. Error Reference
 
 All errors follow the `PingError` schema:
 
 ```typescript
 interface PingError {
-  errno: PingErrno;             // POSIX-style error number (machine-parseable)
-  code: string;                 // Domain-specific error code (human-debuggable)
-  message: string;              // Human-readable error description
-  retryable: boolean;           // Whether the client should retry this request
-  retryAfterMs?: number;        // Suggested retry delay (for retryable errors)
-  details?: unknown;            // Additional error context
+  errno: PingErrno;          // POSIX-style error number
+  code: string;              // Domain-specific error code
+  message: string;           // Human-readable description
+  retryable: boolean;        // Whether client should retry
+  retryAfterMs?: number;     // Suggested retry delay (ms)
+  details?: unknown;         // Additional context
 }
 ```
 
 ### errno → HTTP Status Mapping
 
-| errno | HTTP Status | Description | Retryable | When it occurs |
-|-------|-------------|-------------|-----------|----------------|
-| `ENOENT` | 404 | No driver found | No | No registered driver matches the required capabilities, or specified driver ID doesn't exist |
-| `ENODEV` | 404 | Device not found | No | Requested device path doesn't exist in registry |
-| `EACCES` | 403 | Auth required | No | API driver rejected the request due to invalid or missing API key |
-| `EBUSY` | 409 | Resource busy | **Yes** | PingApp is already processing another request (single concurrency) |
-| `ETIMEDOUT` | 503 | Timeout | **Yes** | Request exceeded `timeout_ms` waiting for the driver to respond |
-| `EAGAIN` | 429 | Rate limited | **Yes** | Driver is rate limiting requests. Check `retryAfterMs` for suggested delay |
-| `ENOSYS` | 422 | Not implemented | No | Requested capability or operation is not implemented by the driver |
-| `EOPNOTSUPP` | 422 | Op not supported | No | The specific operation is not supported by this driver type |
-| `EIO` | 502 | I/O error | **Yes** | Backend returned unexpected response, connection failed, or internal driver error |
-| `ECANCELED` | 499 | Canceled | No | Request was canceled by the caller |
+| errno | HTTP | Description | Retryable | When it occurs |
+|-------|------|-------------|-----------|----------------|
+| `ENOENT` | 404 | No driver found | No | No driver matches required capabilities or specified driver ID doesn't exist |
+| `ENODEV` | 404 | Device not found | No | Requested device not found (tab not shared or extension disconnected) |
+| `EACCES` | 403 | Auth required | No | API driver rejected request due to invalid/missing API key |
+| `EBUSY` | 409 | Resource busy | **Yes** | PingApp already processing another request (single concurrency) |
+| `ETIMEDOUT` | 503 | Timeout | **Yes** | Request exceeded `timeout_ms` waiting for response |
+| `EAGAIN` | 429 | Rate limited | **Yes** | Driver rate limited; check `retryAfterMs` |
+| `ENOSYS` | 422 | Not implemented | No | Capability or operation not implemented by driver |
+| `EOPNOTSUPP` | 422 | Op not supported | No | Specific operation not supported by this driver type |
+| `EIO` | 502 | I/O error | **Yes** | Backend error, connection failure, or unexpected response |
+| `ECANCELED` | 499 | Canceled | No | Request canceled by caller |
+
+> Source: `errors.ts:10`
+
+---
 
 ### Domain Code Reference
 
-The `code` field provides structured, human-readable context for debugging:
+| Code | errno | Constructor | Description |
+|------|-------|-------------|-------------|
+| `ping.router.no_driver` | `ENOENT` | `ENOENT(device)` | No driver in registry matches required capabilities |
+| `ping.registry.device_not_found` | `ENODEV` | `ENODEV(device)` | Requested device not found in registry |
+| `ping.driver.auth_required` | `EACCES` | `EACCES(driver, reason)` | Driver requires authentication credentials |
+| `ping.driver.concurrency_exceeded` | `EBUSY` | `EBUSY(driver)` | PingApp busy (single-concurrency browser driver). Returns `retryAfterMs: 5000` |
+| `ping.driver.timeout` | `ETIMEDOUT` | `ETIMEDOUT(driver, ms)` | Request timed out |
+| `ping.driver.rate_limited` | `EAGAIN` | `EAGAIN(driver, retryAfterMs)` | Rate limited. Returns `retryAfterMs` |
+| `ping.driver.not_implemented` | `ENOSYS` | `ENOSYS(driver, capability)` | Requested capability not implemented |
+| `ping.driver.op_not_supported` | `EOPNOTSUPP` | `EOPNOTSUPP(driver, op)` | Operation not supported |
+| `ping.driver.io_error` | `EIO` | `EIO(driver, details?)` | I/O error (connection, unexpected response) |
+| `ping.driver.canceled` | `ECANCELED` | `ECANCELED(driver)` | Request canceled |
+| `ping.gateway.bad_request` | `ENOSYS` | _(inline)_ | Missing required fields in request body |
+| `ping.gateway.internal` | `EIO` | _(inline)_ | Unexpected internal gateway error |
+| `ping.gateway.device_not_found` | `ENODEV` | _(inline)_ | Device not found via extension bridge |
 
-| Code | errno | Description |
-|------|-------|-------------|
-| `ping.router.no_driver` | `ENOENT` | No driver in the registry matches the required capabilities |
-| `ping.registry.device_not_found` | `ENODEV` | Requested device not found in registry |
-| `ping.driver.auth_required` | `EACCES` | Driver requires authentication credentials (invalid or missing API key) |
-| `ping.driver.concurrency_exceeded` | `EBUSY` | PingApp is processing another request (single-concurrency browser driver) |
-| `ping.driver.timeout` | `ETIMEDOUT` | Request exceeded timeout waiting for driver response |
-| `ping.driver.rate_limited` | `EAGAIN` | Driver is rate limiting requests |
-| `ping.driver.not_implemented` | `ENOSYS` | Requested capability not implemented by this driver |
-| `ping.driver.op_not_supported` | `EOPNOTSUPP` | Requested operation not supported |
-| `ping.driver.io_error` | `EIO` | Connection failed, unexpected response, or internal driver error |
-| `ping.driver.canceled` | `ECANCELED` | Request was canceled |
-| `ping.gateway.bad_request` | `ENOSYS` | Missing required fields in the request body |
-| `ping.gateway.internal` | `EIO` | Unexpected internal gateway error |
+> Source: `errors.ts:32-149`, `gateway.ts:670`
+
+---
 
 ### Error Examples
 
-**No matching driver:**
+**Missing required field:**
 
 ```bash
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "test", "require": {"snapshotting": true}}' | jq .
-```
-
-```json
-{
-  "errno": "ENOENT",
-  "code": "ping.router.no_driver",
-  "message": "No driver available for test",
-  "retryable": false
-}
-```
-
-**Missing prompt:**
-
-```bash
-curl -s http://localhost:3500/v1/dev/llm/prompt \
-  -H "Content-Type: application/json" \
+curl -s -X POST http://localhost:3500/v1/dev/llm/prompt \
+  -H 'Content-Type: application/json' \
   -d '{}' | jq .
 ```
 
@@ -740,14 +2468,20 @@ curl -s http://localhost:3500/v1/dev/llm/prompt \
 }
 ```
 
-**Driver timeout:**
+**Device not found:**
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-999/read \
+  -H 'Content-Type: application/json' \
+  -d '{"selector": "h1"}' | jq .
+```
 
 ```json
 {
-  "errno": "ETIMEDOUT",
-  "code": "ping.driver.timeout",
-  "message": "Driver gemini timed out after 120000ms",
-  "retryable": true
+  "errno": "ENODEV",
+  "code": "ping.gateway.device_not_found",
+  "message": "Device chrome-999 not found",
+  "retryable": false
 }
 ```
 
@@ -763,49 +2497,25 @@ curl -s http://localhost:3500/v1/dev/llm/prompt \
 }
 ```
 
-**Authentication failure:**
+**Timeout:**
 
 ```json
 {
-  "errno": "EACCES",
-  "code": "ping.driver.auth_required",
-  "message": "Driver claude: Invalid or missing API key",
-  "retryable": false
+  "errno": "ETIMEDOUT",
+  "code": "ping.driver.timeout",
+  "message": "Driver gemini timed out after 120000ms",
+  "retryable": true
 }
 ```
 
----
+**Rate limited:**
 
-## Type Definitions
-
-For the full TypeScript type definitions, see `packages/std/src/types.ts`. You can also generate the schema with:
-
-```bash
-npx tsx packages/recon/src/types-export.ts
-```
-
-### Key Types
-
-```typescript
-// Backend types
-type BackendType = 'pingapp' | 'api' | 'local';
-
-// Routing strategies
-type RoutingStrategy = 'fastest' | 'cheapest' | 'best' | 'round-robin';
-
-// Health statuses
-type HealthStatus = 'online' | 'degraded' | 'offline' | 'unknown';
-
-// POSIX error numbers
-type PingErrno =
-  | 'ENOENT' | 'EACCES' | 'EBUSY' | 'ETIMEDOUT' | 'EAGAIN'
-  | 'ENOSYS' | 'ENODEV' | 'EOPNOTSUPP' | 'EIO' | 'ECANCELED';
-
-// Streaming chunk types (for future SSE streaming endpoints)
-interface StreamChunk {
-  type: 'partial' | 'thinking' | 'complete';
-  text?: string;
-  usage?: TokenUsage;
-  durationMs?: number;
+```json
+{
+  "errno": "EAGAIN",
+  "code": "ping.driver.rate_limited",
+  "message": "Driver gemini rate limited",
+  "retryable": true,
+  "retryAfterMs": 10000
 }
 ```
