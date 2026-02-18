@@ -28,6 +28,26 @@ Most automation tools launch a fresh browser for every task. AI web agents burn 
 
 ---
 
+## See It in Action
+
+> One gateway. Every website. Your browser sessions. Zero scraping code.
+
+**Discover every connected tab:**
+
+![Health & Devices](docs/assets/01-health-and-devices.gif)
+
+**Extract structured data with natural language:**
+
+![Extract](docs/assets/03-extract.gif)
+
+**Hit 3 sites in under 5 seconds:**
+
+![Multi-Site](docs/assets/07-multi-site.gif)
+
+📽️ [Full demo index with split-screen recordings →](docs/DEMOS.md)
+
+---
+
 ## Quick Start
 
 ```bash
