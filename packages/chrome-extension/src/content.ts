@@ -1008,8 +1008,17 @@ async function handleExtract(command: {
   range?: string;
   format?: 'array' | 'object' | 'csv';
   schema?: Record<string, string>;
+  query?: string;
+  limit?: number;
 }): Promise<BridgeResponse> {
-  const { range, format = 'object', schema } = command;
+  const { range, format = 'object', schema, query, limit } = command;
+
+  // Natural language query mode: { query: "top post titles", limit: 5 }
+  if (query && typeof query === 'string') {
+    const nlResult = extractByNaturalLanguage(query);
+    const items = limit && limit > 0 ? nlResult.items.slice(0, limit) : nlResult.items;
+    return { success: true, data: { query, items, method: nlResult.method, count: items.length } };
+  }
 
   // New range-based extraction: "A1:B5" → read cells via name-box + formula-bar
   if (range) {

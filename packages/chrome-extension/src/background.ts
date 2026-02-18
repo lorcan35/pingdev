@@ -592,6 +592,11 @@ function sendDeviceResponse(requestId: string, response: BridgeResponse) {
     return;
   }
 
+  // Defensive: guard against null/undefined response (orphaned content script edge case)
+  if (!response || typeof response !== 'object') {
+    response = { success: false, error: 'Content script returned null response' };
+  }
+
   const message = {
     type: 'device_response',
     id: requestId,
