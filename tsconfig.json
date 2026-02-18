@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "Node16",
     "moduleResolution": "Node16",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -19,6 +19,8 @@
   "exclude": [
     "node_modules",
     "packages/*/dist",
-    "packages/chrome-extension/**/*"
+    "packages/chrome-extension/**/*",
+    "packages/dashboard/**/*",
+    "examples/**/*"
   ]
 }
