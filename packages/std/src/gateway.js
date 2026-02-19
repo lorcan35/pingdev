@@ -358,10 +358,13 @@ function isElementNotFoundError(err) {
   if (!isPingError(err)) return false;
   if (err.errno !== 'EIO') return false;
   const msg = (err.message ?? '').toLowerCase();
+  const details = (typeof err.details === 'string' ? err.details : '').toLowerCase();
+  const text = msg + ' ' + details;
   return (
-    msg.includes('element not found:') ||
-    msg.includes('timeout waiting for selector:') ||
-    msg.includes('no node found for selector')
+    text.includes('element not found:') ||
+    text.includes('element not found') ||
+    text.includes('timeout waiting for selector:') ||
+    text.includes('no node found for selector')
   );
 }
 

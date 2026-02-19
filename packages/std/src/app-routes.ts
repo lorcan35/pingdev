@@ -184,7 +184,7 @@ const EXTRACTORS = {
     const seller = document.querySelector('#sellerProfileTriggerId, #merchant-info')?.textContent?.trim() || '';
     const availability = document.querySelector('#availability')?.textContent?.trim() || '';
     const prime = !!document.querySelector('[class*=prime], #pantryBadge');
-    const imgs = Array.from(document.querySelectorAll('#altImages img, #imageBlock img')).slice(0, 5).map(i => (i as HTMLImageElement).src);
+    const imgs = Array.from(document.querySelectorAll('#altImages img, #imageBlock img')).slice(0, 5).map(i => i.src || '');
     const features = Array.from(document.querySelectorAll('#feature-bullets li')).map(li => li.textContent?.trim() || '').filter(Boolean).slice(0, 8);
     const asin = location.href.match(/\\/dp\\/([A-Z0-9]+)/)?.[1] || '';
     return { title, price, rating, reviews, seller, availability, prime, images: imgs, features, asin, url: location.href.split('?')[0] };
@@ -445,12 +445,24 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     if (!asin) return reply.code(400).send({ ok: false, error: 'asin required' });
     const deviceId = await findAmazonDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Amazon tab open' });
-    
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://www.amazon.ae/dp/${asin}"` });
+
+    // Detect the current Amazon domain from the tab URL (like search does)
+    const urlResult = await deviceOp(gatewayUrl, deviceId, 'getUrl', {});
+    const currentUrl = urlResult?.result || '';
+    const domainMatch = currentUrl.match(/https?:\/\/(www\.amazon\.[a-z.]+)/);
+    const amazonHost = domainMatch ? domainMatch[1] : 'www.amazon.com';
+
+    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://${amazonHost}/dp/${asin}"` });
     await delay(5000);
-    await deviceOp(gatewayUrl, deviceId, 'clean', { mode: 'full' });
-    
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.amazonProduct });
+    // Note: skip 'clean' for product pages — fullCleanup strips price/rating elements
+
+    // Try extraction, retry once if page hasn't loaded yet
+    let result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.amazonProduct });
+    const product = result?.result;
+    if (!product || (!product.title && !product.price)) {
+      await delay(3000);
+      result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.amazonProduct });
+    }
     return { ok: true, action: 'product', product: result?.result || {}, deviceId };
   });
 
