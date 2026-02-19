@@ -1919,20 +1919,24 @@ async function handleExtract(command: {
     }
 
     // Standard CSS selector path
-    // Try normal querySelector first
-    let element: Element | null = null;
+    // Try querySelectorAll first — return array if multiple matches
+    let elements: Element[] = [];
     try {
-      element = document.querySelector(selectorOrDesc);
+      elements = Array.from(document.querySelectorAll(selectorOrDesc));
     } catch { /* invalid CSS selector syntax */ }
 
     // Fix 2: Shadow DOM fallback
-    if (!element) {
-      element = deepQuerySelector(document, selectorOrDesc);
-      if (element) meta[key] = 'shadow-dom';
+    if (elements.length === 0) {
+      elements = deepQuerySelectorAll(document, selectorOrDesc);
+      if (elements.length > 0) meta[key] = 'shadow-dom';
     }
 
-    if (element) {
-      result[key] = readText(element);
+    if (elements.length > 1) {
+      // Multiple matches: return array of all texts
+      result[key] = elements.map(el => readText(el)).filter(t => t.length > 0);
+      meta[key] = meta[key] || `${elements.length}-matches`;
+    } else if (elements.length === 1) {
+      result[key] = readText(elements[0]);
     } else {
       // Fix 1: Smart Extract Fallback — try semantic extraction
       const fallbackText = smartExtractFallback(selectorOrDesc, key);
@@ -2091,13 +2095,18 @@ function normalizeKeyName(raw: string): string {
 }
 
 function parseActInstruction(instruction: string): ActStep[] {
-  // Split compound instructions: "X then Y", "X and then Y", "X; Y", "X and press/click/scroll Y"
+  // Split compound instructions: "X then Y", "X and then Y", "X; Y", "X, Y", "X and press/click/scroll Y"
   const compoundSplit = instruction.trim().split(/\s+and\s+then\s+|\s+then\s+|\s+and\s+(?=(?:press|click|tap|scroll|select|open|type|enter|hit)\s)/i)
     .map(s => s.trim()).filter(s => s.length > 0);
-  // Also split on semicolons
+  // Also split on semicolons and commas followed by action verbs
   const finalParts: string[] = [];
   for (const part of compoundSplit) {
-    finalParts.push(...part.split(/\s*;\s*/).map(s => s.trim()).filter(s => s.length > 0));
+    const semiSplit = part.split(/\s*;\s*/).map(s => s.trim()).filter(s => s.length > 0);
+    for (const sub of semiSplit) {
+      // Split on commas followed by an action verb (e.g. ", type", ", press", ", click")
+      finalParts.push(...sub.split(/\s*,\s+(?=(?:press|click|tap|scroll|select|open|type|enter|hit)\s)/i)
+        .map(s => s.trim()).filter(s => s.length > 0));
+    }
   }
   if (finalParts.length > 1) {
     const allSteps: ActStep[] = [];
@@ -2395,23 +2404,100 @@ async function executeActStep(step: ActStep): Promise<void> {
     }
     case 'type': {
       if (!step.text) { step.status = 'failed'; step.error = 'No text'; return; }
-      // Try CDP insertText first (needed for canvas/Sheets apps)
-      let typed = await cdpKeys([
-        { action: 'insertText', text: step.text },
-      ]);
-      if (!typed) {
-        await sleep(300);
+      // Handle special key sequences: \t → Tab, \n → Enter
+      // Split text on these and send key events between segments
+      const hasSpecialKeys = step.text.includes('\t') || step.text.includes('\n');
+      let typed = false;
+      if (hasSpecialKeys) {
+        // Build a CDP step sequence: insertText for text segments, keyDown/keyUp for Tab/Enter
+        const cdpSteps: Array<{ action: string; text?: string; key?: string }> = [];
+        const chars = [...step.text];
+        let buf = '';
+        for (const ch of chars) {
+          if (ch === '\t' || ch === '\n') {
+            if (buf) { cdpSteps.push({ action: 'insertText', text: buf }); buf = ''; }
+            const key = ch === '\t' ? 'Tab' : 'Enter';
+            cdpSteps.push({ action: 'keyDown', key });
+            cdpSteps.push({ action: 'keyUp', key });
+          } else {
+            buf += ch;
+          }
+        }
+        if (buf) cdpSteps.push({ action: 'insertText', text: buf });
+        typed = await cdpKeys(cdpSteps);
+      } else {
+        // Try CDP insertText first (needed for canvas/Sheets apps)
         typed = await cdpKeys([
           { action: 'insertText', text: step.text },
         ]);
+        if (!typed) {
+          await sleep(300);
+          typed = await cdpKeys([
+            { action: 'insertText', text: step.text },
+          ]);
+        }
       }
       // Fallback to handleType for regular pages where CDP isn't available
       if (!typed) {
-        const activeEl = document.activeElement;
-        if (activeEl && activeEl !== document.body) {
-          const typeRes = await handleType('', step.text);
-          step.status = typeRes.success ? 'done' : 'failed';
-          if (!typeRes.success) step.error = typeRes.error || 'Type fallback failed';
+        let activeEl = document.activeElement;
+
+        // Helper: find a visible editable element (input/textarea/contenteditable)
+        const findEditableInput = (): HTMLElement | null => {
+          // 1. Check inside the currently focused element (e.g. YouTube search wrapper)
+          if (activeEl && activeEl !== document.body && activeEl !== document.documentElement) {
+            const child = (activeEl as HTMLElement).querySelector?.(
+              'input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), [contenteditable="true"]'
+            );
+            if (child) return child as HTMLElement;
+            // Also check shadow DOM of the focused element
+            if ((activeEl as any).shadowRoot) {
+              const shadowChild = (activeEl as any).shadowRoot.querySelector(
+                'input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), [contenteditable="true"]'
+              );
+              if (shadowChild) return shadowChild as HTMLElement;
+            }
+          }
+          // 2. Search the whole page including shadow DOM
+          const candidates = Array.from(document.querySelectorAll(
+            'input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), [contenteditable="true"]'
+          ));
+          const shadowCandidates = deepQuerySelectorAll(document, 'input:not([type="hidden"]):not([disabled])');
+          const allCandidates = [...candidates, ...shadowCandidates];
+          return (allCandidates.find(el => {
+            const rect = (el as HTMLElement).getBoundingClientRect?.();
+            return rect && rect.width > 0 && rect.height > 0;
+          }) as HTMLElement) || null;
+        };
+
+        // If nothing focused or focused element is not editable, find an editable input
+        if (!activeEl || activeEl === document.body || activeEl === document.documentElement) {
+          const editable = findEditableInput();
+          if (editable) {
+            editable.focus();
+            editable.click();
+            await sleep(100);
+            activeEl = document.activeElement;
+          }
+        }
+
+        // Try typing into the active element
+        let typeRes = await handleType('', step.text);
+        if (!typeRes.success && typeRes.error?.includes('not editable')) {
+          // Active element isn't editable — find an editable child/nearby input
+          const editable = findEditableInput();
+          if (editable) {
+            editable.focus();
+            editable.click();
+            await sleep(100);
+            typeRes = await handleType('', step.text);
+          }
+        }
+
+        if (typeRes.success) {
+          step.status = 'done';
+        } else if (activeEl && activeEl !== document.body && activeEl !== document.documentElement) {
+          step.status = 'failed';
+          step.error = typeRes.error || 'Type fallback failed';
         } else {
           step.status = 'failed';
           step.error = 'CDP type failed and no focused element for fallback';
