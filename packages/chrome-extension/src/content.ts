@@ -86,9 +86,13 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
       case 'extract':
         response = await handleExtract(command);
         break;
-      case 'act':
-        response = await handleAct(command.instruction);
+      case 'act': {
+        // CANONICAL field name is `instruction`; accept `action` as a fallback alias.
+        const instruction = command.instruction || command.action;
+        if (!instruction) response = { success: false, error: 'No instruction/action provided' };
+        else response = await handleAct(instruction);
         break;
+      }
       case 'eval': {
         // CANONICAL field name is `expression`; keep `code` as a fallback alias.
         const code = command.expression || command.code;
