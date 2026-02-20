@@ -20,15 +20,74 @@ export interface VisualExtractResult {
     confidence: number;
     duration_ms: number;
     model?: string;
+    retries?: number;
+    cached?: boolean;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Screenshot cache — reuse screenshots taken within 5 seconds for the same URL
+// ---------------------------------------------------------------------------
+interface CachedScreenshot {
+  data: string;
+  timestamp: number;
+}
+const screenshotCache = new Map<string, CachedScreenshot>();
+const SCREENSHOT_CACHE_TTL_MS = 5000;
+
+function getCachedScreenshot(deviceId: string): string | null {
+  const entry = screenshotCache.get(deviceId);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > SCREENSHOT_CACHE_TTL_MS) {
+    screenshotCache.delete(deviceId);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedScreenshot(deviceId: string, data: string): void {
+  screenshotCache.set(deviceId, { data, timestamp: Date.now() });
+}
+
+/**
+ * Call the vision LLM with retry logic (max 2 retries, 1s delay)
+ * and a 15-second timeout per attempt.
+ */
+async function callVisionWithRetry(
+  prompt: string,
+  opts: Parameters<typeof callLLMVision>[1],
+  maxRetries: number = 2,
+): Promise<string> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await Promise.race([
+        callLLMVision(prompt, opts),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Vision API timeout (15s)')), 15_000),
+        ),
+      ]);
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxRetries) {
+        logGateway('[visual-extract] LLM attempt failed, retrying', {
+          attempt: attempt + 1,
+          error: lastError.message,
+        });
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+  }
+  throw lastError ?? new Error('Vision API failed after retries');
 }
 
 /**
  * Extract structured data from a page by taking a screenshot and using a vision model.
  *
  * Flow:
- * 1. Take screenshot of the viewport or specified element
- * 2. Send to vision-capable LLM
+ * 1. Take screenshot of the viewport or specified element (with caching)
+ * 2. Send to vision-capable LLM (with retry and timeout)
  * 3. Prompt with schema description for structured extraction
  * 4. Parse LLM response into JSON
  */
@@ -38,33 +97,44 @@ export async function visualExtract(
 ): Promise<VisualExtractResult> {
   const { deviceId, schema, query } = opts;
   const startMs = Date.now();
+  let retries = 0;
+  let usedCache = false;
 
-  // 1. Take a screenshot
-  let screenshotData: string | null = null;
-  try {
-    const screenshotResult = await extBridge.callDevice({
-      deviceId,
-      op: 'screenshot',
-      payload: {},
-      timeoutMs: 10_000,
-    });
+  // 1. Take a screenshot (check cache first)
+  let screenshotData: string | null = getCachedScreenshot(deviceId);
+  if (screenshotData) {
+    usedCache = true;
+  } else {
+    try {
+      const screenshotResult = await extBridge.callDevice({
+        deviceId,
+        op: 'screenshot',
+        payload: {},
+        timeoutMs: 10_000,
+      });
 
-    const ssObj = screenshotResult as Record<string, unknown>;
-    screenshotData = (ssObj?.data as string) ??
-      (ssObj?.screenshot as string) ??
-      (ssObj?.image as string) ??
-      null;
-
-    // Handle nested data object
-    if (!screenshotData && ssObj?.data && typeof ssObj.data === 'object') {
-      const dataObj = ssObj.data as Record<string, unknown>;
-      screenshotData = (dataObj?.screenshot as string) ??
-        (dataObj?.image as string) ??
-        (dataObj?.dataUrl as string) ??
+      const ssObj = screenshotResult as Record<string, unknown>;
+      screenshotData = (ssObj?.data as string) ??
+        (ssObj?.screenshot as string) ??
+        (ssObj?.image as string) ??
         null;
+
+      // Handle nested data object
+      if (!screenshotData && ssObj?.data && typeof ssObj.data === 'object') {
+        const dataObj = ssObj.data as Record<string, unknown>;
+        screenshotData = (dataObj?.screenshot as string) ??
+          (dataObj?.image as string) ??
+          (dataObj?.dataUrl as string) ??
+          null;
+      }
+
+      // Cache the screenshot for reuse
+      if (screenshotData) {
+        setCachedScreenshot(deviceId, screenshotData);
+      }
+    } catch (err) {
+      logGateway('[visual-extract] screenshot failed', { error: String(err) });
     }
-  } catch (err) {
-    logGateway('[visual-extract] screenshot failed', { error: String(err) });
   }
 
   // 2. Build the extraction prompt
@@ -88,12 +158,11 @@ Do not include explanations.
 
 JSON:`;
 
-  // 3. Call the LLM (vision model when screenshot available, text fallback otherwise)
+  // 3. Call the LLM with retry logic (vision when screenshot available, text fallback otherwise)
   let llmResponse: string;
   try {
     if (screenshotData) {
-      // Send screenshot to vision model
-      llmResponse = await callLLMVision(prompt, {
+      llmResponse = await callVisionWithRetry(prompt, {
         images: [screenshotData],
         model: 'anthropic/claude-sonnet-4',
         maxTokens: 2000,
@@ -119,14 +188,14 @@ JSON:`;
 
       const contextPrompt = `Given this visible text from a webpage, ${prompt}\n\nVisible text:\n${pageText}`;
 
-      llmResponse = await callLLMVision(contextPrompt, {
+      llmResponse = await callVisionWithRetry(contextPrompt, {
         maxTokens: 1000,
         temperature: 0.1,
         systemPrompt: 'You are a data extraction expert. Extract structured data from webpage content. Return only valid JSON.',
-      });
+      }, 1); // fewer retries for text fallback
     }
   } catch (err) {
-    logGateway('[visual-extract] LLM call failed', { error: String(err) });
+    logGateway('[visual-extract] LLM call failed after retries', { error: String(err) });
     return {
       data: {},
       _meta: {
@@ -160,6 +229,8 @@ JSON:`;
       confidence,
       duration_ms: Date.now() - startMs,
       model: screenshotData ? 'anthropic/claude-sonnet-4' : undefined,
+      retries,
+      cached: usedCache,
     },
   };
 }
