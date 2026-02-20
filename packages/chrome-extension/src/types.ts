@@ -20,7 +20,23 @@ export type BridgeCommand =
   | { type: 'act'; instruction: string; stealth?: boolean }
   | { type: 'extract'; range?: string; format?: 'array' | 'object' | 'csv'; schema?: Record<string, string>; query?: string; limit?: number; stealth?: boolean }
   | { type: 'watch'; schema: Record<string, string>; interval?: number; stealth?: boolean }
-  | { type: 'record_api_action'; action: { type: string; selector?: string; text?: string; key?: string; url?: string; timestamp: number; source: string }; stealth?: boolean };
+  | { type: 'record_api_action'; action: { type: string; selector?: string; text?: string; key?: string; url?: string; timestamp: number; source: string }; stealth?: boolean }
+  // Phase 1 core ops
+  | { type: 'fill'; fields: Record<string, string>; stealth?: boolean }
+  | { type: 'wait'; condition: 'visible' | 'hidden' | 'text' | 'textChange' | 'networkIdle' | 'domStable' | 'exists'; selector?: string; text?: string; timeout?: number; stealth?: boolean }
+  | { type: 'table'; selector?: string; index?: number; stealth?: boolean }
+  | { type: 'dialog'; action: 'dismiss' | 'accept' | 'detect' | 'interact'; text?: string; stealth?: boolean }
+  | { type: 'paginate'; action: 'detect' | 'next' | 'prev' | 'goto'; page?: number; stealth?: boolean }
+  | { type: 'selectOption'; selector: string; value?: string; text?: string; search?: string; values?: string[]; stealth?: boolean }
+  // Phase 2 core ops
+  | { type: 'hover'; selector: string; duration_ms?: number; stealth?: boolean }
+  | { type: 'assert'; assertions: Array<{ type: string; selector?: string; expected?: string; attribute?: string }>; stealth?: boolean }
+  | { type: 'network'; action: 'start' | 'stop' | 'list'; filter?: { url?: string; method?: string }; stealth?: boolean }
+  | { type: 'storage'; action: 'get' | 'set' | 'delete' | 'list'; store: 'local' | 'session' | 'cookies'; key?: string; value?: string; stealth?: boolean }
+  | { type: 'capture'; format: 'pdf' | 'mhtml' | 'har' | 'dom'; stealth?: boolean }
+  | { type: 'upload'; selector: string; filePath: string; stealth?: boolean }
+  | { type: 'download'; url?: string; selector?: string; savePath?: string; stealth?: boolean }
+  | { type: 'annotate'; annotations: Array<{ selector: string; label?: string; color?: string; style?: 'box' | 'highlight' | 'arrow' }>; stealth?: boolean };
 
 export interface BridgeResponse {
   success: boolean;

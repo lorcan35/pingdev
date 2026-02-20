@@ -1213,6 +1213,48 @@ async function runDoctorCommand(argv: string[]) {
   }
 }
 
+// Helper: generic device op CLI runner
+async function runDeviceOp(
+  op: string,
+  argv: string[],
+  parseBody: (argv: string[]) => Record<string, unknown> | null,
+  usage: string,
+) {
+  const device = argv.filter((a) => !a.startsWith('--'))[0];
+  if (!device) {
+    console.error(`Usage: ${usage}`);
+    process.exit(1);
+  }
+  const body = parseBody(argv);
+  if (body === null) {
+    console.error(`Usage: ${usage}`);
+    process.exit(1);
+  }
+  const flags = parseFlags(argv);
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+  const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/${op}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json() as any;
+  if (!res.ok) {
+    console.error(`[${op}] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+  console.log(JSON.stringify(data.result ?? data, null, 2));
+}
+
+function cliErr(cmd: string) {
+  return (err: Error) => {
+    console.error(`[${cmd}] Fatal error: ${err.message || err}`);
+    if (err.stack) console.error(err.stack);
+    process.exit(1);
+  };
+}
+
 switch (command) {
   case 'recon':
     runReconCommand(args.slice(1)).catch((err) => {
@@ -1371,6 +1413,64 @@ switch (command) {
       process.exit(1);
     });
     break;
+  case 'fill':
+    runDeviceOp('fill', args.slice(1), (argv) => {
+      const fieldsStr = argv.filter((a) => !a.startsWith('--')).slice(1).join(' ');
+      if (!fieldsStr) return null;
+      try { return { fields: JSON.parse(fieldsStr) }; } catch { return null; }
+    }, 'pingdev fill <device> \'{"Email": "user@test.com"}\'').catch(cliErr('fill'));
+    break;
+  case 'wait':
+    runDeviceOp('wait', args.slice(1), (argv) => {
+      const flags = parseFlags(argv);
+      const condition = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!condition) return null;
+      const body: Record<string, unknown> = { condition };
+      if (typeof flags['selector'] === 'string') body.selector = flags['selector'];
+      if (typeof flags['text'] === 'string') body.text = flags['text'];
+      if (typeof flags['timeout'] === 'string') body.timeout = parseInt(flags['timeout'] as string, 10);
+      return body;
+    }, 'pingdev wait <device> <condition> [--selector sel] [--text txt] [--timeout ms]').catch(cliErr('wait'));
+    break;
+  case 'table':
+    runDeviceOp('table', args.slice(1), (argv) => {
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = {};
+      if (typeof flags['selector'] === 'string') body.selector = flags['selector'];
+      if (typeof flags['index'] === 'string') body.index = parseInt(flags['index'] as string, 10);
+      return body;
+    }, 'pingdev table <device> [--selector sel] [--index n]').catch(cliErr('table'));
+    break;
+  case 'dialog':
+    runDeviceOp('dialog', args.slice(1), (argv) => {
+      const action = argv.filter((a) => !a.startsWith('--'))[1] || 'detect';
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = { action };
+      if (typeof flags['text'] === 'string') body.text = flags['text'];
+      return body;
+    }, 'pingdev dialog <device> [detect|dismiss|accept|interact] [--text btn]').catch(cliErr('dialog'));
+    break;
+  case 'paginate':
+    runDeviceOp('paginate', args.slice(1), (argv) => {
+      const action = argv.filter((a) => !a.startsWith('--'))[1] || 'detect';
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = { action };
+      if (typeof flags['page'] === 'string') body.page = parseInt(flags['page'] as string, 10);
+      return body;
+    }, 'pingdev paginate <device> [detect|next|prev|goto] [--page n]').catch(cliErr('paginate'));
+    break;
+  case 'select-option':
+    runDeviceOp('selectOption', args.slice(1), (argv) => {
+      const flags = parseFlags(argv);
+      const selector = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!selector) return null;
+      const body: Record<string, unknown> = { selector };
+      if (typeof flags['value'] === 'string') body.value = flags['value'];
+      if (typeof flags['text'] === 'string') body.text = flags['text'];
+      if (typeof flags['search'] === 'string') body.search = flags['search'];
+      return body;
+    }, 'pingdev select-option <device> <selector> [--value v] [--text t] [--search s]').catch(cliErr('select-option'));
+    break;
   case 'init':
     console.log('pingdev init — not yet implemented (Phase 2)');
     break;
@@ -1397,6 +1497,14 @@ switch (command) {
     console.log('  mcp [--sse] [--port] Start MCP server for Claude Desktop / Cursor');
     console.log('  init <url>           Scaffold a new PingApp for the given URL');
     console.log('  health               Check system health');
+    console.log('');
+    console.log('Core Ops:');
+    console.log('  fill <dev> <json>      Smart form filling');
+    console.log('  wait <dev> <cond>      Smart conditional wait');
+    console.log('  table <dev>            Extract table data');
+    console.log('  dialog <dev> [action]  Handle dialogs/modals/cookie banners');
+    console.log('  paginate <dev> [act]   Auto-pagination');
+    console.log('  select-option <dev>    Complex dropdown selection');
     console.log('');
     console.log('Lifecycle:');
     console.log('  up [--daemon]          Start gateway + Chrome with PingOS extension');

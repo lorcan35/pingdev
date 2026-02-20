@@ -3,6 +3,10 @@
 import type { BridgeCommand, BridgeResponse, RecordedAction, WorkflowStep, WorkflowExport } from './types';
 import { humanClick, humanType, withJitter } from './stealth';
 import { fullCleanup, injectAdBlockCSS, removeAdElements, detectClutter } from './adblock';
+import { extractStructuredData } from './structured-data';
+import { autoParseValue, parseExtractResult, validateExtractResult } from './type-parser';
+import type { ParsedType } from './type-parser';
+import { handleFill, handleWait, handleTable, handleDialog, handlePaginate, handleSelectOption } from './ops';
 
 // ============================================================================
 // Part A: Bridge Executor
@@ -183,6 +187,25 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         }
         break;
       }
+      // Phase 1 core ops
+      case 'fill':
+        response = await handleFill(command as any);
+        break;
+      case 'wait':
+        response = await handleWait(command as any);
+        break;
+      case 'table':
+        response = await handleTable(command as any);
+        break;
+      case 'dialog':
+        response = await handleDialog(command as any);
+        break;
+      case 'paginate':
+        response = await handlePaginate(command as any);
+        break;
+      case 'selectOption':
+        response = await handleSelectOption(command as any);
+        break;
       default:
         response = { success: false, error: 'Unknown command type' };
         break;
@@ -556,24 +579,99 @@ async function readCellRange(startRef: string, endRef: string): Promise<BridgeRe
 }
 
 // ---------------------------------------------------------------------------
-// Fix 2: Shadow DOM Piercing — traverse shadow roots for selector matching
+// Level 8: Shadow DOM Piercing — traverse shadow roots with >>> combinator
 // ---------------------------------------------------------------------------
 
-function deepQuerySelectorAll(root: Document | Element | ShadowRoot, selector: string): Element[] {
+// Cache for discovered shadow roots to avoid repeated traversal
+const shadowRootCache = new WeakMap<Element, ShadowRoot>();
+
+/**
+ * Get shadow root for an element, checking cache first.
+ * Handles both open and (where possible) closed shadow roots.
+ */
+function getShadowRoot(el: Element): ShadowRoot | null {
+  if (shadowRootCache.has(el)) return shadowRootCache.get(el)!;
+  if (el.shadowRoot) {
+    shadowRootCache.set(el, el.shadowRoot);
+    return el.shadowRoot;
+  }
+  return null;
+}
+
+/**
+ * Parse a selector for >>> piercing combinator or ::shadow syntax.
+ * "host-element >>> inner-selector" → ["host-element", "inner-selector"]
+ * "host-element::shadow inner-selector" → ["host-element", "inner-selector"]
+ */
+function parsePiercingSelector(selector: string): string[] | null {
+  // >>> combinator
+  if (selector.includes('>>>')) {
+    return selector.split('>>>').map(s => s.trim()).filter(s => s.length > 0);
+  }
+  // ::shadow syntax
+  if (selector.includes('::shadow')) {
+    return selector.split('::shadow').map(s => s.trim()).filter(s => s.length > 0);
+  }
+  return null;
+}
+
+/**
+ * Execute a piercing selector: "host >>> child" finds host, enters its shadow DOM,
+ * then queries for child within it.
+ */
+function piercingQuerySelectorAll(root: Document | Element | ShadowRoot, parts: string[]): Element[] {
+  if (parts.length === 0) return [];
+  if (parts.length === 1) {
+    try { return Array.from(root.querySelectorAll(parts[0])); }
+    catch { return []; }
+  }
+
+  // Find host elements matching the first part
+  let hosts: Element[];
+  try { hosts = Array.from(root.querySelectorAll(parts[0])); }
+  catch { return []; }
+
+  // If no direct matches, try deep search for the host
+  if (hosts.length === 0) {
+    hosts = deepQuerySelectorAllBasic(root, parts[0]);
+  }
+
+  const results: Element[] = [];
+  const remainingParts = parts.slice(1);
+
+  for (const host of hosts) {
+    const shadow = getShadowRoot(host);
+    if (shadow) {
+      if (remainingParts.length === 1) {
+        try {
+          results.push(...Array.from(shadow.querySelectorAll(remainingParts[0])));
+        } catch { /* invalid selector */ }
+      } else {
+        // Recursive piercing for multi-level: a >>> b >>> c
+        results.push(...piercingQuerySelectorAll(shadow, remainingParts));
+      }
+    }
+  }
+
+  return results;
+}
+
+/** Basic deep query without piercing support (used internally). */
+function deepQuerySelectorAllBasic(root: Document | Element | ShadowRoot, selector: string): Element[] {
   const results: Element[] = [];
   try {
     results.push(...Array.from(root.querySelectorAll(selector)));
   } catch { /* invalid selector */ }
 
-  // Traverse shadow roots
   const traverse = (node: Document | Element | ShadowRoot) => {
-    const children = node instanceof Document ? Array.from(node.querySelectorAll('*')) : Array.from(node.querySelectorAll('*'));
+    const children = Array.from(node.querySelectorAll('*'));
     for (const child of children) {
-      if (child.shadowRoot) {
+      const shadow = getShadowRoot(child);
+      if (shadow) {
         try {
-          results.push(...Array.from(child.shadowRoot.querySelectorAll(selector)));
+          results.push(...Array.from(shadow.querySelectorAll(selector)));
         } catch { /* invalid selector */ }
-        traverse(child.shadowRoot);
+        traverse(shadow);
       }
     }
   };
@@ -581,7 +679,26 @@ function deepQuerySelectorAll(root: Document | Element | ShadowRoot, selector: s
   return results;
 }
 
+function deepQuerySelectorAll(root: Document | Element | ShadowRoot, selector: string): Element[] {
+  // Level 8: Check for >>> piercing combinator or ::shadow syntax
+  const parts = parsePiercingSelector(selector);
+  if (parts) {
+    return piercingQuerySelectorAll(root, parts);
+  }
+
+  // Standard deep query — traverse all shadow roots
+  return deepQuerySelectorAllBasic(root, selector);
+}
+
 function deepQuerySelector(root: Document | Element | ShadowRoot, selector: string): Element | null {
+  // Level 8: Check for >>> piercing combinator
+  const parts = parsePiercingSelector(selector);
+  if (parts) {
+    const results = piercingQuerySelectorAll(root, parts);
+    return results[0] || null;
+  }
+
+  // Standard path
   try {
     const result = root.querySelector(selector);
     if (result) return result;
@@ -591,12 +708,13 @@ function deepQuerySelector(root: Document | Element | ShadowRoot, selector: stri
   const traverse = (node: Document | Element | ShadowRoot): Element | null => {
     const children = Array.from(node.querySelectorAll('*'));
     for (const child of children) {
-      if (child.shadowRoot) {
+      const shadow = getShadowRoot(child);
+      if (shadow) {
         try {
-          const found = child.shadowRoot.querySelector(selector);
+          const found = shadow.querySelector(selector);
           if (found) return found;
         } catch { /* invalid selector */ }
-        const deeper = traverse(child.shadowRoot);
+        const deeper = traverse(shadow);
         if (deeper) return deeper;
       }
     }
@@ -1850,12 +1968,264 @@ function smartExtractFallback(selector: string, key: string): string {
   return '';
 }
 
+// ---------------------------------------------------------------------------
+// Level 2: Auto-extract helpers — page type detection + default schemas
+// ---------------------------------------------------------------------------
+
+type AutoPageType = 'product' | 'search' | 'article' | 'feed' | 'table' | 'form' | 'chat' | 'unknown';
+
+function detectPageTypeFromSnapshot(snapshot: Record<string, unknown>): AutoPageType {
+  const url = (snapshot.url as string || '').toLowerCase();
+  const title = (snapshot.title as string || '').toLowerCase();
+  const jsonLd = (snapshot.jsonLd as Record<string, unknown>[]) || [];
+  const meta = (snapshot.meta as Record<string, string>) || {};
+  const tables = (snapshot.tables as unknown[]) || [];
+  const forms = (snapshot.forms as unknown[]) || [];
+
+  // JSON-LD type detection
+  for (const item of jsonLd) {
+    const type = ((item['@type'] as string) || '').toLowerCase();
+    if (/product/.test(type)) return 'product';
+    if (/article|newsarticle|blogposting/.test(type)) return 'article';
+    if (/searchresults/.test(type)) return 'search';
+  }
+
+  // OG type
+  const ogType = (meta['og:type'] || '').toLowerCase();
+  if (ogType === 'product') return 'product';
+  if (/article/.test(ogType)) return 'article';
+
+  // URL hints
+  if (/\/product|\/item|\/dp\/|\/gp\//.test(url)) return 'product';
+  if (/search|query|results|\?q=|\?s=/.test(url)) return 'search';
+  if (/\/article|\/post|\/blog|\/news|\/story/.test(url)) return 'article';
+  if (/chat|gemini|claude|chatgpt/.test(url)) return 'chat';
+  if (/feed|timeline/.test(url)) return 'feed';
+
+  // DOM structure hints
+  if (tables.length > 0) return 'table';
+  if (forms.length > 0) return 'form';
+
+  // Check for repeated groups (feed/search indicators)
+  const elements = (snapshot.elements as Array<Record<string, unknown>>) || [];
+  const articleCount = elements.filter(e => e.tag === 'article').length;
+  if (articleCount >= 3) return 'feed';
+
+  return 'unknown';
+}
+
+function getDefaultSchemaForPageType(pageType: AutoPageType, snapshot: Record<string, unknown>): Record<string, string> | null {
+  switch (pageType) {
+    case 'product':
+      return {
+        title: 'h1, [data-testid="title"], .product-title, .product-name',
+        price: '[data-testid="price"], .price, .product-price, [itemprop="price"], .a-price .a-offscreen',
+        description: '[data-testid="description"], .product-description, [itemprop="description"], #productDescription',
+        image: 'img[data-testid="product-image"], .product-image img, [itemprop="image"]',
+        rating: '[data-testid="rating"], .rating, [itemprop="ratingValue"], .a-icon-alt',
+        availability: '[data-testid="availability"], .availability, [itemprop="availability"], #availability',
+      };
+    case 'article':
+      return {
+        title: 'h1, article h1, .article-title, .post-title',
+        author: '[rel="author"], .author, .byline, [itemprop="author"], .post-author',
+        date: 'time, [itemprop="datePublished"], .date, .post-date, .article-date',
+        content: 'article, .article-body, .post-content, .entry-content, [itemprop="articleBody"]',
+      };
+    case 'search':
+      return {
+        results: '.search-result, .g, .result, [data-testid="result"]',
+        titles: '.search-result h2, .search-result h3, .g h3, .result-title',
+        links: '.search-result a, .g a, .result a',
+      };
+    case 'feed':
+      return {
+        posts: 'article, .post, .feed-item, [role="article"]',
+        titles: 'article h2, article h3, .post-title, .feed-title',
+        authors: '.author, .username, [rel="author"]',
+      };
+    case 'table': {
+      const tables = (snapshot.tables as Array<Record<string, unknown>>) || [];
+      if (tables.length > 0 && tables[0].selector) {
+        const sel = tables[0].selector as string;
+        return {
+          headers: `${sel} th`,
+          rows: `${sel} tr`,
+          cells: `${sel} td`,
+        };
+      }
+      return { headers: 'table th', rows: 'table tr', cells: 'table td' };
+    }
+    case 'chat':
+      return {
+        messages: '.message, [data-testid="message"], [role="presentation"]',
+        input: 'textarea, [contenteditable="true"], [role="textbox"]',
+      };
+    case 'form': {
+      const forms = (snapshot.forms as Array<Record<string, unknown>>) || [];
+      if (forms.length > 0) {
+        return {
+          inputs: 'form input, form textarea, form select',
+          labels: 'form label',
+          buttons: 'form button, form [type="submit"]',
+        };
+      }
+      return null;
+    }
+    default:
+      return {
+        title: 'h1',
+        headings: 'h2, h3',
+        links: 'a[href]',
+        images: 'img[src]',
+      };
+  }
+}
+
+function calculateAutoConfidence(
+  structured: { fieldCount: number; confidence: number },
+  autoData: Record<string, unknown>,
+  pageType: AutoPageType,
+): number {
+  let confidence = 0;
+
+  // Structured data contributes significantly
+  if (structured.fieldCount > 5) confidence += 0.4;
+  else if (structured.fieldCount > 0) confidence += 0.2;
+
+  // Extracted fields count
+  const dataKeys = Object.keys(autoData).filter(k => !k.startsWith('_'));
+  if (dataKeys.length > 5) confidence += 0.3;
+  else if (dataKeys.length > 2) confidence += 0.2;
+  else if (dataKeys.length > 0) confidence += 0.1;
+
+  // Known page type is a good signal
+  if (pageType !== 'unknown') confidence += 0.2;
+
+  // Non-empty values boost confidence
+  const nonEmpty = dataKeys.filter(k => {
+    const v = autoData[k];
+    if (Array.isArray(v)) return v.length > 0;
+    return v !== '' && v !== null && v !== undefined;
+  });
+  if (nonEmpty.length === dataKeys.length && dataKeys.length > 0) confidence += 0.1;
+
+  return Math.min(1.0, confidence);
+}
+
+// ---------------------------------------------------------------------------
+// Level 6: Nested/Recursive Extract — hierarchical data extraction
+// ---------------------------------------------------------------------------
+
+const MAX_NESTING_DEPTH = 5;
+
+function extractNested(
+  schema: Record<string, unknown>,
+  scope: Document | Element,
+  depth: number,
+): unknown {
+  if (depth >= MAX_NESTING_DEPTH) return null;
+
+  const container = schema._container as string | undefined;
+  const isArray = false; // determined by caller via key[]
+
+  if (container) {
+    // Find all matching containers
+    let containers: Element[];
+    try {
+      containers = Array.from(scope.querySelectorAll(container));
+    } catch {
+      containers = deepQuerySelectorAll(scope, container);
+    }
+
+    const items: Record<string, unknown>[] = [];
+    for (const containerEl of containers) {
+      const item: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(schema)) {
+        if (key === '_container') continue;
+
+        const isArrayKey = key.endsWith('[]');
+        const cleanKey = isArrayKey ? key.slice(0, -2) : key;
+
+        if (typeof value === 'object' && value !== null) {
+          // Recurse for nested objects
+          item[cleanKey] = extractNested(value as Record<string, unknown>, containerEl, depth + 1);
+        } else if (typeof value === 'string') {
+          // Extract from within the container scope
+          const selectorParts = value.split('@');
+          const sel = selectorParts[0];
+          const attr = selectorParts[1]; // optional attribute extraction
+
+          try {
+            const els = Array.from(containerEl.querySelectorAll(sel));
+            if (els.length === 0) {
+              // Shadow DOM fallback
+              const shadowEls = deepQuerySelectorAll(containerEl, sel);
+              if (shadowEls.length > 0) {
+                if (isArrayKey || shadowEls.length > 1) {
+                  item[cleanKey] = shadowEls.map(el => attr ? (el.getAttribute(attr) || '') : readText(el));
+                } else {
+                  item[cleanKey] = attr ? (shadowEls[0].getAttribute(attr) || '') : readText(shadowEls[0]);
+                }
+              } else {
+                item[cleanKey] = isArrayKey ? [] : '';
+              }
+            } else if (isArrayKey || els.length > 1) {
+              item[cleanKey] = els.map(el => attr ? (el.getAttribute(attr) || '') : readText(el)).filter(t => t !== '');
+            } else {
+              item[cleanKey] = attr ? (els[0].getAttribute(attr) || '') : readText(els[0]);
+            }
+          } catch {
+            item[cleanKey] = isArrayKey ? [] : '';
+          }
+        }
+      }
+      items.push(item);
+    }
+    return items;
+  }
+
+  // No container — just extract fields from the scope directly
+  const item: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    const isArrayKey = key.endsWith('[]');
+    const cleanKey = isArrayKey ? key.slice(0, -2) : key;
+
+    if (typeof value === 'object' && value !== null) {
+      item[cleanKey] = extractNested(value as Record<string, unknown>, scope, depth + 1);
+    } else if (typeof value === 'string') {
+      const selectorParts = value.split('@');
+      const sel = selectorParts[0];
+      const attr = selectorParts[1];
+
+      try {
+        const els = Array.from(scope.querySelectorAll(sel));
+        if (isArrayKey || els.length > 1) {
+          item[cleanKey] = els.map(el => attr ? (el.getAttribute(attr) || '') : readText(el)).filter(t => t !== '');
+        } else if (els.length === 1) {
+          item[cleanKey] = attr ? (els[0].getAttribute(attr) || '') : readText(els[0]);
+        } else {
+          item[cleanKey] = isArrayKey ? [] : '';
+        }
+      } catch {
+        item[cleanKey] = isArrayKey ? [] : '';
+      }
+    }
+  }
+  return item;
+}
+
 async function handleExtract(command: {
   range?: string;
   format?: 'array' | 'object' | 'csv';
-  schema?: Record<string, string>;
+  schema?: Record<string, string | Record<string, unknown>>;
   query?: string;
   limit?: number;
+  strategy?: string;
+  paginate?: boolean;
+  maxPages?: number;
+  delay?: number;
+  fallback?: string;
 }): Promise<BridgeResponse> {
   const { range, format = 'object', schema, query, limit } = command;
 
@@ -1864,6 +2234,69 @@ async function handleExtract(command: {
     const nlResult = extractByNaturalLanguage(query);
     const items = limit && limit > 0 ? nlResult.items.slice(0, limit) : nlResult.items;
     return { success: true, data: { query, items, method: nlResult.method, count: items.length } };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Level 2: Zero-Config Auto-Extract — empty body triggers smart extraction
+  // ---------------------------------------------------------------------------
+  const schemaIsEmpty = !schema || (typeof schema === 'object' && Object.keys(schema).length === 0);
+  if (schemaIsEmpty && !range && !query) {
+    const startMs = Date.now();
+
+    // 1. Check for structured data first (JSON-LD, OG, microdata — 0ms DOM walking)
+    const structured = extractStructuredData();
+
+    // 2. Run discover to detect page type
+    const snapshot = collectDomSnapshot();
+    const pageType = detectPageTypeFromSnapshot(snapshot);
+
+    // 3. Apply default schema for the detected page type
+    const defaultSchema = getDefaultSchemaForPageType(pageType, snapshot);
+    const autoData: Record<string, unknown> = {};
+    const autoSources: Record<string, string> = {};
+
+    // Start with structured data
+    if (structured.fieldCount > 0) {
+      for (const [key, value] of Object.entries(structured.data)) {
+        if (key.startsWith('_')) continue; // skip internal keys
+        autoData[key] = value;
+        autoSources[key] = structured.sources[key] || 'structured';
+      }
+    }
+
+    // Fill remaining fields from DOM-based default schema
+    if (defaultSchema) {
+      for (const [key, selector] of Object.entries(defaultSchema)) {
+        if (autoData[key]) continue; // already have from structured data
+        try {
+          const els = document.querySelectorAll(selector);
+          if (els.length > 1) {
+            autoData[key] = Array.from(els).map(el => readText(el)).filter(t => t.length > 0);
+          } else if (els.length === 1) {
+            autoData[key] = readText(els[0]);
+          }
+          if (autoData[key]) autoSources[key] = 'css';
+        } catch { /* invalid selector */ }
+      }
+    }
+
+    const durationMs = Date.now() - startMs;
+    const confidence = calculateAutoConfidence(structured, autoData, pageType);
+
+    return {
+      success: true,
+      data: {
+        data: autoData,
+        _meta: {
+          strategy: structured.fieldCount > 0 ? 'structured+css' : 'css',
+          confidence,
+          sources: autoSources,
+          duration_ms: durationMs,
+          auto: true,
+          pageType,
+        },
+      },
+    };
   }
 
   // New range-based extraction: "A1:B5" → read cells via name-box + formula-bar
@@ -1920,22 +2353,53 @@ async function handleExtract(command: {
   }
 
   // Schema-based extraction: { key: selector_or_description } → { key: text }
-  const result: Record<string, string | string[]> = {};
+  const startMs = Date.now();
+  const result: Record<string, unknown> = {};
   const meta: Record<string, string> = {};
+  const selectorsUsed: Record<string, string> = {};
+
+  // Level 4: Check structured data first (0ms, no DOM walking)
+  const structured = extractStructuredData();
+
   const entries =
     schema && typeof schema === 'object'
-      ? Object.entries(schema as Record<string, string>)
-      : ([] as Array<[string, string]>);
+      ? Object.entries(schema as Record<string, string | Record<string, unknown>>)
+      : ([] as Array<[string, string | Record<string, unknown>]>);
 
-  for (const [key, selectorOrDesc] of entries) {
+  for (let [key, selectorOrDesc] of entries) {
+    // Level 7: Type-hint objects — { selector: ".price", type: "currency" }
+    if (typeof selectorOrDesc === 'object' && selectorOrDesc !== null) {
+      const sObj = selectorOrDesc as Record<string, unknown>;
+      if (typeof sObj.selector === 'string' && sObj.type) {
+        // This is a type-hint, not a nested schema — extract the selector
+        selectorOrDesc = sObj.selector;
+        // typeHints are collected later for type parsing
+      } else {
+        // Level 6: Nested extraction — handle object schemas with _container
+        result[key] = extractNested(sObj, document, 0);
+        meta[key] = 'nested';
+        continue;
+      }
+    }
+
     if (!selectorOrDesc) {
       result[key] = '';
       continue;
     }
 
+    // Level 4: Check structured data for this field first
+    if (structured.fieldCount > 0 && structured.data[key] !== undefined) {
+      const val = structured.data[key];
+      if (val !== null && val !== undefined && val !== '') {
+        result[key] = typeof val === 'object' ? JSON.stringify(val) : String(val);
+        meta[key] = structured.sources[key] || 'structured';
+        continue;
+      }
+    }
+
     // Fix 4: Natural Language Extract Mode
-    if (isNaturalLanguageQuery(selectorOrDesc)) {
-      const nlResult = extractByNaturalLanguage(selectorOrDesc);
+    if (isNaturalLanguageQuery(selectorOrDesc as string)) {
+      const nlResult = extractByNaturalLanguage(selectorOrDesc as string);
       result[key] = nlResult.items;
       meta[key] = `nl:${nlResult.method}`;
       continue;
@@ -1945,12 +2409,12 @@ async function handleExtract(command: {
     // Try querySelectorAll first — return array if multiple matches
     let elements: Element[] = [];
     try {
-      elements = Array.from(document.querySelectorAll(selectorOrDesc));
+      elements = Array.from(document.querySelectorAll(selectorOrDesc as string));
     } catch { /* invalid CSS selector syntax */ }
 
-    // Fix 2: Shadow DOM fallback
+    // Shadow DOM fallback with >>> piercing combinator support (Level 8)
     if (elements.length === 0) {
-      elements = deepQuerySelectorAll(document, selectorOrDesc);
+      elements = deepQuerySelectorAll(document, selectorOrDesc as string);
       if (elements.length > 0) meta[key] = 'shadow-dom';
     }
 
@@ -1958,11 +2422,13 @@ async function handleExtract(command: {
       // Multiple matches: return array of all texts
       result[key] = elements.map(el => readText(el)).filter(t => t.length > 0);
       meta[key] = meta[key] || `${elements.length}-matches`;
+      selectorsUsed[key] = selectorOrDesc as string;
     } else if (elements.length === 1) {
       result[key] = readText(elements[0]);
+      selectorsUsed[key] = selectorOrDesc as string;
     } else {
       // Fix 1: Smart Extract Fallback — try semantic extraction
-      const fallbackText = smartExtractFallback(selectorOrDesc, key);
+      const fallbackText = smartExtractFallback(selectorOrDesc as string, key);
       if (fallbackText) {
         result[key] = fallbackText;
         meta[key] = 'smart-fallback';
@@ -1973,8 +2439,46 @@ async function handleExtract(command: {
     }
   }
 
-  // Include extraction metadata (method used for each key) alongside results
-  const responseData = Object.keys(meta).length > 0 ? { result, _meta: meta } : result;
+  const durationMs = Date.now() - startMs;
+
+  // Level 7: Type-Aware Parsing — auto-detect and parse value types
+  const typeHints: Record<string, ParsedType> = {};
+  for (const [key, selectorOrDesc] of entries) {
+    if (typeof selectorOrDesc === 'object' && selectorOrDesc !== null) {
+      const sObj = selectorOrDesc as Record<string, unknown>;
+      if (sObj.type && typeof sObj.type === 'string') {
+        typeHints[key] = sObj.type as ParsedType;
+      }
+    }
+  }
+
+  const parsed = parseExtractResult(result, Object.keys(typeHints).length > 0 ? typeHints : undefined);
+  const warnings = validateExtractResult(result, parsed);
+
+  // Build typed result — replace raw values with parsed ones
+  const typedResult: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (parsed[key] && parsed[key].type !== 'string') {
+      typedResult[key] = parsed[key].value;
+    } else {
+      typedResult[key] = value;
+    }
+  }
+
+  // Include extraction metadata alongside results
+  const responseData: Record<string, unknown> = Object.keys(meta).length > 0
+    ? {
+        result: typedResult,
+        _meta: {
+          ...meta,
+          strategy: 'css',
+          duration_ms: durationMs,
+          selectors_used: selectorsUsed,
+          auto: false,
+          ...(warnings.length > 0 ? { _warnings: warnings } : {}),
+        },
+      }
+    : typedResult;
   return { success: true, data: responseData };
 }
 
