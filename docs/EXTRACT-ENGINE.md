@@ -595,6 +595,30 @@ if (/my-keyword/i.test(lower)) {
 
 ---
 
+## Relationship with Discover Engine
+
+The **Discover Engine** (`GET /v1/dev/:device/discover`) complements the Extract Engine by automatically classifying page types and generating extraction schemas — no LLM needed. While the Extract Engine handles the actual data extraction (NL queries, schema-based, cell ranges), Discover identifies *what* to extract:
+
+1. **Discover** returns `pageType` (product, search, feed, etc.) and `schemas` with CSS selectors
+2. **Extract** uses those schemas to pull structured data from the page
+
+Example workflow:
+
+```bash
+# 1. Discover what's on the page
+curl -s http://localhost:3500/v1/dev/chrome-111/discover | jq '.result.schemas[0].fields'
+# {"title": {"selector": "h1"}, "price": {"selector": ".price-value"}}
+
+# 2. Extract using the discovered schema
+curl -X POST http://localhost:3500/v1/dev/chrome-111/extract \
+  -H "Content-Type: application/json" \
+  -d '{"schema": {"title": "h1", "price": ".price-value"}}'
+```
+
+See [ARCHITECTURE.md — Discover Engine](ARCHITECTURE.md#discover-engine) for classifier details.
+
+---
+
 ## Known Limitations
 
 ### Per-Site Limitations

@@ -1,6 +1,6 @@
 # Novel Features
 
-PingOS v0.2 introduces five capabilities that go beyond basic browser automation. Each feature is accessible via the REST API, the `pingdev` CLI, and the Python SDK.
+PingOS v0.2 introduces six capabilities that go beyond basic browser automation. Each feature is accessible via the REST API, the `pingdev` CLI, and the Python SDK.
 
 ---
 
@@ -425,3 +425,75 @@ curl -X POST http://localhost:3500/v1/apps/generate \
   -H "Content-Type: application/json" \
   -d '{"url": "https://news.ycombinator.com", "description": "Tech news aggregator with upvoting and comments"}'
 ```
+
+---
+
+## Cross-Tab Pipelines
+
+Chain operations across multiple browser tabs with variable interpolation. Extract from one tab, transform the data, and push it to another — all in a single API call.
+
+**Endpoint**
+
+```
+POST /v1/pipelines/run
+```
+
+**Request body**
+
+```json
+{
+  "name": "price-compare",
+  "steps": [
+    {"id": "amazon", "op": "extract", "tab": "chrome-111", "schema": {"price": ".a-price .a-offscreen"}},
+    {"id": "ali", "op": "extract", "tab": "chrome-222", "schema": {"price": ".product-price-value"}},
+    {"id": "report", "op": "transform", "template": "Amazon: {{amazon.price}} | AliExpress: {{ali.price}}"}
+  ]
+}
+```
+
+**How it works**
+
+1. Steps execute sequentially (or in parallel via the `parallel` field).
+2. Each step's result is stored in a variables map keyed by `step.id`.
+3. Subsequent steps can reference earlier results using `{{stepId.field}}` interpolation in `template`, `selector`, `value`, or `expression` fields.
+4. Extract results are automatically unwrapped from `{data: {result: {...}}}` to the inner result.
+5. The `transform` op is a pure template operation — no device call needed.
+
+**Response**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "name": "price-compare",
+    "status": "completed",
+    "steps": [
+      {"id": "amazon", "status": "ok", "result": {"price": "$29.99"}, "durationMs": 1200},
+      {"id": "ali", "status": "ok", "result": {"price": "$15.99"}, "durationMs": 1100},
+      {"id": "report", "status": "ok", "result": "Amazon: $29.99 | AliExpress: $15.99", "durationMs": 1}
+    ],
+    "variables": {"amazon": {"price": "$29.99"}, "ali": {"price": "$15.99"}, "report": "Amazon: $29.99 | AliExpress: $15.99"},
+    "totalDurationMs": 2301
+  }
+}
+```
+
+**Pipe shorthand**
+
+For quick pipelines, use the pipe syntax:
+
+```bash
+curl -X POST http://localhost:3500/v1/pipelines/pipe \
+  -H "Content-Type: application/json" \
+  -d '{"pipe": "chrome-111:extract({\"title\":\"h1\"}) | transform(Title: {{step_0.title}})"}'
+```
+
+**Additional endpoints**
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/v1/pipelines/validate` | Validate without executing |
+| GET | `/v1/pipelines` | List saved pipelines |
+| POST | `/v1/pipelines/save` | Save a named pipeline |
+
+See [API.md — Pipelines](API.md#12-pipelines) for full documentation.

@@ -13,6 +13,13 @@
 - [Act / NL Parser](#act--nl-parser)
 - [Self-Heal System](#self-heal-system)
 - [Recorder](#recorder)
+- [Discover Engine](#discover-engine)
+- [Pipeline Engine](#pipeline-engine)
+- [Watch Manager](#watch-manager)
+- [Replay Engine](#replay-engine)
+- [Function Registry (Tab-as-a-Function)](#function-registry-tab-as-a-function)
+- [PingApp Generator](#pingapp-generator)
+- [MCP Server](#mcp-server)
 - [PingApp Architecture](#pingapp-architecture)
 - [Security Model](#security-model)
 
@@ -56,11 +63,12 @@ flowchart LR
 
 ```
 packages/
-├── std/              Gateway server, driver registry, extension bridge
+├── std/              Gateway server, driver registry, extension bridge, pipeline engine, watch manager, replay engine, function registry
 ├── chrome-extension/ Chrome MV3 extension (background + content + popup)
 ├── core/             Shared types (SelectorDef, SiteDefinition, ActionContext)
 ├── cli/              CLI tool: pingdev recon|validate|heal|serve|record|suggest
 ├── recon/            Site analysis pipeline: snapshot → analyze → generate
+├── mcp-server/       MCP server (stdio + SSE) for AI assistant integration
 ├── python-sdk/       Python client library for PingOS gateway
 └── dashboard/        (future) Web dashboard for monitoring
 ```
@@ -69,7 +77,7 @@ packages/
 
 | Package | Purpose | Key Files | Dependencies |
 |---------|---------|-----------|--------------|
-| **@pingdev/std** | HTTP gateway (Fastify), WebSocket bridge, driver registry, routing strategies, self-heal, PingApp routes | `gateway.ts` (682L), `ext-bridge.ts`, `app-routes.ts` (814L), `self-heal.ts`, `registry.ts` | Fastify, ws |
+| **@pingdev/std** | HTTP gateway (Fastify), WebSocket bridge, driver registry, pipeline engine, watch manager, replay engine, function registry, PingApp generator, self-heal, PingApp routes | `gateway.ts` (1572L), `ext-bridge.ts`, `app-routes.ts`, `pipeline-engine.ts`, `watch-manager.ts`, `replay-engine.ts`, `function-registry.ts`, `discover-engine.ts`, `pingapp-generator.ts`, `self-heal.ts`, `registry.ts` | Fastify, ws |
 | **chrome-extension** | Chrome MV3 extension — WebSocket client, tab management, DOM interaction, ad blocking, recording | `background.ts` (965L), `content.ts` (4154L), `stealth.ts`, `adblock.ts` | Chrome APIs |
 | **@pingdev/core** | Shared TypeScript types for the entire system | `types.ts` — `SelectorDef`, `SiteDefinition`, `ActionHandler`, `UIState`, `JobResult` | None |
 | **@pingdev/cli** | CLI entry point for developers | `index.ts` — `recon`, `validate`, `heal`, `serve`, `suggest`, `record` commands | @pingdev/recon, @pingdev/core |
@@ -703,6 +711,335 @@ Recording state survives page navigations via `chrome.storage.local`:
 - `recordedActions: RecordedAction[]` — all captured actions
 
 On content script init, if `recordingEnabled` is true, recording resumes automatically.
+
+---
+
+## Discover Engine
+
+The discover engine (`packages/std/src/discover-engine.ts`) classifies page types and generates extraction schemas without any LLM calls. It uses pure heuristic pattern matching that runs in under 100ms.
+
+### Flow
+
+```mermaid
+flowchart LR
+    Gateway["GET /v1/dev/:device/discover"]
+    Extension["Content Script\ncollectDomSnapshot()"]
+    Engine["discoverPage()\n7 classifiers"]
+    Result["PageType + Schemas"]
+
+    Gateway -->|"callDevice('discover')"| Extension
+    Extension -->|"DOM snapshot"| Gateway
+    Gateway --> Engine
+    Engine --> Result
+```
+
+### Page Type Classifiers
+
+| Classifier | Signals | Output Schema Fields |
+|-----------|---------|---------------------|
+| `product` | JSON-LD `@type: Product`, price patterns, `og:type`, `itemprop="name"` | title, price, rating, image, description |
+| `search` | URL params (`q=`, `search=`), repeated groups, search inputs, pagination | query, results (items with title, link, snippet) |
+| `article` | JSON-LD `Article`/`BlogPosting`, `og:type: article`, `<article>` tags | title, author, date, content |
+| `feed` | 5+ repeated elements, social URL patterns, "load more" buttons | items (title, author, timestamp, content) |
+| `table` | `<table>` with 2+ rows and headers | headers, rows |
+| `form` | `<form>` with input fields | fields (name, type, label, required) |
+| `chat` | Textarea/contenteditable, send buttons, message groups | input, messages, send_button |
+
+The highest-confidence classifier wins. Each classifier returns a confidence score (0-1) and the generated schema uses CSS selectors for each detected field.
+
+> Source: `discover-engine.ts`, `gateway.ts:217`
+
+---
+
+## Pipeline Engine
+
+The pipeline engine (`packages/std/src/pipeline-engine.ts`) enables cross-tab data flow by chaining operations across multiple devices with variable interpolation.
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway as POST /v1/pipelines/run
+    participant Engine as PipelineEngine
+    participant Ext as ExtensionBridge
+
+    Client->>Gateway: PipelineDef {steps: [...]}
+    Gateway->>Engine: validate(def) + run(def)
+    loop For each step
+        Engine->>Engine: Interpolate {{variables}} in step fields
+        alt Device operation (extract, click, type, etc.)
+            Engine->>Ext: callDevice({op, payload})
+            Ext-->>Engine: result
+            Engine->>Engine: Unwrap result.data.result
+        else Transform
+            Engine->>Engine: Apply template with variables
+        end
+        Engine->>Engine: Store result in variables[step.output || step.id]
+    end
+    Engine-->>Gateway: PipelineResult
+    Gateway-->>Client: {ok: true, result}
+```
+
+### Key Features
+
+- **Variable interpolation**: `{{stepId.field}}` syntax in `template`, `selector`, `value`, `expression`
+- **Auto-output**: Steps auto-assign their `id` as the variable name when no explicit `output` is set
+- **Parallel steps**: Use the `parallel` field to run multiple steps concurrently via `Promise.all`
+- **Result unwrapping**: Extract results are automatically unwrapped from `{data: {result: {...}, _meta: {...}}}` to the inner result
+- **Transform op**: Pure template interpolation without any device call
+- **Validation**: `validate()` checks step IDs, required fields, and valid operations before execution
+
+### Supported Operations
+
+| Op | Required Fields | Description |
+|----|----------------|-------------|
+| `extract` | `tab`, `schema` | Extract structured data from a device |
+| `click` | `tab`, `selector` | Click an element |
+| `type` | `tab`, `selector`, `value` | Type text into an element |
+| `act` | `tab`, `value` | Execute NL instruction |
+| `navigate` | `tab`, `value` | Navigate to a URL |
+| `eval` | `tab`, `expression` | Evaluate JS in page context |
+| `waitFor` | `tab`, `selector` | Wait for an element to appear |
+| `transform` | `template` | Template interpolation (no device call) |
+
+> Source: `pipeline-engine.ts`, `gateway.ts:917`
+
+---
+
+## Watch Manager
+
+The watch manager (`packages/std/src/watch-manager.ts`) provides managed, lifecycle-controlled page subscriptions with SSE event streaming.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Gateway
+        Start["POST .../watch/start"]
+        Events["GET /v1/watches/:id/events"]
+        Stop["DELETE /v1/watches/:id"]
+        List["GET /v1/watches"]
+    end
+
+    subgraph WatchManager
+        Poll["Polling loop\n(setInterval)"]
+        Diff["Field-level diff"]
+        Emit["Event emitter"]
+        ErrTrack["Error tracker\n(3 strikes → disconnect)"]
+    end
+
+    Start --> Poll
+    Poll -->|"callDevice('extract')"| ExtBridge["ExtensionBridge"]
+    ExtBridge --> Poll
+    Poll --> Diff
+    Diff -->|"changed?"| Emit
+    Emit -->|"SSE data:"| Events
+    Stop --> Poll
+    Poll -->|"error"| ErrTrack
+    ErrTrack -->|"3 errors"| Emit
+```
+
+### Key Features
+
+- **Managed lifecycle**: Start/stop watches with explicit IDs, list active watches
+- **Change detection**: Only emits events when extracted data differs from previous poll
+- **Error resilience**: After 3 consecutive poll errors (e.g., tab navigated), emits `_status: "disconnected"` and auto-stops
+- **Result unwrapping**: Extract results are unwrapped from the extension's `{data: {result: {...}}}` format
+- **SSE streaming**: Events pushed via Server-Sent Events to connected clients
+
+> Source: `watch-manager.ts`, `gateway.ts:811`
+
+---
+
+## Replay Engine
+
+The replay engine (`packages/std/src/replay-engine.ts`) plays back recorded action sequences against live browser tabs with selector resilience.
+
+### Flow
+
+```mermaid
+flowchart TD
+    Recording["Recording\n{actions: RecordedAction[]}"]
+    Recording --> Loop["For each action"]
+    Loop --> Timing{"Apply timing?\n(speed > 0)"}
+    Timing -->|yes| Delay["sleep(deltaT / speed)"]
+    Timing -->|no| Execute
+    Delay --> Execute["pickBestSelector(action)"]
+    Execute --> Try["executeAction(selector)"]
+    Try -->|success| Ok["status: 'ok'"]
+    Try -->|error| Fallback["tryFallbackSelectors()"]
+    Fallback -->|success| Ok
+    Fallback -->|all failed| Err["status: 'error'"]
+```
+
+### Selector Resilience
+
+The engine handles two recording formats:
+- **Gateway format**: `{type, selectors: {css, ariaLabel, textContent, xpath, nthChild}}`
+- **Extension export format**: `{type, selector: "flat-css-string"}`
+
+Selector priority: flat `selector` → `css` → `ariaLabel` → `textContent` → `xpath` → `nthChild`
+
+If the primary selector fails, all alternative selectors are tried in sequence via `tryFallbackSelectors()`.
+
+### Supported Action Types
+
+| Type | Operation | Payload |
+|------|-----------|---------|
+| `click` | `click` | `{selector}` |
+| `input` | `type` | `{text, selector}` |
+| `submit` | `click` or `press Enter` | `{selector}` or `{key: 'Enter'}` |
+| `keydown` / `press` | `press` | `{key}` |
+| `navigate` | `eval` | `{expression: 'window.location.href = ...'}` |
+| `scroll` | `scroll` | `{direction: 'down', amount: 3}` |
+| `act` | `act` | `{instruction}` |
+| `select` | `select` | `{selector, value}` |
+| `dblclick` | `dblclick` | `{selector}` |
+| `extract` | no-op | Skipped (read-only) |
+
+> Source: `replay-engine.ts`, `gateway.ts:1292`
+
+---
+
+## Function Registry (Tab-as-a-Function)
+
+The function registry (`packages/std/src/function-registry.ts`) auto-registers browser tabs as callable functions with typed parameters.
+
+### How It Works
+
+```mermaid
+flowchart LR
+    Refresh["refresh()"] --> Tabs["extBridge.listSharedTabs()"]
+    Tabs --> Build["buildFunctions(deviceId, appName)"]
+    Build --> Generic["6 generic ops:\nextract, click, type,\nread, eval, discover"]
+    Tabs --> Match["Match tab URL to\nPingApp definitions"]
+    Match --> AppFns["App-specific ops:\nsearch, product, cart, ..."]
+    Generic --> Registry["Map<appName, RegisteredApp>"]
+    AppFns --> Registry
+```
+
+### Generic Tab Functions
+
+Every shared tab automatically gets these callable functions:
+
+| Function | Description | Parameters |
+|----------|-------------|------------|
+| `{app}.extract` | Extract structured data | `schema` (object, required) |
+| `{app}.click` | Click an element | `selector` (string, required) |
+| `{app}.type` | Type text | `text` (string, required), `selector` (string, optional) |
+| `{app}.read` | Read text content | `selector` (string, required) |
+| `{app}.eval` | Evaluate JavaScript | `expression` (string, required) |
+| `{app}.discover` | Auto-detect page type | _(none)_ |
+
+### PingApp-Specific Functions
+
+When a tab URL matches a registered PingApp domain, additional functions are merged:
+
+| App | Domain | Additional Functions |
+|-----|--------|---------------------|
+| AliExpress | `aliexpress.com` | search, product, cart_add, cart_view, orders, wishlist, clean |
+| Amazon | `amazon` | search, product, cart_add, cart_view, orders, deals, clean, recon |
+| Claude | `claude.ai` | chat, new_chat, read_response, conversations, model_get, model_set, projects, artifacts, search |
+
+> Source: `function-registry.ts`, `app-routes.ts`, `gateway.ts:722`
+
+---
+
+## PingApp Generator
+
+The PingApp generator (`packages/std/src/pingapp-generator.ts`) produces complete PingApp definitions from recorded browser interactions.
+
+### Pipeline
+
+```mermaid
+flowchart LR
+    Recording["Recording\n{url, actions[]}"]
+    Recording --> Gen["PingAppGenerator.generate()"]
+    Gen --> Manifest["manifest.json\nname, url, version"]
+    Gen --> Workflow["workflows/{name}.json\nop, selector, description"]
+    Gen --> Selectors["selectors.json\nprimary, fallbacks, confidence"]
+    Gen --> Test["tests/test_{name}.json\nsmoke test (first 5 actions)"]
+    Gen --> Serialize["serialize() → file map"]
+```
+
+### Output Structure
+
+| File | Content |
+|------|---------|
+| `manifest.json` | Site metadata: name, URL, description, version, recorded timestamp, action count |
+| `workflows/{name}.json` | Workflow steps derived from recorded actions |
+| `selectors.json` | Selector entries with primary selector, fallback selectors, and confidence scores |
+| `tests/test_{name}.json` | Basic smoke test replaying the first 5 click/type actions |
+
+### Confidence Scoring
+
+Selectors are scored by reliability:
+
+| Selector Pattern | Confidence |
+|-----------------|------------|
+| `#id` or `[id=...]` | 0.90 |
+| `[data-testid=...]` | 0.85 |
+| `[aria-label=...]` | 0.80 |
+| `[name=...]` | 0.75 |
+| Other CSS | 0.50 |
+
+> Source: `pingapp-generator.ts`, `gateway.ts:1293`
+
+---
+
+## MCP Server
+
+The MCP server (`packages/mcp-server/`) exposes the PingOS gateway as MCP tools and resources for AI assistant integration (Claude Desktop, Cursor, etc.).
+
+### Architecture
+
+```mermaid
+flowchart LR
+    AI["AI Assistant\n(Claude Desktop / Cursor)"]
+    MCP["MCP Server\nstdio or SSE"]
+    Gateway["PingOS Gateway\n:3500"]
+
+    AI -->|"MCP protocol\n(JSON-RPC 2.0)"| MCP
+    MCP -->|"HTTP requests"| Gateway
+    Gateway -->|"JSON responses"| MCP
+    MCP -->|"Tool results"| AI
+```
+
+### Available Tools (15)
+
+| Tool | Gateway Endpoint | Description |
+|------|-----------------|-------------|
+| `pingos_devices` | `GET /v1/devices` | List connected browser tabs |
+| `pingos_recon` | `POST /v1/dev/:device/recon` | Page structure snapshot |
+| `pingos_observe` | `POST /v1/dev/:device/observe` | List interactive elements |
+| `pingos_extract` | `POST /v1/dev/:device/extract` | Extract structured data |
+| `pingos_act` | `POST /v1/dev/:device/act` | NL instruction execution |
+| `pingos_click` | `POST /v1/dev/:device/click` | Click element |
+| `pingos_type` | `POST /v1/dev/:device/type` | Type text |
+| `pingos_read` | `POST /v1/dev/:device/read` | Read element text |
+| `pingos_press` | `POST /v1/dev/:device/press` | Press keyboard key |
+| `pingos_scroll` | `POST /v1/dev/:device/scroll` | Scroll page |
+| `pingos_screenshot` | `POST /v1/dev/:device/screenshot` | Take screenshot |
+| `pingos_eval` | `POST /v1/dev/:device/eval` | Evaluate JavaScript |
+| `pingos_query` | `POST /v1/dev/:device/query` | NL question about page |
+| `pingos_apps` | `GET /v1/apps` | List PingApps |
+| `pingos_app_run` | `POST /v1/app/:app/:action` | Run PingApp action |
+
+### Resources (3)
+
+| URI | Description |
+|-----|-------------|
+| `pingos://devices` | Live list of connected tabs |
+| `pingos://tab/{id}/dom` | Page DOM snapshot |
+| `pingos://apps` | Available PingApps |
+
+### Transport
+
+- **stdio** (default): For Claude Desktop, Cursor -- JSON-RPC over stdin/stdout
+- **SSE**: For web clients -- `GET /sse` to establish connection, `POST /messages` to send
+
+> Source: `packages/mcp-server/`, docs: `docs/MCP.md`
 
 ---
 

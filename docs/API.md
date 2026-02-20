@@ -46,7 +46,24 @@
     - [POST /v1/functions/:app/call](#post-v1functionsappcall)
     - [POST /v1/functions/:app/batch](#post-v1functionsappbatch)
 11. [WebSocket Protocol](#11-websocket-protocol)
-12. [Error Reference](#12-error-reference)
+12. [Pipelines](#12-pipelines)
+    - [POST /v1/pipelines/run](#post-v1pipelinesrun)
+    - [POST /v1/pipelines/validate](#post-v1pipelinesvalidate)
+    - [GET /v1/pipelines](#get-v1pipelines)
+    - [POST /v1/pipelines/save](#post-v1pipelinessave)
+    - [POST /v1/pipelines/pipe](#post-v1pipelinespipe)
+13. [Managed Watches](#13-managed-watches)
+    - [POST /v1/dev/:device/watch/start](#post-v1devdevicewatchstart)
+    - [GET /v1/watches/:watchId/events](#get-v1watcheswatchidevents)
+    - [DELETE /v1/watches/:watchId](#delete-v1watcheswatchid)
+    - [GET /v1/watches](#get-v1watches)
+14. [Recordings](#14-recordings)
+    - [POST /v1/recordings/replay](#post-v1recordingsreplay)
+    - [POST /v1/recordings/generate](#post-v1recordingsgenerate)
+    - [POST /v1/recordings/save](#post-v1recordingssave)
+    - [GET /v1/recordings](#get-v1recordings)
+    - [DELETE /v1/recordings/:id](#delete-v1recordingsid)
+15. [Error Reference](#15-error-reference)
 
 ---
 
@@ -2772,7 +2789,471 @@ By default, **all HTTP/HTTPS tabs are automatically shared** as devices. The ext
 
 ---
 
-## 12. Error Reference
+## 12. Pipelines
+
+Cross-tab data pipelines let you chain operations across multiple devices — extract from one tab, transform, and push to another.
+
+### POST /v1/pipelines/run
+
+Execute a pipeline definition. Each step runs against a device/tab, and results are stored in pipeline variables accessible via `{{variable}}` interpolation in subsequent steps.
+
+```bash
+curl -X POST http://localhost:3500/v1/pipelines/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "price-compare",
+    "steps": [
+      {"id": "amazon", "op": "extract", "tab": "chrome-111", "schema": {"price": ".a-price .a-offscreen"}},
+      {"id": "msg", "op": "transform", "template": "Amazon price: {{amazon.price}}"}
+    ]
+  }'
+```
+
+**Request body (`PipelineDef`):**
+
+```typescript
+interface PipelineDef {
+  name: string;
+  steps: PipelineStep[];
+}
+
+interface PipelineStep {
+  id: string;                  // Unique step identifier
+  op: string;                  // "extract" | "click" | "type" | "act" | "navigate" | "eval" | "transform" | "waitFor"
+  tab?: string;                // Device ID (required for device ops)
+  schema?: Record<string, string>;  // For extract ops
+  selector?: string;           // For click/type/waitFor
+  value?: string;              // For type/navigate
+  template?: string;           // For transform — supports {{variable}} interpolation
+  expression?: string;         // For eval
+  output?: string;             // Variable name for the result (defaults to step id)
+  parallel?: PipelineStep[];   // Run these steps in parallel instead
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "name": "price-compare",
+    "status": "completed",
+    "steps": [
+      {"id": "amazon", "status": "ok", "result": {"price": "$29.99"}, "durationMs": 1250},
+      {"id": "msg", "status": "ok", "result": "Amazon price: $29.99", "durationMs": 1}
+    ],
+    "variables": {
+      "amazon": {"price": "$29.99"},
+      "msg": "Amazon price: $29.99"
+    },
+    "totalDurationMs": 1251
+  }
+}
+```
+
+**Variable interpolation**: Use `{{stepId.field}}` in `template`, `selector`, `value`, or `expression` fields to reference results from earlier steps.
+
+**Parallel steps**: Use the `parallel` field to run multiple steps concurrently:
+
+```json
+{
+  "id": "prices",
+  "parallel": [
+    {"id": "amazon_price", "op": "extract", "tab": "chrome-111", "schema": {"price": ".a-price"}},
+    {"id": "ali_price", "op": "extract", "tab": "chrome-222", "schema": {"price": ".product-price"}}
+  ]
+}
+```
+
+> Source: `gateway.ts:920`, `pipeline-engine.ts`
+
+---
+
+### POST /v1/pipelines/validate
+
+Validate a pipeline definition without executing it. Returns an array of validation errors (empty if valid).
+
+```bash
+curl -X POST http://localhost:3500/v1/pipelines/validate \
+  -H "Content-Type: application/json" \
+  -d '{"name": "test", "steps": [{"id": "s1", "op": "extract", "tab": "chrome-111", "schema": {"title": "h1"}}]}'
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "errors": []
+}
+```
+
+**Validation errors (200):**
+
+```json
+{
+  "ok": false,
+  "errors": ["Step s1: device ops require a tab field"]
+}
+```
+
+> Source: `gateway.ts:950`
+
+---
+
+### GET /v1/pipelines
+
+List all saved pipelines.
+
+```bash
+curl -s http://localhost:3500/v1/pipelines | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "pipelines": [
+    {"name": "price-compare", "stepCount": 3}
+  ]
+}
+```
+
+> Source: `gateway.ts:965`
+
+---
+
+### POST /v1/pipelines/save
+
+Save a named pipeline definition for later execution.
+
+```bash
+curl -X POST http://localhost:3500/v1/pipelines/save \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-pipeline", "steps": [...]}'
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "name": "my-pipeline"
+}
+```
+
+> Source: `gateway.ts:974`
+
+---
+
+### POST /v1/pipelines/pipe
+
+Execute a pipeline using pipe shorthand syntax. The pipe string uses `|` to chain steps in a Unix-like pipeline.
+
+```bash
+curl -X POST http://localhost:3500/v1/pipelines/pipe \
+  -H "Content-Type: application/json" \
+  -d '{"pipe": "chrome-111:extract({\"title\":\"h1\"}) | transform(Title: {{step_0.title}})"}'
+```
+
+**Response (200):** Same format as `/v1/pipelines/run`.
+
+> Source: `gateway.ts:989`
+
+---
+
+## 13. Managed Watches
+
+The managed watch system provides explicit lifecycle control over real-time page subscriptions, complementing the inline `POST /v1/dev/:device/watch` SSE endpoint.
+
+### POST /v1/dev/:device/watch/start
+
+Start a managed watch on a device. Returns a `watchId` and an SSE stream URL.
+
+```bash
+curl -X POST http://localhost:3500/v1/dev/chrome-111/watch/start \
+  -H "Content-Type: application/json" \
+  -d '{"selector": ".price-tag", "fields": {"price": ".amount", "currency": ".symbol"}, "interval": 3000}'
+```
+
+**Request body:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `selector` | `string` | Yes | — | Root CSS selector to watch |
+| `fields` | `Record<string, string>` | No | — | Sub-field selectors within the root element |
+| `interval` | `number` | No | `5000` | Polling interval in milliseconds (min 1000) |
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "watchId": "w_abc123",
+  "stream": "/v1/watches/w_abc123/events"
+}
+```
+
+> Source: `gateway.ts:814`
+
+---
+
+### GET /v1/watches/:watchId/events
+
+Connect to the SSE event stream for a watch. Each event contains the current data and a timestamp. Events are only emitted when data changes.
+
+```bash
+curl -N http://localhost:3500/v1/watches/w_abc123/events
+```
+
+**Response (SSE stream):**
+
+```
+data: {"price": "$29.99", "currency": "$", "timestamp": 1708444800000}
+
+data: {"price": "$24.99", "currency": "$", "timestamp": 1708444805000}
+```
+
+If the watch encounters 3 consecutive polling errors (e.g., tab navigated away), a disconnected event is emitted:
+
+```
+data: {"_status": "disconnected", "reason": "3 consecutive poll errors", "timestamp": 1708444810000}
+```
+
+> Source: `gateway.ts:850`
+
+---
+
+### DELETE /v1/watches/:watchId
+
+Stop a managed watch and clean up resources.
+
+```bash
+curl -X DELETE http://localhost:3500/v1/watches/w_abc123
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "watchId": "w_abc123"
+}
+```
+
+> Source: `gateway.ts:890`
+
+---
+
+### GET /v1/watches
+
+List all active managed watches.
+
+```bash
+curl -s http://localhost:3500/v1/watches | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "watches": [
+    {"watchId": "w_abc123", "deviceId": "chrome-111", "selector": ".price-tag", "interval": 3000}
+  ]
+}
+```
+
+> Source: `gateway.ts:908`
+
+---
+
+## 14. Recordings
+
+Record, replay, and generate PingApps from browser interaction recordings. These endpoints complement the basic recorder (section 4) with server-side recording management.
+
+### POST /v1/recordings/replay
+
+Replay a recording against a device. Supports selector resilience — if the primary selector fails, fallback selectors are tried automatically.
+
+```bash
+curl -X POST http://localhost:3500/v1/recordings/replay \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device": "chrome-111",
+    "recording": {
+      "id": "rec-1",
+      "url": "https://example.com",
+      "startedAt": 1708444800000,
+      "actions": [
+        {"type": "click", "selector": "#search-btn", "timestamp": 1708444801000},
+        {"type": "type", "selector": "#search-input", "value": "laptop", "timestamp": 1708444802000}
+      ]
+    },
+    "speed": 1,
+    "timeout": 10000
+  }'
+```
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `device` | `string` | Yes | Target device ID |
+| `recording` | `Recording` | Yes* | Inline recording object |
+| `recordingId` | `string` | Yes* | ID of a saved recording (alternative to inline) |
+| `speed` | `number` | No | Replay speed: 0 = instant (default), 1 = real-time, 2 = 2x speed |
+| `timeout` | `number` | No | Per-step timeout in ms (default 10000) |
+
+*Either `recording` or `recordingId` is required.
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "recording": {"id": "rec-1", "url": "https://example.com", "actionCount": 2},
+    "steps": [
+      {"index": 0, "action": {"type": "click"}, "status": "ok", "selector": "#search-btn", "durationMs": 150},
+      {"index": 1, "action": {"type": "type"}, "status": "ok", "selector": "#search-input", "durationMs": 200}
+    ],
+    "totalDurationMs": 350,
+    "successCount": 2,
+    "errorCount": 0
+  }
+}
+```
+
+**Supported action types**: `click`, `input`, `submit`, `keydown`, `press`, `navigate`, `scroll`, `act`, `select`, `dblclick`, `extract`.
+
+> Source: `gateway.ts:1296`, `replay-engine.ts`
+
+---
+
+### POST /v1/recordings/generate
+
+Generate a PingApp definition from a recording. Produces a manifest, workflow, selectors, and test definition.
+
+```bash
+curl -X POST http://localhost:3500/v1/recordings/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "recording": {
+      "id": "rec-1",
+      "url": "https://example.com",
+      "startedAt": 1708444800000,
+      "actions": [...]
+    },
+    "name": "my-app"
+  }'
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "app": {
+    "manifest": {"name": "my-app", "url": "https://example.com", "version": "1.0.0", "actionCount": 5},
+    "workflow": {"name": "my-app", "steps": [{"op": "click", "selector": "#btn", "description": "Click Submit"}]},
+    "selectors": {"submit": {"primary": "#btn", "fallbacks": ["[aria-label=\"Submit\"]"], "confidence": 0.9}},
+    "test": {"name": "test_my-app", "steps": [{"op": "click", "selector": "#btn"}]}
+  },
+  "files": {
+    "manifest.json": "...",
+    "workflows/my-app.json": "...",
+    "selectors.json": "...",
+    "tests/test_my-app.json": "..."
+  }
+}
+```
+
+> Source: `gateway.ts:1360`, `pingapp-generator.ts`
+
+---
+
+### POST /v1/recordings/save
+
+Save a recording for later replay or PingApp generation.
+
+```bash
+curl -X POST http://localhost:3500/v1/recordings/save \
+  -H "Content-Type: application/json" \
+  -d '{"id": "rec-1", "url": "https://example.com", "startedAt": 1708444800000, "actions": [...]}'
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "id": "rec-1"
+}
+```
+
+> Source: `gateway.ts:1402`
+
+---
+
+### GET /v1/recordings
+
+List all saved recordings.
+
+```bash
+curl -s http://localhost:3500/v1/recordings | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "recordings": [
+    {"id": "rec-1", "url": "https://example.com", "actionCount": 5, "startedAt": 1708444800000}
+  ]
+}
+```
+
+> Source: `gateway.ts:1420`
+
+---
+
+### DELETE /v1/recordings/:id
+
+Delete a saved recording.
+
+```bash
+curl -X DELETE http://localhost:3500/v1/recordings/rec-1
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "id": "rec-1"
+}
+```
+
+**Error (404):**
+
+```json
+{
+  "errno": "ENOENT",
+  "code": "ping.recordings.not_found",
+  "message": "Recording \"rec-1\" not found",
+  "retryable": false
+}
+```
+
+> Source: `gateway.ts:1431`
+
+---
+
+## 15. Error Reference
 
 All errors follow the `PingError` schema:
 
