@@ -30,6 +30,7 @@ import {
   loadTemplate, listTemplates, deleteTemplate,
   exportTemplate, importTemplate,
 } from './template-learner.js';
+import { cdpFallback } from './cdp-fallback.js';
 
 // ---------------------------------------------------------------------------
 // Request / Reply schemas
@@ -251,6 +252,13 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       const result = discoverPage(snapshot as Record<string, unknown>);
       return { ok: true, result };
     } catch (err) {
+      // CDP fallback for discover when content script fails
+      const isEIOErr = isPingError(err) ? err.errno === 'EIO' : false;
+      if (isEIOErr) {
+        const deviceUrl = getDeviceUrlFromShares(extBridge, device);
+        const cdpResult = await cdpFallback(deviceUrl, 'discover', undefined);
+        if (cdpResult) return cdpResult;
+      }
       return sendPingError(reply, err);
     }
   });
@@ -276,6 +284,13 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       const result = discoverPage(snapshot as Record<string, unknown>);
       return { ok: true, result };
     } catch (err) {
+      // CDP fallback for discover when content script fails
+      const isEIOErr = isPingError(err) ? err.errno === 'EIO' : false;
+      if (isEIOErr) {
+        const deviceUrl = getDeviceUrlFromShares(extBridge, device);
+        const cdpResult = await cdpFallback(deviceUrl, 'discover', undefined);
+        if (cdpResult) return cdpResult;
+      }
       return sendPingError(reply, err);
     }
   });
@@ -1135,13 +1150,44 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
           }
         }
 
+        // Default timeout for wait operations — prevent indefinite hangs
+        if (op === 'wait' || op === 'waitFor') {
+          if (payloadObj && !payloadObj.timeout) payloadObj.timeout = 10_000;
+          if (payloadObj && !payloadObj.timeoutMs) payloadObj.timeoutMs = 10_000;
+        }
+
         try {
-          const result = await extBridge.callDevice({
+          // For wait ops, wrap with a server-side race timeout as safety net
+          const callPromise = extBridge.callDevice({
             deviceId: device,
             op,
-            payload,
-            timeoutMs: 20_000,
+            payload: payloadObj ?? payload,
+            timeoutMs: op === 'wait' || op === 'waitFor' ? 30_000 : 20_000,
           });
+
+          let result: unknown;
+          if (op === 'wait' || op === 'waitFor') {
+            const serverTimeout = new Promise<unknown>((_, reject) =>
+              setTimeout(() => reject(new Error('Server-side wait timeout (15s)')), 15_000),
+            );
+            try {
+              result = await Promise.race([callPromise, serverTimeout]);
+            } catch (raceErr) {
+              const dur = 15_000;
+              return {
+                ok: true,
+                result: {
+                  waited: true,
+                  duration_ms: dur,
+                  condition_met: false,
+                  error: raceErr instanceof Error ? raceErr.message : 'Wait timeout',
+                  _note: 'Server-side timeout safety net triggered',
+                },
+              };
+            }
+          } else {
+            result = await callPromise;
+          }
 
           // Level 9: Visual fallback — if extract returned empty and fallback: "visual"
           if (op === 'extract' && payloadObj?.fallback === 'visual') {
@@ -1163,6 +1209,34 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
 
           return { ok: true, result };
         } catch (err) {
+          // Paginate next causes full-page navigation which destroys the content
+          // script port. The resulting bfcache/EIO error is expected — treat as success.
+          if (op === 'paginate' && payloadObj?.action === 'next') {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            if (errMsg.includes('back/forward cache') || errMsg.includes('message channel closed') ||
+                errMsg.includes('io_error') || errMsg.includes('I/O error') || errMsg.includes('EIO') ||
+                errMsg.includes('disconnected') || errMsg.includes('destroyed')) {
+              return { ok: true, result: { action: 'next', navigated: true, _note: 'page navigation destroyed content script port (expected)' } };
+            }
+          }
+
+          // CDP fallback path: when content script can't communicate (EIO/disconnected),
+          // try executing the operation via Chrome DevTools Protocol directly.
+          const isEIO = isPingError(err)
+            ? err.errno === 'EIO'
+            : (err instanceof Error && (
+                err.message.includes('I/O error') || err.message.includes('EIO') ||
+                err.message.includes('Receiving end does not exist') ||
+                err.message.includes('Could not establish connection')
+              ));
+          if (isEIO) {
+            const deviceUrl = getDeviceUrlFromShares(extBridge, device);
+            const cdpResult = await cdpFallback(deviceUrl, op, payloadObj);
+            if (cdpResult) {
+              return cdpResult;
+            }
+          }
+
           // JIT self-healing path: only for selector-based operations.
           if (
             selfHealCfg.enabled &&
@@ -1656,6 +1730,70 @@ JSON:`;
   const replayEngine = new ReplayEngine(extBridge);
   const pingAppGenerator = new PingAppGenerator();
   const savedRecordings = new Map<string, Recording>();
+
+  // POST /v1/record/replay — alias for /v1/recordings/replay (short-form)
+  app.post<{ Body: { device: string; recording?: Recording; recordingId?: string; speed?: number; timeout?: number } }>(
+    '/v1/record/replay',
+    async (request, reply) => {
+      const body = request.body as {
+        device?: string;
+        recording?: Recording;
+        recordingId?: string;
+        speed?: number;
+        timeout?: number;
+      } | null;
+
+      if (!body || !body.device) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing required field: device',
+          retryable: false,
+        });
+      }
+
+      // Support both inline recording and saved recording ID
+      let recording = body.recording;
+      if (!recording && body.recordingId) {
+        recording = savedRecordings.get(body.recordingId);
+        if (!recording) {
+          return reply.status(404).send({
+            errno: 'ENOENT',
+            code: 'ping.recordings.not_found',
+            message: `Recording "${body.recordingId}" not found`,
+            retryable: false,
+          });
+        }
+      }
+      if (!recording || !(recording as Recording).actions) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing recording or recordingId',
+          retryable: false,
+        });
+      }
+
+      if (!extBridge.ownsDevice(body.device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${body.device} not found`,
+          retryable: false,
+        });
+      }
+
+      try {
+        const result = await replayEngine.replay(body.device, recording, {
+          speed: body.speed,
+          timeout: body.timeout,
+        });
+        return { ok: true, result };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
 
   // POST /v1/recordings/replay — replay a recording on a device
   app.post<{ Body: { device: string; recording: Recording; speed?: number; timeout?: number } }>(
