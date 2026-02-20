@@ -365,7 +365,7 @@ async function handleDeviceRequest(request: DeviceRequest) {
   // This ensures navigation works even when the content script is orphaned/stale.
   if (command.type === 'navigate') {
     try {
-      const url = command.url;
+      const url = command.url || command.to;
       if (!url) {
         sendDeviceResponse(requestId, { success: false, error: 'No URL provided' });
         return;

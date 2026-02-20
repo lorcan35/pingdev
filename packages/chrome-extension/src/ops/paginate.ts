@@ -16,6 +16,7 @@ interface PaginationInfo {
   hasNext: boolean;
   hasPrev: boolean;
   paginationType: PaginationType;
+  nextUrl?: string;  // href of next link, if available
 }
 
 export async function handlePaginate(command: PaginateCommand): Promise<BridgeResponse> {
@@ -122,6 +123,21 @@ function findPaginationInfo(): PaginationInfo | null {
         paginationType: 'load_more',
       };
     }
+    // Fallback: standalone next/more links (e.g., HN's "More" link)
+    const standalone = findStandaloneNextLink();
+    if (standalone) {
+      let nextUrl: string | undefined;
+      if (standalone.tagName === 'A') {
+        const href = (standalone as HTMLAnchorElement).href;
+        if (href && !href.startsWith('javascript:')) nextUrl = href;
+      }
+      return {
+        hasNext: true,
+        hasPrev: false,
+        paginationType: 'links',
+        nextUrl,
+      };
+    }
     return null;
   }
 
@@ -134,12 +150,20 @@ function findPaginationInfo(): PaginationInfo | null {
   const pageInfo = extractPageNumbers(container);
   const isLinks = container.querySelectorAll('a').length > 0;
 
+  // Extract next URL from link href if available
+  let nextUrl: string | undefined;
+  if (nextBtn && nextBtn.tagName === 'A') {
+    const href = (nextBtn as HTMLAnchorElement).href;
+    if (href && !href.startsWith('javascript:')) nextUrl = href;
+  }
+
   return {
     currentPage: pageInfo.current,
     totalPages: pageInfo.total,
     hasNext,
     hasPrev,
     paginationType: isLinks ? 'links' : 'buttons',
+    nextUrl,
   };
 }
 
@@ -157,6 +181,24 @@ function findPaginationContainer(): Element | null {
   return null;
 }
 
+/**
+ * Fallback: find standalone next/more links anywhere on the page.
+ * Catches simple pagination like HN's "More" link.
+ */
+function findStandaloneNextLink(): Element | null {
+  const allLinks = document.querySelectorAll('a, button, [role="button"]');
+  for (const el of Array.from(allLinks)) {
+    if (!isVisible(el)) continue;
+    const text = (el.textContent?.trim() || '').toLowerCase();
+    const href = (el.getAttribute('href') || '').toLowerCase();
+    // Match text patterns: "more", "next", "older", "newer", "next page", "show more"
+    if (/^(more|next|older|newer|next\s*page|show\s*more|load\s*more)$/i.test(text)) return el;
+    // Match href patterns: ?p=2, page=2, /page/2, ?start=, &after=
+    if (/[?&](p|page|start|after|offset)=/.test(href) || /\/page\/\d+/.test(href)) return el;
+  }
+  return null;
+}
+
 function findNextButton(): Element | null {
   // By rel attribute
   const byRel = document.querySelector('[rel="next"]');
@@ -166,7 +208,7 @@ function findNextButton(): Element | null {
   const byAria = document.querySelector('[aria-label*="next" i], [aria-label*="Next"]');
   if (byAria && isVisible(byAria)) return byAria;
 
-  // By text content
+  // By text content within pagination container
   const container = findPaginationContainer();
   if (container) {
     const elements = container.querySelectorAll('a, button');
@@ -176,7 +218,8 @@ function findNextButton(): Element | null {
     }
   }
 
-  return null;
+  // Fallback: standalone next/more links anywhere on the page
+  return findStandaloneNextLink();
 }
 
 function findPrevButton(): Element | null {
