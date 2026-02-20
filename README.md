@@ -84,7 +84,13 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full setup guide.
 | Act engine | ✅ Stable | Click, type, navigate, upload — stealth mode |
 | PingApps | ✅ Stable | Compiled website drivers (AliExpress, Amazon, Claude) |
 | Self-heal | 🔶 Beta | LLM-assisted selector repair with caching |
-| Recorder | 🔶 Beta | Record browser interactions as replayable workflows |
+| Recorder + Replay | ✅ Stable | Record interactions, replay with selector resilience |
+| Cross-tab Pipelines | ✅ Stable | Chain operations across tabs with variable interpolation |
+| Managed Watches | ✅ Stable | Real-time SSE subscriptions with field-level diffs |
+| Schema Auto-Discovery | ✅ Stable | Classify page types and generate schemas (no LLM, <100ms) |
+| Tab-as-a-Function | ✅ Stable | Call tab operations as typed functions with params |
+| PingApp Generator | ✅ Stable | Generate PingApps from recorded workflows |
+| MCP Server | ✅ Stable | 15 tools + 3 resources for Claude Desktop / Cursor |
 | LLM routing | ✅ Stable | Capability-based routing across local and cloud models |
 | Ad blocking / page cleanup | ✅ Stable | Remove clutter before extraction |
 | Recon (snapshot + analysis) | ✅ Stable | Full-page interactive element discovery |
@@ -129,7 +135,7 @@ All endpoints served on `http://localhost:3500`.
 | `/v1/dev/llm/prompt` | POST | Send prompt to best available driver |
 | `/v1/dev/llm/chat` | POST | Multi-turn chat with message history |
 
-### Recording
+### Recording & Replay
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -137,6 +143,30 @@ All endpoints served on `http://localhost:3500`.
 | `/v1/record/stop` | POST | Stop recording |
 | `/v1/record/export` | POST | Export recording as workflow |
 | `/v1/record/status` | GET | Check recording status |
+| `/v1/recordings/replay` | POST | Replay a recording against a device |
+| `/v1/recordings/generate` | POST | Generate PingApp from recording |
+| `/v1/recordings/save` | POST | Save a recording |
+| `/v1/recordings` | GET | List saved recordings |
+| `/v1/recordings/:id` | DELETE | Delete a recording |
+
+### Pipelines
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/pipelines/run` | POST | Execute a cross-tab pipeline |
+| `/v1/pipelines/validate` | POST | Validate a pipeline definition |
+| `/v1/pipelines` | GET | List saved pipelines |
+| `/v1/pipelines/save` | POST | Save a named pipeline |
+| `/v1/pipelines/pipe` | POST | Execute pipe shorthand |
+
+### Managed Watches
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/dev/:device/watch/start` | POST | Start a managed watch |
+| `/v1/watches/:watchId/events` | GET | SSE event stream |
+| `/v1/watches/:watchId` | DELETE | Stop a watch |
+| `/v1/watches` | GET | List active watches |
 
 ### Self-Heal
 
@@ -269,10 +299,11 @@ See [docs/NOVEL-FEATURES.md](docs/NOVEL-FEATURES.md) for examples and usage.
 ```
 packages/
   core/           @pingdev/core     PingApp engine (CDP, BullMQ, state machine)
-  std/            @pingdev/std      Gateway, drivers, registry, routing
-  cli/            pingdev           CLI tools (snapshot, generate)
+  std/            @pingdev/std      Gateway, drivers, pipelines, watches, replay, functions
+  cli/            pingdev           CLI tools (snapshot, generate, mcp)
   recon/          @pingdev/recon    Snapshot engine + PingApp code generator
   chrome-extension                  Chrome MV3 extension (auth bridge, recorder, ad block)
+  mcp-server/                       MCP server (stdio + SSE) for AI assistants
   dashboard/      @pingdev/dash     React 19 monitoring dashboard
   python-sdk/                       Python SDK for PingOS
 ```
@@ -294,11 +325,14 @@ packages/
 | Document | Description |
 |---|---|
 | [Installation Guide](docs/INSTALL.md) | From zero to first API call |
-| [Architecture](docs/ARCHITECTURE.md) | System design, data flows, extension bridge protocol |
+| [Architecture](docs/ARCHITECTURE.md) | System design, data flows, all engines |
 | [API Reference](docs/API.md) | Full HTTP API with schemas and examples |
 | [Extract Engine](docs/EXTRACT-ENGINE.md) | Structured data extraction from live pages |
 | [Act Engine](docs/ACT-ENGINE.md) | Click, type, navigate — stealth interaction |
 | [PingApps Guide](docs/PINGAPPS.md) | Building and running compiled website drivers |
+| [Drivers](docs/DRIVERS.md) | LLM driver adapters and configuration |
+| [Novel Features](docs/NOVEL-FEATURES.md) | Query, Watch, Diff, Discover, Generator |
+| [MCP Server](docs/MCP.md) | AI assistant integration (Claude Desktop, Cursor) |
 
 ---
 

@@ -313,6 +313,32 @@ npm run build
 
 ---
 
+## 8. MCP Server (AI Assistant Integration)
+
+PingOS includes an MCP server that lets AI assistants (Claude Desktop, Cursor) control browsers directly through 15 tools and 3 resources.
+
+### Setup for Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pingos": {
+      "command": "node",
+      "args": ["/path/to/pingdev/packages/mcp-server/dist/index.js"],
+      "env": {
+        "PINGOS_GATEWAY_URL": "http://localhost:3500"
+      }
+    }
+  }
+}
+```
+
+The gateway must be running first. See [docs/MCP.md](MCP.md) for full configuration including SSE mode and Cursor setup.
+
+---
+
 ## Next Steps
 
 - [API Reference](API.md) — Full endpoint documentation
@@ -320,3 +346,4 @@ npm run build
 - [PingApps Guide](PINGAPPS.md) — Building compiled website drivers
 - [Extract Engine](EXTRACT-ENGINE.md) — Pulling structured data from pages
 - [Act Engine](ACT-ENGINE.md) — Stealth interaction with web elements
+- [MCP Server](MCP.md) — AI assistant integration via Model Context Protocol

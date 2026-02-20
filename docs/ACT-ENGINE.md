@@ -565,3 +565,23 @@ On failure, the response includes the error from the first failed step:
 | **Detach timing** | After `cdpKeys()` returns, the debugger needs time to fully detach before the next attach |
 | **Trusted event requirement** | Google Sheets ignores synthetic (`isTrusted: false`) events. Only CDP events work |
 | **Pause granularity** | Each `pause` action is ~50ms. Hard to calibrate for different network/rendering speeds |
+
+---
+
+## Act in Replay Mode
+
+The Replay Engine (`packages/std/src/replay-engine.ts`) can replay recorded `act` actions. When a recording contains an `act` step (NL instruction), the replay engine dispatches it to the target device's `act` handler:
+
+```typescript
+case 'act':
+  return this.extBridge.callDevice({
+    deviceId,
+    op: 'act',
+    payload: { instruction: action.value ?? '' },
+    timeoutMs: timeout,
+  });
+```
+
+This means recorded NL instructions like "click the 3rd video" or "type hello into the search box" are re-executed during replay, using the same Act Engine parsing and execution pipeline described above.
+
+See [ARCHITECTURE.md — Replay Engine](ARCHITECTURE.md#replay-engine) for the full replay flow.

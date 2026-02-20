@@ -522,3 +522,78 @@ Common patterns to handle:
 - **Skip clean on data pages**: If `fullCleanup()` removes data you need (prices, ratings), skip the clean step
 - **Fallback interactions**: Like Claude's Enter-key fallback when the send button isn't clickable
 - **Stealth mode**: Use `stealth: true` on click/type ops for sites with bot detection
+
+---
+
+## PingApp Generator (from Recordings)
+
+PingApps can be auto-generated from browser recordings. Record a workflow, then generate a complete PingApp definition with one API call.
+
+### Flow
+
+```
+Record → Export → Generate → PingApp files
+```
+
+1. **Record**: Start recording on a device, interact with the page, stop recording
+2. **Export**: Export the recording via `POST /v1/record/export`
+3. **Generate**: Pass the recording to `POST /v1/recordings/generate`
+4. **Result**: Get a complete PingApp with manifest, workflow, selectors, and test
+
+### API
+
+```bash
+# Step 1: Record
+curl -X POST http://localhost:3500/v1/record/start -H "Content-Type: application/json" -d '{"device": "chrome-111"}'
+# ... interact with the page ...
+curl -X POST http://localhost:3500/v1/record/stop -H "Content-Type: application/json" -d '{"device": "chrome-111"}'
+curl -X POST http://localhost:3500/v1/record/export -H "Content-Type: application/json" -d '{"device": "chrome-111"}'
+
+# Step 2: Generate PingApp from recording
+curl -X POST http://localhost:3500/v1/recordings/generate \
+  -H "Content-Type: application/json" \
+  -d '{"recording": {...exported recording...}, "name": "my-app"}'
+```
+
+### Generated Output
+
+| File | Content |
+|------|---------|
+| `manifest.json` | Site metadata: name, URL, version, action count |
+| `workflows/{name}.json` | Ordered workflow steps with op, selector, description |
+| `selectors.json` | Selector entries with primary, fallbacks, and confidence scores |
+| `tests/test_{name}.json` | Smoke test replaying the first 5 click/type actions |
+
+### Selector Confidence
+
+Generated selectors are scored by reliability:
+
+| Pattern | Confidence |
+|---------|------------|
+| `#id` or `[id=...]` | 0.90 |
+| `[data-testid=...]` | 0.85 |
+| `[aria-label=...]` | 0.80 |
+| `[name=...]` | 0.75 |
+| Other CSS | 0.50 |
+
+See [ARCHITECTURE.md — PingApp Generator](ARCHITECTURE.md#pingapp-generator) for implementation details.
+
+---
+
+## Tab-as-a-Function: PingApp Actions
+
+The Function Registry (`GET /v1/functions`) auto-exposes PingApp actions as callable functions when a matching tab is open. For example, when an Amazon tab is shared, these functions become available:
+
+```bash
+# List all available functions
+curl -s http://localhost:3500/v1/functions | jq '.functions[].name'
+# "amazon.extract", "amazon.click", "amazon.type", "amazon.read", "amazon.eval", "amazon.discover"
+# "amazon.search", "amazon.product", "amazon.cart_add", ...
+
+# Call a PingApp-specific function
+curl -X POST http://localhost:3500/v1/functions/amazon/call \
+  -H "Content-Type: application/json" \
+  -d '{"function": "search", "params": {"query": "laptop"}}'
+```
+
+See [ARCHITECTURE.md — Function Registry](ARCHITECTURE.md#function-registry-tab-as-a-function) and [API.md — Tab-as-a-Function](API.md#10-tab-as-a-function) for details.
