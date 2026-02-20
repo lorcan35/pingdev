@@ -116,6 +116,16 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
 
   const app = Fastify({ logger: false });
 
+  // Accept empty JSON bodies as {} instead of Fastify's FST_ERR_CTP_EMPTY_JSON_BODY
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    try {
+      const str = (body as string).trim();
+      done(null, str ? JSON.parse(str) : {});
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   // Global Fastify-level logging
   app.addHook('onRequest', async (request) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -222,6 +232,31 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
 
   // ---- GET /v1/dev/:device/discover — Zero-Shot Site Adaptation ----
   app.get<{ Params: { device: string } }>('/v1/dev/:device/discover', async (request, reply) => {
+    const { device } = request.params;
+    if (!extBridge.ownsDevice(device)) {
+      return reply.status(404).send({
+        errno: 'ENODEV',
+        code: 'ping.gateway.device_not_found',
+        message: `Device ${device} not found`,
+        retryable: false,
+      });
+    }
+    try {
+      const snapshot = await extBridge.callDevice({
+        deviceId: device,
+        op: 'discover',
+        payload: {},
+        timeoutMs: 10_000,
+      });
+      const result = discoverPage(snapshot as Record<string, unknown>);
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  // POST alias for discover (so curl -X POST with empty body works)
+  app.post<{ Params: { device: string } }>('/v1/dev/:device/discover', async (request, reply) => {
     const { device } = request.params;
     if (!extBridge.ownsDevice(device)) {
       return reply.status(404).send({
