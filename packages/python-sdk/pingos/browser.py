@@ -32,9 +32,83 @@ class Tab:
         """Execute a natural-language instruction."""
         return self._op('act', instruction=instruction)
 
-    def extract(self, schema):
-        """Extract structured data using a schema dict."""
-        return self._op('extract', schema=schema)
+    def extract(self, schema=None, query=None, strategy=None, paginate=False,
+                max_pages=10, delay=1000, fallback=None, limit=None):
+        """Extract structured data from the page.
+
+        Supports multiple modes:
+        - Schema-based: extract(schema={'title': 'h1', 'price': '.price'})
+        - Zero-config:  extract()  — auto-detects and extracts structured data
+        - Query-based:  extract(query='all product prices')
+        - Visual:       extract(strategy='visual')
+        - Paginated:    extract(schema={...}, paginate=True, max_pages=5)
+        - With fallback: extract(schema={...}, fallback='visual')
+
+        Args:
+            schema: Dict mapping field names to CSS selectors. None for auto-extract.
+            query: Natural language extraction query.
+            strategy: Extraction strategy ('visual' for screenshot-based).
+            paginate: If True, extract across multiple pages.
+            max_pages: Max pages to extract when paginating (default 10).
+            delay: Delay between pages in ms (default 1000).
+            fallback: Fallback strategy if DOM extract fails ('visual').
+            limit: Max number of items to return.
+
+        Returns:
+            dict with extracted data and _meta information.
+        """
+        kwargs = {}
+        if schema is not None:
+            kwargs['schema'] = schema
+        if query is not None:
+            kwargs['query'] = query
+        if strategy is not None:
+            kwargs['strategy'] = strategy
+        if paginate:
+            kwargs['paginate'] = True
+            kwargs['maxPages'] = max_pages
+            kwargs['delay'] = delay
+        if fallback is not None:
+            kwargs['fallback'] = fallback
+        if limit is not None:
+            kwargs['limit'] = limit
+        return self._op('extract', **kwargs)
+
+    def extract_semantic(self, query, limit=None):
+        """Extract data using natural language via LLM-powered selectors.
+
+        The LLM generates CSS selectors based on your query and the page structure.
+        Results are cached per domain for faster subsequent queries.
+
+        Args:
+            query: Natural language description of what to extract.
+            limit: Max items to return.
+
+        Returns:
+            dict with extracted data and the selectors used.
+        """
+        body = {'query': query}
+        if limit is not None:
+            body['limit'] = limit
+        return self.client._request(
+            'POST', f'/v1/dev/{self.device_id}/extract/semantic', body=body
+        )
+
+    def learn_template(self, schema):
+        """Learn an extraction template from the current page.
+
+        Extracts data using the schema, then saves the selectors as a
+        reusable template for this domain/URL pattern.
+
+        Args:
+            schema: Dict mapping field names to CSS selectors.
+
+        Returns:
+            dict with the learned template.
+        """
+        return self.client._request(
+            'POST', f'/v1/dev/{self.device_id}/extract/learn', body={'schema': schema}
+        )
 
     def click(self, selector):
         """Click an element by CSS selector."""
@@ -579,3 +653,61 @@ class Browser:
         if isinstance(resp, dict) and 'result' in resp:
             return resp['result']
         return resp
+
+    def templates(self):
+        """List all saved extraction templates.
+
+        Returns:
+            list of template summaries with domain, hitCount, successRate.
+        """
+        resp = self.client._request('GET', '/v1/templates')
+        if isinstance(resp, dict) and 'templates' in resp:
+            return resp['templates']
+        return resp
+
+    def get_template(self, domain):
+        """Get a saved template for a domain.
+
+        Args:
+            domain: The domain (e.g., 'amazon.com').
+
+        Returns:
+            Template dict.
+        """
+        resp = self.client._request('GET', f'/v1/templates/{domain}')
+        if isinstance(resp, dict) and 'template' in resp:
+            return resp['template']
+        return resp
+
+    def delete_template(self, domain):
+        """Delete a saved template for a domain.
+
+        Args:
+            domain: The domain to delete the template for.
+
+        Returns:
+            Confirmation dict.
+        """
+        return self.client._request('DELETE', f'/v1/templates/{domain}')
+
+    def import_template(self, template):
+        """Import a template from a dict.
+
+        Args:
+            template: Template dict with 'domain', 'selectors', etc.
+
+        Returns:
+            Confirmation dict.
+        """
+        return self.client._request('POST', '/v1/templates/import', body=template)
+
+    def export_template(self, domain):
+        """Export a template as a dict.
+
+        Args:
+            domain: The domain to export.
+
+        Returns:
+            Template dict.
+        """
+        return self.client._request('GET', f'/v1/templates/{domain}/export')

@@ -23,6 +23,13 @@ import { PipelineEngine } from './pipeline-engine.js';
 import { ReplayEngine } from './replay-engine.js';
 import { PingAppGenerator } from './pingapp-generator.js';
 import type { Recording } from './types.js';
+import { paginateExtract } from './paginate-extract.js';
+import { visualExtract } from './visual-extract.js';
+import {
+  learnTemplate, applyTemplate, findTemplateForUrl,
+  loadTemplate, listTemplates, deleteTemplate,
+  exportTemplate, importTemplate,
+} from './template-learner.js';
 
 // ---------------------------------------------------------------------------
 // Request / Reply schemas
@@ -1030,6 +1037,69 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
           payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined;
         const selector = typeof payloadObj?.selector === 'string' ? String(payloadObj.selector) : '';
 
+        // Level 10: Template auto-apply — check if we have a template for this URL
+        if (op === 'extract' && !payloadObj?.paginate && !payloadObj?.strategy) {
+          const deviceUrl = getDeviceUrlFromShares(extBridge, device);
+          if (deviceUrl) {
+            const template = findTemplateForUrl(deviceUrl);
+            if (template) {
+              // Only auto-apply if no schema was provided (or schema matches template)
+              const schemaIsEmpty = !payloadObj?.schema || Object.keys(payloadObj.schema as object).length === 0;
+              if (schemaIsEmpty) {
+                try {
+                  const tmplResult = await applyTemplate(extBridge, device, template);
+                  if (Object.keys(tmplResult.data).length > 0) {
+                    return {
+                      ok: true,
+                      result: {
+                        data: tmplResult.data,
+                        _meta: {
+                          strategy: 'template',
+                          template_hit: true,
+                          template_healed: tmplResult.healed,
+                          domain: template.domain,
+                        },
+                      },
+                    };
+                  }
+                } catch { /* template failed, fall through to normal extraction */ }
+              }
+            }
+          }
+        }
+
+        // Level 5: Multi-Page Extract — intercept extract with paginate: true
+        if (op === 'extract' && payloadObj?.paginate) {
+          try {
+            const result = await paginateExtract(extBridge, {
+              deviceId: device,
+              schema: payloadObj.schema as Record<string, string> | undefined,
+              query: payloadObj.query as string | undefined,
+              paginate: true,
+              maxPages: (payloadObj.maxPages as number) ?? 10,
+              delay: (payloadObj.delay as number) ?? 1000,
+            });
+            return { ok: true, result };
+          } catch (err) {
+            return sendPingError(reply, err);
+          }
+        }
+
+        // Level 9: Visual Extract — intercept extract with strategy: "visual"
+        if (op === 'extract' && payloadObj?.strategy === 'visual') {
+          try {
+            const result = await visualExtract(extBridge, {
+              deviceId: device,
+              schema: payloadObj.schema as Record<string, string> | undefined,
+              query: payloadObj.query as string | undefined,
+              strategy: 'visual',
+            });
+            return { ok: true, result };
+          } catch (err) {
+            return sendPingError(reply, err);
+          }
+        }
+
         try {
           const result = await extBridge.callDevice({
             deviceId: device,
@@ -1037,6 +1107,25 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
             payload,
             timeoutMs: 20_000,
           });
+
+          // Level 9: Visual fallback — if extract returned empty and fallback: "visual"
+          if (op === 'extract' && payloadObj?.fallback === 'visual') {
+            const resObj = result as Record<string, unknown>;
+            const resData = (resObj?.result ?? resObj?.data ?? resObj) as Record<string, unknown>;
+            const isEmpty = !resData || Object.values(resData).every(v =>
+              v === '' || v === null || (Array.isArray(v) && v.length === 0),
+            );
+            if (isEmpty) {
+              const visualResult = await visualExtract(extBridge, {
+                deviceId: device,
+                schema: payloadObj.schema as Record<string, string> | undefined,
+                query: payloadObj.query as string | undefined,
+                strategy: 'visual',
+              });
+              return { ok: true, result: visualResult, _fallback: 'visual' };
+            }
+          }
+
           return { ok: true, result };
         } catch (err) {
           // JIT self-healing path: only for selector-based operations.
@@ -1284,6 +1373,121 @@ JSON:`;
       }
     },
   );
+
+  // ---- Level 10: Template Learning endpoints ----
+
+  // POST /v1/dev/:device/extract/learn — learn template from current page
+  app.post<{ Params: { device: string }; Body: { schema: Record<string, string> } }>(
+    '/v1/dev/:device/extract/learn',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { schema?: Record<string, string> } | null;
+      if (!body || !body.schema) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.extract.bad_request',
+          message: 'Missing required field: schema',
+          retryable: false,
+        });
+      }
+      if (!extBridge.ownsDevice(device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${device} not found`,
+          retryable: false,
+        });
+      }
+
+      try {
+        // First extract with the schema to get a successful result
+        const extractResult = await extBridge.callDevice({
+          deviceId: device,
+          op: 'extract',
+          payload: { schema: body.schema },
+          timeoutMs: 20_000,
+        });
+
+        const template = await learnTemplate(
+          extBridge,
+          device,
+          extractResult as Record<string, unknown>,
+          body.schema,
+        );
+
+        return { ok: true, template };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // GET /v1/templates — list all saved templates
+  app.get('/v1/templates', async () => {
+    const templates = listTemplates();
+    return { ok: true, templates };
+  });
+
+  // GET /v1/templates/:domain — get template for a domain
+  app.get<{ Params: { domain: string } }>('/v1/templates/:domain', async (request, reply) => {
+    const template = loadTemplate(request.params.domain);
+    if (!template) {
+      return reply.status(404).send({
+        errno: 'ENOENT',
+        code: 'ping.template.not_found',
+        message: `No template for domain: ${request.params.domain}`,
+        retryable: false,
+      });
+    }
+    return { ok: true, template };
+  });
+
+  // DELETE /v1/templates/:domain — delete template
+  app.delete<{ Params: { domain: string } }>('/v1/templates/:domain', async (request, reply) => {
+    const deleted = deleteTemplate(request.params.domain);
+    if (!deleted) {
+      return reply.status(404).send({
+        errno: 'ENOENT',
+        code: 'ping.template.not_found',
+        message: `No template for domain: ${request.params.domain}`,
+        retryable: false,
+      });
+    }
+    return { ok: true, deleted: true };
+  });
+
+  // POST /v1/templates/import — import a template
+  app.post<{ Body: unknown }>('/v1/templates/import', async (request, reply) => {
+    const body = request.body;
+    if (!body || typeof body !== 'object' || !(body as Record<string, unknown>).domain) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.template.bad_request',
+        message: 'Missing required field: domain',
+        retryable: false,
+      });
+    }
+    try {
+      importTemplate(body as any);
+      return { ok: true, imported: true };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  // GET /v1/templates/:domain/export — export template as JSON
+  app.get<{ Params: { domain: string } }>('/v1/templates/:domain/export', async (request, reply) => {
+    const template = exportTemplate(request.params.domain);
+    if (!template) {
+      return reply.status(404).send({
+        errno: 'ENOENT',
+        code: 'ping.template.not_found',
+        message: `No template for domain: ${request.params.domain}`,
+        retryable: false,
+      });
+    }
+    return template;
+  });
 
   // ---- Recording endpoints ----
   app.post<{ Body: { device: string } }>('/v1/record/start', async (request, reply) => {
