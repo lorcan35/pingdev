@@ -256,6 +256,19 @@ function scheduleReconnect() {
   }, delay) as unknown as number;
 }
 
+function updateBadge() {
+  if (connState === 'connected') {
+    loadSharedTabs().then((tabs) => {
+      const count = Object.keys(tabs).length;
+      chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+      chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
+    }).catch(() => {});
+  } else {
+    chrome.action.setBadgeText({ text: '!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+  }
+}
+
 function broadcastConnectionStatus() {
   chrome.runtime.sendMessage({
     type: 'connection_status',
@@ -267,6 +280,7 @@ function broadcastConnectionStatus() {
   }).catch(() => {
     // Popup may not be open, ignore
   });
+  updateBadge();
 }
 
 function startHeartbeat() {
@@ -809,6 +823,7 @@ async function handleShareTab(tabId: number) {
   await injectAntiFingerprint(tabId);
   await injectContentScript(tabId);
   scheduleHelloSend();
+  updateBadge();
   console.log('[Background] Shared tab:', tabId);
 }
 
@@ -818,6 +833,7 @@ async function handleUnshareTab(tabId: number) {
   manualUnshared[tabId] = true;
   await Promise.all([saveSharedTabs(sharedTabs), saveManualUnsharedTabs(manualUnshared)]);
   scheduleHelloSend();
+  updateBadge();
   console.log('[Background] Unshared tab:', tabId);
 }
 
@@ -832,6 +848,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (hadShared || hadOverride) {
     await Promise.all([saveSharedTabs(sharedTabs), saveManualUnsharedTabs(manualUnshared)]);
     scheduleHelloSend();
+    updateBadge();
     console.log('[Background] Removed closed tab from state:', tabId);
   }
 });

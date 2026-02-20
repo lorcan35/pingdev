@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 /**
- * PingDev CLI — create local API shims for any website.
+ * PingDev / PingOS CLI — create local API shims for any website.
  *
  * Commands:
  *   pingdev init <url>       — scaffold a new PingApp project
  *   pingdev serve            — start the local API server
  *   pingdev health           — check system health
  *   pingdev recon <url>      — auto-map a website into a PingApp config
+ *
+ * Lifecycle (pingos):
+ *   pingos up [--daemon]     — start gateway + Chrome with extension
+ *   pingos down              — stop the gateway
+ *   pingos status            — show gateway, extension, and tab status
+ *   pingos doctor            — check system health and diagnose issues
  */
 
 const args = process.argv.slice(2);
@@ -815,6 +821,398 @@ async function runFunctionsCommand(argv: string[]) {
   }
 }
 
+async function runUpCommand(argv: string[]) {
+  const flags = parseFlags(argv);
+  const { spawn, execSync } = await import('node:child_process');
+  const { existsSync, mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { resolve, join } = await import('node:path');
+  const { homedir } = await import('node:os');
+
+  const pingosDir = join(homedir(), '.pingos');
+  if (!existsSync(pingosDir)) mkdirSync(pingosDir, { recursive: true });
+
+  const gatewayScript = resolve(__dirname, '../../std/dist/main.js');
+  if (!existsSync(gatewayScript)) {
+    console.error('[up] Gateway not found at', gatewayScript);
+    console.error('    Run: pnpm build');
+    process.exit(1);
+  }
+
+  // Check if gateway is already running
+  const pidFile = join(pingosDir, 'gateway.pid');
+  if (existsSync(pidFile)) {
+    const existingPid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+    try {
+      process.kill(existingPid, 0); // test if alive
+      console.log(`[up] Gateway already running (PID ${existingPid})`);
+    } catch {
+      // PID stale, clean up
+    }
+  }
+
+  // Start gateway
+  console.log('[up] Starting gateway...');
+  const gatewayChild = spawn(process.execPath, [gatewayScript], {
+    detached: flags['daemon'] === true,
+    stdio: flags['daemon'] === true ? 'ignore' : ['ignore', 'inherit', 'inherit'],
+    env: { ...process.env },
+  });
+
+  if (flags['daemon'] === true) {
+    gatewayChild.unref();
+  }
+
+  writeFileSync(pidFile, String(gatewayChild.pid));
+  console.log(`[up] Gateway started (PID ${gatewayChild.pid})`);
+
+  // Find Chrome
+  let chromePath = typeof flags['chrome-path'] === 'string' ? flags['chrome-path'] : '';
+  if (!chromePath) {
+    const candidates = ['google-chrome', 'google-chrome-stable', 'chromium-browser', 'chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'];
+    for (const c of candidates) {
+      try {
+        execSync(`which ${c}`, { stdio: 'ignore' });
+        chromePath = c;
+        break;
+      } catch { /* not found */ }
+    }
+  }
+
+  if (!chromePath) {
+    console.error('[up] Chrome/Chromium not found. Use --chrome-path <path>');
+    process.exit(1);
+  }
+
+  // Launch Chrome with extension
+  const extDir = resolve(__dirname, '../../chrome-extension/dist');
+  const profileDir = join(pingosDir, 'chrome-profile');
+  if (!existsSync(profileDir)) mkdirSync(profileDir, { recursive: true });
+
+  console.log(`[up] Launching Chrome: ${chromePath}`);
+  const chromeChild = spawn(chromePath, [
+    `--load-extension=${extDir}`,
+    `--disable-extensions-except=${extDir}`,
+    `--user-data-dir=${profileDir}`,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  chromeChild.unref();
+
+  // Poll for extension connection (up to 15 seconds)
+  console.log('[up] Waiting for extension to connect...');
+  const startTime = Date.now();
+  let connected = false;
+  while (Date.now() - startTime < 15000) {
+    try {
+      const res = await fetch('http://localhost:3500/v1/devices');
+      if (res.ok) {
+        const data = await res.json() as any;
+        const devices = data.devices || [];
+        if (devices.length > 0) {
+          connected = true;
+          console.log(`[up] Connected! ${devices.length} tab(s) available`);
+          break;
+        }
+      }
+    } catch { /* gateway not ready yet */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  if (!connected) {
+    console.log('[up] Extension not yet connected (gateway may still be starting)');
+    console.log('    Run: pingos status');
+  }
+
+  console.log('');
+  console.log('PingOS is running!');
+  console.log(`  Gateway: http://localhost:3500`);
+  console.log(`  PID file: ${pidFile}`);
+
+  if (!flags['daemon']) {
+    // Keep alive - forward signals
+    process.on('SIGINT', () => {
+      try { process.kill(gatewayChild.pid!, 'SIGTERM'); } catch {}
+      process.exit(0);
+    });
+    process.on('SIGTERM', () => {
+      try { process.kill(gatewayChild.pid!, 'SIGTERM'); } catch {}
+      process.exit(0);
+    });
+    // Don't exit — let gateway stdout keep us alive
+    await new Promise(() => {}); // block forever in non-daemon mode
+  }
+}
+
+async function runDownCommand(argv: string[]) {
+  const flags = parseFlags(argv);
+  const { existsSync, readFileSync, unlinkSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { homedir } = await import('node:os');
+
+  const pingosDir = join(homedir(), '.pingos');
+  const pidFile = join(pingosDir, 'gateway.pid');
+
+  let killed = false;
+
+  // Try PID file first
+  if (existsSync(pidFile)) {
+    const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+    try {
+      process.kill(pid, 'SIGTERM');
+      console.log(`[down] Stopped gateway (PID ${pid})`);
+      killed = true;
+    } catch {
+      console.log(`[down] Gateway process ${pid} not running`);
+    }
+    unlinkSync(pidFile);
+  }
+
+  // Fallback: find process listening on port 3500
+  if (!killed) {
+    try {
+      const { execSync } = await import('node:child_process');
+      const output = execSync('lsof -ti :3500 2>/dev/null || fuser 3500/tcp 2>/dev/null || true', { encoding: 'utf-8' }).trim();
+      if (output) {
+        const pids = output.split(/\s+/).map(p => parseInt(p, 10)).filter(p => !isNaN(p));
+        for (const pid of pids) {
+          try {
+            process.kill(pid, 'SIGTERM');
+            console.log(`[down] Killed process on port 3500 (PID ${pid})`);
+            killed = true;
+          } catch { /* already dead */ }
+        }
+      }
+    } catch { /* lsof/fuser not available */ }
+  }
+
+  if (!killed) {
+    console.log('[down] No gateway process found');
+  }
+
+  if (flags['close-chrome'] === true) {
+    console.log('[down] Note: --close-chrome not implemented (close Chrome manually)');
+  }
+
+  console.log('[down] Done');
+}
+
+async function runStatusCommand(argv: string[]) {
+  const { existsSync, readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { homedir } = await import('node:os');
+
+  const pingosDir = join(homedir(), '.pingos');
+  const pidFile = join(pingosDir, 'gateway.pid');
+
+  // ANSI colors
+  const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+  const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+  const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+  console.log(bold('PingOS Status'));
+  console.log('');
+
+  // Gateway process
+  let gatewayRunning = false;
+  let gatewayPid = 0;
+  if (existsSync(pidFile)) {
+    gatewayPid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+    try {
+      process.kill(gatewayPid, 0);
+      gatewayRunning = true;
+    } catch {
+      gatewayRunning = false;
+    }
+  }
+
+  if (gatewayRunning) {
+    console.log(`  Gateway:    ${green('running')} ${dim(`(PID ${gatewayPid}, port 3500)`)}`);
+  } else {
+    console.log(`  Gateway:    ${red('stopped')}`);
+  }
+
+  // Try API
+  let devices: any[] = [];
+  let extensionConnected = false;
+  try {
+    const res = await fetch('http://localhost:3500/v1/devices');
+    if (res.ok) {
+      const data = await res.json() as any;
+      devices = data.devices || [];
+      extensionConnected = devices.length > 0;
+
+      if (extensionConnected) {
+        console.log(`  Extension:  ${green('connected')} ${dim(`(${devices.length} tab(s))`)}`);
+      } else {
+        console.log(`  Extension:  ${yellow('no tabs registered')}`);
+      }
+    } else {
+      console.log(`  Extension:  ${red('gateway error')}`);
+    }
+  } catch {
+    console.log(`  Extension:  ${red('cannot reach gateway')}`);
+  }
+
+  // Tabs
+  if (devices.length > 0) {
+    console.log('');
+    console.log(bold('  Tabs:'));
+    for (const d of devices) {
+      const title = (d.title || 'Untitled').slice(0, 50);
+      const url = (d.url || '').slice(0, 60);
+      console.log(`    ${green(d.id)} ${title}`);
+      console.log(`      ${dim(url)}`);
+    }
+  }
+
+  // Watches & recordings (if gateway is up)
+  if (gatewayRunning || devices.length > 0) {
+    try {
+      const watchRes = await fetch('http://localhost:3500/v1/watches');
+      if (watchRes.ok) {
+        const watchData = await watchRes.json() as any;
+        const watchCount = watchData.watches?.length || 0;
+        console.log('');
+        console.log(`  Watches:    ${watchCount > 0 ? yellow(String(watchCount) + ' active') : dim('none')}`);
+      }
+    } catch { /* endpoint may not exist */ }
+
+    try {
+      const recRes = await fetch('http://localhost:3500/v1/recordings');
+      if (recRes.ok) {
+        const recData = await recRes.json() as any;
+        const recCount = recData.recordings?.length || 0;
+        console.log(`  Recordings: ${recCount > 0 ? yellow(String(recCount) + ' active') : dim('none')}`);
+      }
+    } catch { /* endpoint may not exist */ }
+  }
+
+  console.log('');
+}
+
+async function runDoctorCommand(argv: string[]) {
+  const { existsSync } = await import('node:fs');
+  const { resolve, join } = await import('node:path');
+  const { homedir } = await import('node:os');
+  const { execSync } = await import('node:child_process');
+
+  const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+  const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+  const pass = (label: string, detail?: string) => {
+    console.log(`  ${green('PASS')}  ${label}${detail ? '  ' + dim(detail) : ''}`);
+    return true;
+  };
+  const fail = (label: string, fix?: string) => {
+    console.log(`  ${red('FAIL')}  ${label}`);
+    if (fix) console.log(`        ${dim('Fix: ' + fix)}`);
+    return false;
+  };
+
+  console.log(bold('PingOS Doctor'));
+  console.log('');
+
+  let allPass = true;
+
+  // 1. Node.js version
+  const nodeVersion = process.versions.node;
+  const major = parseInt(nodeVersion.split('.')[0], 10);
+  if (major >= 18) {
+    pass('Node.js', `v${nodeVersion}`);
+  } else {
+    allPass = false;
+    fail('Node.js version', `Found v${nodeVersion}, need >= 18`);
+  }
+
+  // 2. Gateway binary
+  const gatewayScript = resolve(__dirname, '../../std/dist/main.js');
+  if (existsSync(gatewayScript)) {
+    pass('Gateway binary', gatewayScript);
+  } else {
+    allPass = false;
+    fail('Gateway binary not found', 'Run: pnpm build');
+  }
+
+  // 3. Port 3500
+  let portInUse = false;
+  try {
+    const res = await fetch('http://localhost:3500/v1/devices');
+    if (res.ok) {
+      portInUse = true;
+      pass('Port 3500', 'gateway is running');
+    } else {
+      portInUse = true;
+      pass('Port 3500', 'in use (gateway responding)');
+    }
+  } catch {
+    // Port is free or gateway not running
+    try {
+      execSync('lsof -ti :3500 2>/dev/null', { encoding: 'utf-8' });
+      portInUse = true;
+      allPass = false;
+      fail('Port 3500', 'In use by another process. Run: lsof -ti :3500');
+    } catch {
+      pass('Port 3500', 'available');
+    }
+  }
+
+  // 4. Chrome/Chromium
+  let chromePath = '';
+  const candidates = ['google-chrome', 'google-chrome-stable', 'chromium-browser', 'chromium'];
+  for (const c of candidates) {
+    try {
+      execSync(`which ${c} 2>/dev/null`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      chromePath = c;
+      break;
+    } catch { /* not found */ }
+  }
+  if (chromePath) {
+    pass('Chrome/Chromium', chromePath);
+  } else {
+    allPass = false;
+    fail('Chrome/Chromium not found', 'Install Chrome or Chromium, or use --chrome-path with pingos up');
+  }
+
+  // 5. Extension dist
+  const extDir = resolve(__dirname, '../../chrome-extension/dist');
+  const manifestPath = join(extDir, 'manifest.json');
+  if (existsSync(extDir) && existsSync(manifestPath)) {
+    pass('Extension dist', extDir);
+  } else {
+    allPass = false;
+    fail('Extension dist not found', 'Run: cd packages/chrome-extension && node build.mjs');
+  }
+
+  // 6. If gateway running, check devices
+  if (portInUse) {
+    try {
+      const res = await fetch('http://localhost:3500/v1/devices');
+      if (res.ok) {
+        const data = await res.json() as any;
+        const devices = data.devices || [];
+        if (devices.length > 0) {
+          pass('Extension connected', `${devices.length} tab(s)`);
+        } else {
+          pass('Gateway API responding', 'no tabs connected yet');
+        }
+      }
+    } catch { /* already handled */ }
+  }
+
+  console.log('');
+  if (allPass) {
+    console.log(green('All checks passed!'));
+  } else {
+    console.log(red('Some checks failed. See fix suggestions above.'));
+    process.exit(1);
+  }
+}
+
 switch (command) {
   case 'recon':
     runReconCommand(args.slice(1)).catch((err) => {
@@ -945,6 +1343,34 @@ switch (command) {
       process.exit(1);
     });
     break;
+  case 'up':
+    runUpCommand(args.slice(1)).catch((err) => {
+      console.error(`[up] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'down':
+    runDownCommand(args.slice(1)).catch((err) => {
+      console.error(`[down] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'status':
+    runStatusCommand(args.slice(1)).catch((err) => {
+      console.error(`[status] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'doctor':
+    runDoctorCommand(args.slice(1)).catch((err) => {
+      console.error(`[doctor] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
   case 'init':
     console.log('pingdev init — not yet implemented (Phase 2)');
     break;
@@ -971,5 +1397,11 @@ switch (command) {
     console.log('  mcp [--sse] [--port] Start MCP server for Claude Desktop / Cursor');
     console.log('  init <url>           Scaffold a new PingApp for the given URL');
     console.log('  health               Check system health');
+    console.log('');
+    console.log('Lifecycle:');
+    console.log('  up [--daemon]          Start gateway + Chrome with PingOS extension');
+    console.log('  down                   Stop the gateway');
+    console.log('  status                 Show gateway, extension, and tab status');
+    console.log('  doctor                 Check system health and diagnose issues');
     process.exit(command ? 1 : 0);
 }

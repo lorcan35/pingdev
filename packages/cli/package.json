@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "type": "commonjs",
   "bin": {
-    "pingdev": "dist/index.js"
+    "pingdev": "dist/index.js",
+    "pingos": "dist/index.js"
   },
   "scripts": {
     "build": "tsc"
