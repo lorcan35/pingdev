@@ -79,10 +79,11 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full setup guide.
 
 | Feature | Status | Description |
 |---|---|---|
-| Device operations (click, type, read, eval) | ✅ Stable | Control any shared browser tab via REST |
-| Extract engine | ✅ Stable | Pull structured data from live pages |
+| **32 device operations** | ✅ Stable | click, type, read, fill, select, hover, scroll, navigate, press, wait, assert, and 21 more |
+| Smart Extract (10 levels) | ✅ Stable | L1 CSS, L2 zero-config, L3 semantic, L4 JSON-LD, L5 multi-page, L6 nested, L7 typed, L8 shadow DOM, L9 visual, L10 template |
 | Act engine | ✅ Stable | Click, type, navigate, upload — stealth mode |
 | PingApps | ✅ Stable | Compiled website drivers (AliExpress, Amazon, Claude) |
+| CDP fallback | ✅ Stable | Automatic DevTools Protocol fallback for CSP-restricted pages |
 | Self-heal | 🔶 Beta | LLM-assisted selector repair with caching |
 | Recorder + Replay | ✅ Stable | Record interactions, replay with selector resilience |
 | Cross-tab Pipelines | ✅ Stable | Chain operations across tabs with variable interpolation |
@@ -91,7 +92,9 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full setup guide.
 | Tab-as-a-Function | ✅ Stable | Call tab operations as typed functions with params |
 | PingApp Generator | ✅ Stable | Generate PingApps from recorded workflows |
 | MCP Server | ✅ Stable | 15 tools + 3 resources for Claude Desktop / Cursor |
-| LLM routing | ✅ Stable | Capability-based routing across local and cloud models |
+| LLM routing | ✅ Stable | 4 providers — OpenRouter, Anthropic, OpenAI, LM Studio |
+| Template Learning | ✅ Stable | Learn extraction patterns per domain, auto-apply on revisit |
+| Visual Extract | ✅ Stable | Screenshot + vision model extraction for canvas/SVG content |
 | Ad blocking / page cleanup | ✅ Stable | Remove clutter before extraction |
 | Recon (snapshot + analysis) | ✅ Stable | Full-page interactive element discovery |
 
@@ -279,6 +282,47 @@ See [docs/MCP.md](docs/MCP.md) for setup instructions.
 
 See [docs/DRIVERS.md](docs/DRIVERS.md) for configuration.
 
+### New in v0.3 — 32 Operations + Smart Extract
+
+15 new device operations for comprehensive browser automation:
+
+| Operation | Description |
+|-----------|-------------|
+| `fill` | Smart form filling — auto-detects fields by label, placeholder, name |
+| `wait` | Wait for conditions: visible, hidden, networkIdle, domStable, text |
+| `table` | Extract structured data from HTML tables and grids |
+| `dialog` | Detect and dismiss modals, cookie banners, paywalls |
+| `paginate` | Auto-detect and navigate pagination (links, buttons, infinite scroll) |
+| `select` | Text selection — range or full element |
+| `navigate` | Go to URL or find/click links by keyword |
+| `hover` | Trigger hover states — reveal tooltips, menus, previews |
+| `assert` | DOM verification (exists, visible, text, count, attribute) |
+| `network` | Capture and inspect network requests (fetch + XHR) |
+| `storage` | Read/write localStorage, sessionStorage, cookies |
+| `capture` | Rich page capture (DOM, PDF, MHTML, HAR) |
+| `upload` | File upload to file inputs |
+| `download` | Trigger downloads by URL or clicking elements |
+| `annotate` | Add visual annotations (boxes, highlights, arrows) |
+
+See [docs/operations.md](docs/operations.md) for all 32 operations with curl examples.
+
+### Smart Extract (10 Levels)
+
+| Level | Name | Description |
+|-------|------|-------------|
+| L1 | Basic CSS | Standard `querySelector` extraction |
+| L2 | Zero-Config | Auto-detect page type, apply default schema |
+| L3 | Semantic | LLM generates selectors from natural language |
+| L4 | JSON-LD | Extract from Schema.org structured data |
+| L5 | Multi-Page | Paginate and extract across pages |
+| L6 | Nested | Hierarchical container-based extraction |
+| L7 | Type-Aware | Auto-parse values (currency, date, rating, etc.) |
+| L8 | Shadow DOM | Pierce Web Component shadow boundaries |
+| L9 | Visual | Screenshot + vision model extraction |
+| L10 | Template | Learn and reuse extraction patterns per domain |
+
+See [docs/smart-extract.md](docs/smart-extract.md) for details on each level.
+
 ### Novel Features
 
 | Feature | Endpoint | Description |
@@ -289,6 +333,7 @@ See [docs/DRIVERS.md](docs/DRIVERS.md) for configuration.
 | Schema Auto-Discovery | `GET /v1/dev/:device/discover` | Classify page type and generate schemas (no LLM, <100ms) |
 | PingApp Generator | `POST /v1/apps/generate` | Generate a complete PingApp definition from URL + description |
 | Tab-as-a-Function | `GET /v1/functions` | Call browser tab operations as typed functions |
+| CDP Fallback | Automatic | Chrome DevTools Protocol fallback for CSP-restricted sites |
 
 See [docs/NOVEL-FEATURES.md](docs/NOVEL-FEATURES.md) for examples and usage.
 
@@ -327,10 +372,13 @@ packages/
 | [Installation Guide](docs/INSTALL.md) | From zero to first API call |
 | [Architecture](docs/ARCHITECTURE.md) | System design, data flows, all engines |
 | [API Reference](docs/API.md) | Full HTTP API with schemas and examples |
-| [Extract Engine](docs/EXTRACT-ENGINE.md) | Structured data extraction from live pages |
+| [**Operations Reference**](docs/operations.md) | All 32 device operations with params and curl examples |
+| [**Smart Extract**](docs/smart-extract.md) | 10-level extraction pipeline (L1-L10) |
+| [**CDP Fallback**](docs/cdp-fallback.md) | Chrome DevTools Protocol fallback for CSP-restricted sites |
+| [Extract Engine](docs/EXTRACT-ENGINE.md) | Deep dive into the extract engine internals |
 | [Act Engine](docs/ACT-ENGINE.md) | Click, type, navigate — stealth interaction |
 | [PingApps Guide](docs/PINGAPPS.md) | Building and running compiled website drivers |
-| [Drivers](docs/DRIVERS.md) | LLM driver adapters and configuration |
+| [LLM Drivers](docs/DRIVERS.md) | 4 LLM providers — OpenRouter, Anthropic, OpenAI, LM Studio |
 | [Novel Features](docs/NOVEL-FEATURES.md) | Query, Watch, Diff, Discover, Generator |
 | [MCP Server](docs/MCP.md) | AI assistant integration (Claude Desktop, Cursor) |
 
