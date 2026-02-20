@@ -8,9 +8,9 @@ import { createGateway } from '../gateway.js';
 import { ModelRegistry } from '../registry.js';
 import { PingAppAdapter } from '../drivers/pingapp-adapter.js';
 
-// Use an ephemeral port to avoid conflicts with a dev gateway running locally.
+// Use ephemeral ports to avoid conflicts with other services.
 const GATEWAY_PORT = 0;
-const GEMINI_ENDPOINT = 'http://localhost:3456';
+let GEMINI_ENDPOINT = 'http://localhost:3456';
 let BASE = '';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -72,8 +72,13 @@ beforeAll(async () => {
 
     await new Promise<void>((resolve, reject) => {
       mockPingApp!.once('error', reject);
-      mockPingApp!.listen(3456, '::', () => resolve());
+      mockPingApp!.listen(0, '127.0.0.1', () => resolve());
     });
+
+    const mockAddr = mockPingApp!.address();
+    if (mockAddr && typeof mockAddr === 'object' && 'port' in mockAddr) {
+      GEMINI_ENDPOINT = `http://127.0.0.1:${mockAddr.port}`;
+    }
 
     mockStarted = true;
   }

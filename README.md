@@ -223,6 +223,47 @@ Tested across **9 live production websites** (YouTube, Hacker News, Amazon, Redd
 
 ---
 
+## v0.2 — What's New
+
+### MCP Server
+
+PingOS now includes a Model Context Protocol server, letting Claude Desktop, Cursor, and other MCP clients control your browser directly. 15 tools, 3 resources, stdio + SSE transport.
+
+```bash
+pingdev mcp              # stdio mode (Claude Desktop)
+pingdev mcp --sse        # SSE mode (web clients)
+```
+
+See [docs/MCP.md](docs/MCP.md) for setup instructions.
+
+### Multi-Provider LLM Routing
+
+4 LLM providers with automatic registration:
+
+| Provider | Type | Auto-registered |
+|----------|------|:-:|
+| OpenRouter | Cloud (100+ models) | When `OPENROUTER_API_KEY` is set |
+| Anthropic | Cloud (Claude models) | When `ANTHROPIC_API_KEY` is set |
+| OpenAI | Cloud (GPT/o-series) | When `OPENAI_API_KEY` is set |
+| LM Studio | Local | Always (gracefully offline) |
+
+See [docs/DRIVERS.md](docs/DRIVERS.md) for configuration.
+
+### Novel Features
+
+| Feature | Endpoint | Description |
+|---------|----------|-------------|
+| Natural Language Query | `POST /v1/dev/:device/query` | Ask questions about any page — LLM finds the right selector |
+| Live Data Streams | `POST /v1/dev/:device/watch` | SSE stream of page data changes |
+| Diff Extraction | `POST /v1/dev/:device/diff` | Track field-level changes between extractions |
+| Schema Auto-Discovery | `GET /v1/dev/:device/discover` | Classify page type and generate schemas (no LLM, <100ms) |
+| PingApp Generator | `POST /v1/apps/generate` | Generate a complete PingApp definition from URL + description |
+| Tab-as-a-Function | `GET /v1/functions` | Call browser tab operations as typed functions |
+
+See [docs/NOVEL-FEATURES.md](docs/NOVEL-FEATURES.md) for examples and usage.
+
+---
+
 ## Package Structure
 
 ```

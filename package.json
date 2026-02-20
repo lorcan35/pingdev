@@ -5,7 +5,7 @@
   "description": "PingOS — an ahead-of-time web-to-API compiler. The operating system for the web.",
   "workspaces": ["packages/*"],
   "scripts": {
-    "build": "npm run build --workspaces",
+    "build": "npm run build -w packages/core && npm run build -w packages/std -w packages/cli -w packages/recon -w packages/mcp-server -w packages/chrome-extension",
     "dev": "npm run dev --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest",

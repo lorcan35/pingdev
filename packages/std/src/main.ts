@@ -8,6 +8,9 @@ import { logCrash, logGateway, serializeError } from './gw-log.js';
 import { loadConfig } from './config.js';
 import { OpenRouterAdapter } from './drivers/openrouter.js';
 import { OpenAICompatAdapter } from './drivers/openai-compat.js';
+import { AnthropicAdapter } from './drivers/anthropic.js';
+import { OpenAIAdapter } from './drivers/openai.js';
+import { LMStudioAdapter } from './drivers/lmstudio.js';
 
 // ---------------------------------------------------------------------------
 // Crash / rejection logging
@@ -77,20 +80,46 @@ if (config.llm?.ollama) {
   logGateway('[main] registered ollama driver');
 }
 
-// LM Studio — from config
-if (config.llm?.lmstudio) {
-  const lms = config.llm.lmstudio;
+// Anthropic — from config or ANTHROPIC_API_KEY env
+const anthropicApiKey = config.llm?.anthropic?.apiKey ?? process.env.ANTHROPIC_API_KEY;
+if (anthropicApiKey) {
   registry.register(
-    new OpenAICompatAdapter({
-      id: 'lmstudio',
-      name: 'LM Studio',
-      endpoint: lms.baseUrl.replace(/\/$/, ''),
-      model: lms.model,
+    new AnthropicAdapter({
+      id: 'anthropic',
+      name: 'Anthropic',
+      endpoint: 'https://api.anthropic.com',
+      apiKey: anthropicApiKey,
+      model: config.llm?.anthropic?.model ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
       capabilities: {
-        llm: true, streaming: true, vision: false, toolCalling: false,
-        imageGen: false, search: false, deepResearch: false, thinking: false,
+        llm: true, streaming: true, vision: true, toolCalling: true,
+        imageGen: false, search: false, deepResearch: false, thinking: true,
       },
-      priority: 10,
+      priority: 5,
+    }),
+  );
+  logGateway('[main] registered anthropic driver');
+}
+
+// OpenAI — from config or OPENAI_API_KEY env
+const openaiApiKey = config.llm?.openai?.apiKey ?? process.env.OPENAI_API_KEY;
+if (openaiApiKey) {
+  registry.register(
+    new OpenAIAdapter({
+      apiKey: openaiApiKey,
+      model: config.llm?.openai?.model ?? process.env.OPENAI_MODEL ?? 'gpt-4o',
+      priority: 5,
+    }),
+  );
+  logGateway('[main] registered openai driver');
+}
+
+// LM Studio — from config or always try (local, no auth)
+{
+  const lmsCfg = config.llm?.lmstudio;
+  registry.register(
+    new LMStudioAdapter({
+      endpoint: lmsCfg?.baseUrl,
+      model: lmsCfg?.model,
     }),
   );
   logGateway('[main] registered lmstudio driver');

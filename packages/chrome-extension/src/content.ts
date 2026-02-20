@@ -164,6 +164,20 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
       case 'screenshot':
         response = { success: false, error: 'Screenshot not implemented in content script' };
         break;
+      case 'watch': {
+        const watchSchema = (command as any).schema as Record<string, string> | undefined;
+        if (!watchSchema || typeof watchSchema !== 'object') {
+          response = { success: false, error: 'Missing schema for watch' };
+        } else {
+          const watchData: Record<string, string> = {};
+          for (const [key, sel] of Object.entries(watchSchema)) {
+            const el = document.querySelector(sel);
+            watchData[key] = el ? (el.textContent?.trim() ?? '') : '';
+          }
+          response = { success: true, data: watchData };
+        }
+        break;
+      }
       default:
         response = { success: false, error: 'Unknown command type' };
         break;
