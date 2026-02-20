@@ -17,6 +17,11 @@ export default defineConfig({
         },
         rewrite: (path) => path.replace(/^\/api\/\d+/, ''),
       },
+      '/gw': {
+        target: 'http://localhost:3500',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/gw/, ''),
+      },
     },
   },
   build: {

@@ -7,6 +7,17 @@
 ![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-yellow)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
+## PingOS in 60 Seconds
+
+```bash
+git clone <repo-url> pingos && cd pingos
+npm install && npm run build
+npx pingos up          # starts gateway + opens Chrome with extension
+# Share a tab → Extract data → Build automations
+```
+
+[Full Quick Start Guide →](docs/QUICKSTART.md) | [Entry Points for Your Use Case →](docs/ENTRY-POINTS.md)
+
 ---
 
 ## What is PingOS?
@@ -52,26 +63,36 @@ Most automation tools launch a fresh browser for every task. AI web agents burn 
 
 ```bash
 git clone <repo-url> pingos && cd pingos
-npm install
-npm run build
-# Load packages/chrome-extension/dist in chrome://extensions (Developer Mode → Load Unpacked)
-npx tsx packages/std/src/main.ts
+npm install && npm run build
+npx pingos up
 ```
 
-Verify:
+`pingos up` starts the gateway on port 3500 and launches Chrome with the extension loaded. Share a tab via the extension popup, then:
 
 ```bash
-curl http://localhost:3500/v1/health
-# {"status":"healthy","timestamp":"..."}
+# Check what's connected
+npx pingos status
+
+# Extract data from a shared tab
+curl -X POST http://localhost:3500/v1/dev/chrome-{tabId}/extract \
+  -H "Content-Type: application/json" \
+  -d '{"query": "extract all headlines"}'
+
+# Or run the interactive demo
+npx pingos demo
 ```
 
-Share a browser tab via the extension popup, then:
+**Useful commands:**
 
-```bash
-curl -X POST http://localhost:3500/v1/dev/chrome-{tabId}/recon
-```
+| Command | Description |
+|---|---|
+| `npx pingos up` | Start gateway + Chrome with extension |
+| `npx pingos down` | Stop the gateway |
+| `npx pingos status` | Show gateway, extension, and tab status |
+| `npx pingos doctor` | Check system health and diagnose issues |
+| `npx pingos demo` | Run a quick extract demo on a connected tab |
 
-See [docs/INSTALL.md](docs/INSTALL.md) for the full setup guide.
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full 5-minute guide, or [docs/INSTALL.md](docs/INSTALL.md) for advanced setup.
 
 ---
 
@@ -369,7 +390,9 @@ packages/
 
 | Document | Description |
 |---|---|
-| [Installation Guide](docs/INSTALL.md) | From zero to first API call |
+| [**Quick Start**](docs/QUICKSTART.md) | 5-minute guide to get running |
+| [**Entry Points**](docs/ENTRY-POINTS.md) | Find the right path for your use case |
+| [Installation Guide](docs/INSTALL.md) | Full setup with environment variables |
 | [Architecture](docs/ARCHITECTURE.md) | System design, data flows, all engines |
 | [API Reference](docs/API.md) | Full HTTP API with schemas and examples |
 | [**Operations Reference**](docs/operations.md) | All 32 device operations with params and curl examples |

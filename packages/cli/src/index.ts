@@ -3,7 +3,9 @@
  * PingDev / PingOS CLI — create local API shims for any website.
  *
  * Commands:
- *   pingdev init <url>       — scaffold a new PingApp project
+ *   pingdev init [url]       — scaffold a new PingApp (wizard or auto-recon)
+ *   pingdev app list         — list pre-built PingApps
+ *   pingdev app install <n>  — install a pre-built PingApp config
  *   pingdev serve            — start the local API server
  *   pingdev health           — check system health
  *   pingdev recon <url>      — auto-map a website into a PingApp config
@@ -927,6 +929,7 @@ async function runUpCommand(argv: string[]) {
   console.log('');
   console.log('PingOS is running!');
   console.log(`  Gateway: http://localhost:3500`);
+  console.log('  Dashboard: http://localhost:3500');
   console.log(`  PID file: ${pidFile}`);
 
   if (!flags['daemon']) {
@@ -1088,6 +1091,25 @@ async function runStatusCommand(argv: string[]) {
         console.log(`  Recordings: ${recCount > 0 ? yellow(String(recCount) + ' active') : dim('none')}`);
       }
     } catch { /* endpoint may not exist */ }
+
+    // PingApps
+    try {
+      const appsRes = await fetch('http://localhost:3500/v1/apps');
+      if (appsRes.ok) {
+        const appsData = await appsRes.json() as any;
+        const apps = appsData.apps || [];
+        if (apps.length > 0) {
+          console.log('');
+          console.log(bold('  PingApps:'));
+          for (const app of apps) {
+            const routeCount = app.routes?.length || app.routeCount || 0;
+            console.log(`    ${green(app.name)}  ${dim(`(${routeCount} route${routeCount !== 1 ? 's' : ''})`)}`);
+          }
+        } else {
+          console.log(`  PingApps:   ${dim('none loaded')}`);
+        }
+      }
+    } catch { /* endpoint may not exist */ }
   }
 
   console.log('');
@@ -1188,7 +1210,15 @@ async function runDoctorCommand(argv: string[]) {
     fail('Extension dist not found', 'Run: cd packages/chrome-extension && node build.mjs');
   }
 
-  // 6. If gateway running, check devices
+  // 6. Redis (optional)
+  try {
+    await fetch('http://localhost:6379');
+    pass('Redis', 'reachable on port 6379');
+  } catch {
+    pass('Redis', 'not available (optional)');
+  }
+
+  // 7. If gateway running, check devices
   if (portInUse) {
     try {
       const res = await fetch('http://localhost:3500/v1/devices');
@@ -1210,6 +1240,358 @@ async function runDoctorCommand(argv: string[]) {
   } else {
     console.log(red('Some checks failed. See fix suggestions above.'));
     process.exit(1);
+  }
+}
+
+async function runDemoCommand(argv: string[]) {
+  const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+  const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+  const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
+
+  console.log(bold('PingOS Demo'));
+  console.log('');
+
+  // Check if gateway is running
+  let gatewayUp = false;
+  try {
+    const healthRes = await fetch('http://localhost:3500/v1/health');
+    if (healthRes.ok) {
+      gatewayUp = true;
+      console.log(`  Gateway:  ${green('running')}`);
+    }
+  } catch {
+    // gateway not reachable
+  }
+
+  if (!gatewayUp) {
+    console.log(`  Gateway:  ${red('not running')}`);
+    console.log('');
+    console.log(`Start PingOS first: ${cyan('pingos up')}`);
+    return;
+  }
+
+  // List devices
+  let devices: any[] = [];
+  try {
+    const devRes = await fetch('http://localhost:3500/v1/devices');
+    if (devRes.ok) {
+      const devData = await devRes.json() as any;
+      devices = devData.devices || [];
+    }
+  } catch {
+    // devices endpoint failed
+  }
+
+  if (devices.length === 0) {
+    console.log(`  Devices:  ${red('none connected')}`);
+    console.log('');
+    console.log(`Start PingOS first: ${cyan('pingos up')}`);
+    console.log('Open a browser tab and the extension will register it as a device.');
+    return;
+  }
+
+  console.log(`  Devices:  ${green(String(devices.length) + ' connected')}`);
+  console.log('');
+
+  // Pick the first device and run an extract
+  const device = devices[0];
+  const title = (device.title || 'Untitled').slice(0, 60);
+  const url = (device.url || '').slice(0, 80);
+  console.log(`  Target:   ${bold(device.id)}`);
+  console.log(`            ${title}`);
+  console.log(`            ${dim(url)}`);
+  console.log('');
+  console.log('  Running extract...');
+
+  try {
+    const extractRes = await fetch(`http://localhost:3500/v1/dev/${encodeURIComponent(device.id)}/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const extractData = await extractRes.json() as any;
+    if (!extractRes.ok) {
+      console.log(`  ${red('Extract failed:')} ${extractData.message || extractRes.statusText}`);
+      return;
+    }
+
+    const result = extractData.result ?? extractData;
+    console.log('');
+    console.log(bold('  Extract Result:'));
+    console.log(cyan(JSON.stringify(result, null, 2).split('\n').map(l => '    ' + l).join('\n')));
+  } catch (err: any) {
+    console.log(`  ${red('Extract failed:')} ${err.message || err}`);
+  }
+
+  console.log('');
+  console.log(dim('  This was a demo extract. Use `pingdev extract <device>` for full options.'));
+}
+
+// =============================================
+// Pre-built PingApp definitions
+// =============================================
+const PREBUILT_APPS: Array<{
+  name: string;
+  displayName: string;
+  url: string;
+  domain: string;
+  description: string;
+  actions: Array<{ name: string; description: string; route: string }>;
+}> = [
+  {
+    name: 'aliexpress',
+    displayName: 'AliExpress',
+    url: 'https://www.aliexpress.com',
+    domain: 'aliexpress.com',
+    description: 'AliExpress shopping — search, product details, cart, orders, wishlist',
+    actions: [
+      { name: 'search', description: 'Search for products', route: 'POST /v1/app/aliexpress/search' },
+      { name: 'product', description: 'View product details', route: 'POST /v1/app/aliexpress/product' },
+      { name: 'cart', description: 'View shopping cart', route: 'GET /v1/app/aliexpress/cart' },
+      { name: 'cart/add', description: 'Add product to cart', route: 'POST /v1/app/aliexpress/cart/add' },
+      { name: 'cart/remove', description: 'Remove item from cart', route: 'POST /v1/app/aliexpress/cart/remove' },
+      { name: 'orders', description: 'View order history', route: 'GET /v1/app/aliexpress/orders' },
+      { name: 'wishlist', description: 'View wishlist', route: 'GET /v1/app/aliexpress/wishlist' },
+    ],
+  },
+  {
+    name: 'amazon',
+    displayName: 'Amazon',
+    url: 'https://www.amazon.com',
+    domain: 'amazon.com',
+    description: 'Amazon shopping — search, product details, cart, orders, deals',
+    actions: [
+      { name: 'search', description: 'Search for products', route: 'POST /v1/app/amazon/search' },
+      { name: 'product', description: 'View product details', route: 'POST /v1/app/amazon/product' },
+      { name: 'cart', description: 'View shopping cart', route: 'GET /v1/app/amazon/cart' },
+      { name: 'cart/add', description: 'Add product to cart', route: 'POST /v1/app/amazon/cart/add' },
+      { name: 'orders', description: 'View order history', route: 'GET /v1/app/amazon/orders' },
+      { name: 'deals', description: 'View current deals', route: 'GET /v1/app/amazon/deals' },
+    ],
+  },
+  {
+    name: 'claude',
+    displayName: 'Claude.ai',
+    url: 'https://claude.ai',
+    domain: 'claude.ai',
+    description: 'Claude AI assistant — chat, conversations, projects, artifacts',
+    actions: [
+      { name: 'chat', description: 'Send a message', route: 'POST /v1/app/claude/chat' },
+      { name: 'chat/new', description: 'Start a new conversation', route: 'POST /v1/app/claude/chat/new' },
+      { name: 'chat/read', description: 'Read latest response', route: 'GET /v1/app/claude/chat/read' },
+      { name: 'conversations', description: 'List conversations', route: 'GET /v1/app/claude/conversations' },
+      { name: 'model', description: 'Get/set active model', route: 'GET /v1/app/claude/model' },
+      { name: 'projects', description: 'List projects', route: 'GET /v1/app/claude/projects' },
+      { name: 'artifacts', description: 'List artifacts', route: 'GET /v1/app/claude/artifacts' },
+      { name: 'search', description: 'Search conversations', route: 'GET /v1/app/claude/search' },
+    ],
+  },
+];
+
+async function runInitCommand(argv: string[]) {
+  const url = argv.find((a) => !a.startsWith('--'));
+  const flags = parseFlags(argv);
+
+  if (url) {
+    // Non-interactive: run recon on the URL
+    console.log(`[init] Generating PingApp for ${url}...`);
+    const outputDir = typeof flags['output'] === 'string' ? flags['output'] : './pingapp';
+    return runReconCommand([url, '--output', outputDir]);
+  }
+
+  // Interactive mode: prompt user
+  const readline = await import('node:readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string): Promise<string> => new Promise((r) => rl.question(q, r));
+
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+  const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+  console.log('');
+  console.log(bold('Welcome to PingOS! Let\'s set up your first automation.'));
+  console.log('');
+
+  const targetUrl = await ask(cyan('? ') + 'What URL do you want to automate? ');
+  if (!targetUrl.trim()) {
+    console.error('URL is required.');
+    rl.close();
+    process.exit(1);
+  }
+
+  console.log('');
+  console.log('  What do you want to do?');
+  console.log(`    ${bold('1)')} Extract data ${dim('(scrape content, prices, text)')}`);
+  console.log(`    ${bold('2)')} Fill forms ${dim('(automate form inputs)')}`);
+  console.log(`    ${bold('3)')} Monitor changes ${dim('(watch for updates)')}`);
+  console.log(`    ${bold('4)')} Full automation ${dim('(all of the above)')}`);
+  console.log('');
+  const purposeChoice = await ask(cyan('? ') + 'Choose (1-4): ');
+  rl.close();
+
+  const purposes: Record<string, string> = {
+    '1': 'extract',
+    '2': 'fill',
+    '3': 'monitor',
+    '4': 'automation',
+  };
+  const purpose = purposes[purposeChoice.trim()] || 'automation';
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`);
+  } catch {
+    console.error(`[init] Invalid URL: ${targetUrl}`);
+    process.exit(1);
+  }
+
+  const name = parsedUrl.hostname.split('.').filter((p) => p !== 'www')[0] || 'myapp';
+
+  const config = {
+    name,
+    url: parsedUrl.href,
+    purpose,
+    category: purpose,
+    selectors: {},
+    actions: [],
+    states: [
+      { name: 'idle', detectionMethod: 'page loaded', transitions: ['loading'] },
+      { name: 'loading', detectionMethod: 'network activity', transitions: ['done', 'error'] },
+      { name: 'done', detectionMethod: 'content rendered', transitions: ['idle'] },
+      { name: 'error', detectionMethod: 'error indicator', transitions: ['idle'] },
+    ],
+    features: [],
+    completion: { method: 'hash_stability', pollMs: 1000, stableCount: 3, maxWaitMs: 30000 },
+    stateTransitions: {
+      idle: ['loading'],
+      loading: ['done', 'error'],
+      done: ['idle'],
+      error: ['idle'],
+    },
+  };
+
+  const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+
+  const outputDir = typeof flags['output'] === 'string' ? flags['output'] : '.';
+  const outputPath = resolve(outputDir, 'pingapp.json');
+
+  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
+  writeFileSync(outputPath, JSON.stringify(config, null, 2));
+
+  console.log('');
+  console.log(bold('PingApp config created!'));
+  console.log(`  ${dim('File:')} ${outputPath}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  ${cyan('1.')} Run ${bold(`pingos init ${parsedUrl.href}`)} to auto-generate full selectors via recon`);
+  console.log(`  ${cyan('2.')} Or edit ${dim('pingapp.json')} manually to add selectors and actions`);
+  console.log(`  ${cyan('3.')} Then: ${bold('pingos serve .')} to start your PingApp`);
+  console.log('');
+}
+
+async function runAppCommand(argv: string[]) {
+  const sub = argv[0];
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+  const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+  const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+  const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+
+  switch (sub) {
+    case 'list':
+    case undefined: {
+      console.log('');
+      console.log(bold('Pre-built PingApps'));
+      console.log('');
+      for (const app of PREBUILT_APPS) {
+        console.log(`  ${green(app.displayName)} ${dim(`(${app.name})`)}`);
+        console.log(`    ${app.description}`);
+        console.log(`    ${dim('URL:')} ${app.url}`);
+        console.log(`    ${dim('Actions:')} ${app.actions.map((a) => cyan(a.name)).join(', ')}`);
+        console.log('');
+      }
+      console.log(dim(`  Install with: ${bold('pingos app install <name>')}`));
+      console.log('');
+      break;
+    }
+    case 'install': {
+      const appName = argv[1];
+      if (!appName) {
+        console.error('Usage: pingos app install <name>');
+        console.error('');
+        console.error('Available apps:');
+        for (const app of PREBUILT_APPS) {
+          console.error(`  ${app.name}  — ${app.description}`);
+        }
+        process.exit(1);
+      }
+
+      const app = PREBUILT_APPS.find((a) => a.name === appName);
+      if (!app) {
+        console.error(`[app] Unknown app: ${appName}`);
+        console.error(`Available: ${PREBUILT_APPS.map((a) => a.name).join(', ')}`);
+        process.exit(1);
+      }
+
+      const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
+      const { resolve } = await import('node:path');
+      const flags = parseFlags(argv);
+      const outputDir = typeof flags['output'] === 'string' ? flags['output'] : './pingapps';
+
+      if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
+
+      const config = {
+        name: app.name,
+        displayName: app.displayName,
+        url: app.url,
+        domain: app.domain,
+        description: app.description,
+        category: 'prebuilt',
+        actions: app.actions.map((a) => ({
+          name: a.name,
+          description: a.description,
+          route: a.route,
+        })),
+        gateway: 'http://localhost:3500',
+      };
+
+      const outputPath = resolve(outputDir, `${app.name}.json`);
+      writeFileSync(outputPath, JSON.stringify(config, null, 2));
+
+      console.log('');
+      console.log(`${green('Installed!')} ${bold(app.displayName)} PingApp`);
+      console.log(`  ${dim('Config:')} ${outputPath}`);
+      console.log('');
+      console.log('Usage:');
+      for (const action of app.actions) {
+        console.log(`  ${cyan(action.route)} ${dim('— ' + action.description)}`);
+      }
+      console.log('');
+      console.log('Quick start:');
+      console.log(`  ${bold('1.')} ${yellow('pingos up')} ${dim('— start the gateway + Chrome')}`);
+      console.log(`  ${bold('2.')} Open ${cyan(app.url)} in the PingOS browser`);
+      console.log(`  ${bold('3.')} Call actions via the gateway API or CLI:`);
+      if (app.actions.length > 0) {
+        const first = app.actions[0];
+        if (first.route.startsWith('POST')) {
+          console.log(`     ${dim(`curl -X POST http://localhost:3500/v1/app/${app.name}/${first.name}`)}`);
+        } else {
+          console.log(`     ${dim(`curl http://localhost:3500/v1/app/${app.name}/${first.name}`)}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+    default:
+      console.error('Usage: pingos app <list|install> [name]');
+      console.error('');
+      console.error('Sub-commands:');
+      console.error('  list              List available pre-built PingApps');
+      console.error('  install <name>    Install a pre-built PingApp config');
+      process.exit(1);
   }
 }
 
@@ -1409,6 +1791,13 @@ switch (command) {
   case 'doctor':
     runDoctorCommand(args.slice(1)).catch((err) => {
       console.error(`[doctor] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'demo':
+    runDemoCommand(args.slice(1)).catch((err) => {
+      console.error(`[demo] Fatal error: ${err.message || err}`);
       if (err.stack) console.error(err.stack);
       process.exit(1);
     });
@@ -1620,7 +2009,10 @@ switch (command) {
     }, 'pingdev upload <device> <selector> [--file path]').catch(cliErr('upload'));
     break;
   case 'init':
-    console.log('pingdev init — not yet implemented (Phase 2)');
+    runInitCommand(args.slice(1)).catch(cliErr('init'));
+    break;
+  case 'app':
+    runAppCommand(args.slice(1)).catch(cliErr('app'));
     break;
   case 'health':
     console.log('pingdev health — not yet implemented (Phase 2)');
@@ -1782,7 +2174,9 @@ switch (command) {
     console.log('  functions [app]      List callable functions');
     console.log('  pipe \'expr\'          Cross-tab data pipe (e.g. extract:amazon:.price)');
     console.log('  mcp [--sse] [--port] Start MCP server for Claude Desktop / Cursor');
-    console.log('  init <url>           Scaffold a new PingApp for the given URL');
+    console.log('  init [url]           Scaffold a new PingApp (interactive wizard or URL)');
+    console.log('  app list             List available pre-built PingApps');
+    console.log('  app install <name>   Install a pre-built PingApp config');
     console.log('  health               Check system health');
     console.log('');
     console.log('Smart Extract:');
@@ -1822,5 +2216,6 @@ switch (command) {
     console.log('  down                   Stop the gateway');
     console.log('  status                 Show gateway, extension, and tab status');
     console.log('  doctor                 Check system health and diagnose issues');
+    console.log('  demo                   Run a demo extract against a connected tab');
     process.exit(command ? 1 : 0);
 }
