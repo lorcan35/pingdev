@@ -100,22 +100,24 @@ export class PingAppGenerator {
     let idx = 0;
 
     for (const action of actions) {
-      if (!action.selectors.css && !action.selectors.ariaLabel) continue;
+      const sels = action.selectors;
+      const flatSel = action.selector;
+      if (!sels?.css && !sels?.ariaLabel && !flatSel) continue;
 
       const key = this.selectorKey(action, idx);
       idx++;
 
-      const primary = action.selectors.css ?? `[aria-label="${action.selectors.ariaLabel}"]`;
+      const primary = sels?.css ?? flatSel ?? `[aria-label="${sels?.ariaLabel}"]`;
       const fallbacks: string[] = [];
 
-      if (action.selectors.css && action.selectors.ariaLabel) {
-        fallbacks.push(`[aria-label="${action.selectors.ariaLabel}"]`);
+      if (sels?.css && sels?.ariaLabel) {
+        fallbacks.push(`[aria-label="${sels.ariaLabel}"]`);
       }
-      if (action.selectors.textContent) {
-        fallbacks.push(`:has-text("${action.selectors.textContent}")`);
+      if (sels?.textContent) {
+        fallbacks.push(`:has-text("${sels.textContent}")`);
       }
-      if (action.selectors.nthChild) {
-        fallbacks.push(action.selectors.nthChild);
+      if (sels?.nthChild) {
+        fallbacks.push(sels.nthChild);
       }
 
       // Higher confidence for IDs and aria-labels
@@ -133,11 +135,11 @@ export class PingAppGenerator {
 
   private selectorKey(action: RecordedAction, index: number): string {
     // Try to derive a meaningful key from the selector
-    const css = action.selectors.css ?? '';
+    const css = action.selectors?.css ?? action.selector ?? '';
     const idMatch = css.match(/#([a-zA-Z][\w-]*)/);
     if (idMatch) return idMatch[1];
 
-    const labelMatch = action.selectors.ariaLabel;
+    const labelMatch = action.selectors?.ariaLabel;
     if (labelMatch) {
       return labelMatch.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
     }
@@ -147,27 +149,31 @@ export class PingAppGenerator {
 
   private buildWorkflow(recording: Recording, appName: string): PingAppWorkflow {
     const steps: WorkflowStep[] = recording.actions.map((action, i) => {
+      const sel = action.selectors?.css ?? action.selector;
+      const label = action.selectors?.ariaLabel;
       switch (action.type) {
         case 'click':
           return {
             op: 'click',
-            selector: action.selectors.css,
-            description: `Click ${action.selectors.ariaLabel || action.selectors.css || `element #${i}`}`,
+            selector: sel,
+            description: `Click ${label || sel || `element #${i}`}`,
           };
         case 'input':
+        case 'type':
           return {
             op: 'type',
-            selector: action.selectors.css,
+            selector: sel,
             value: action.value,
-            description: `Type "${(action.value ?? '').slice(0, 50)}" into ${action.selectors.css || `element #${i}`}`,
+            description: `Type "${(action.value ?? '').slice(0, 50)}" into ${sel || `element #${i}`}`,
           };
         case 'submit':
           return {
             op: 'click',
-            selector: action.selectors.css,
-            description: `Submit form via ${action.selectors.css || 'Enter key'}`,
+            selector: sel,
+            description: `Submit form via ${sel || 'Enter key'}`,
           };
         case 'keydown':
+        case 'press':
           return {
             op: 'press',
             value: action.value,
@@ -184,11 +190,17 @@ export class PingAppGenerator {
             op: 'scroll',
             description: 'Scroll page',
           };
+        case 'act':
+          return {
+            op: 'act',
+            value: action.value,
+            description: `Execute: ${(action.value ?? '').slice(0, 80)}`,
+          };
         default:
           return {
             op: action.type,
-            selector: action.selectors.css,
-            description: `${action.type} on ${action.selectors.css || `element #${i}`}`,
+            selector: sel,
+            description: `${action.type} on ${sel || `element #${i}`}`,
           };
       }
     });
@@ -214,18 +226,19 @@ export class PingAppGenerator {
   private buildTest(recording: Recording, appName: string): PingAppTest {
     // Build a basic smoke test that replays the recording
     const steps = recording.actions
-      .filter((a) => a.type === 'click' || a.type === 'input')
+      .filter((a) => a.type === 'click' || a.type === 'input' || a.type === 'type')
       .slice(0, 5) // limit to first 5 actions
       .map((action) => {
+        const sel = action.selectors?.css ?? action.selector;
         if (action.type === 'click') {
           return {
             op: 'click',
-            selector: action.selectors.css,
+            selector: sel,
           };
         }
         return {
           op: 'type',
-          selector: action.selectors.css,
+          selector: sel,
           value: action.value,
         };
       });

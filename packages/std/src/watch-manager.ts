@@ -132,12 +132,35 @@ export class WatchManager {
 
   // ---- internal ----
 
+  private consecutiveErrors = new Map<string, number>();
+
   private async poll(watch: ActiveWatch): Promise<void> {
     if (watch.stopped) return;
 
     try {
       const snapshot = await this.extractData(watch);
-      if (!snapshot) return;
+      if (!snapshot) {
+        // Track consecutive errors — device may have navigated
+        const errCount = (this.consecutiveErrors.get(watch.watchId) ?? 0) + 1;
+        this.consecutiveErrors.set(watch.watchId, errCount);
+        if (errCount >= 3) {
+          // Emit a navigation/disconnected change event before stopping
+          const event: WatchEvent = {
+            watchId: watch.watchId,
+            timestamp: Date.now(),
+            changes: [{ field: '_status', old: 'connected', new: 'disconnected' }],
+            snapshot: { _status: 'disconnected', _reason: 'Tab navigated or element removed' },
+          };
+          for (const listener of watch.listeners) {
+            try { listener(event); } catch { /* ignore */ }
+          }
+          this.stopWatch(watch.watchId);
+        }
+        return;
+      }
+
+      // Reset error count on success
+      this.consecutiveErrors.set(watch.watchId, 0);
 
       const prev = watch.lastSnapshot;
       if (prev === null) {
@@ -179,7 +202,21 @@ export class WatchManager {
         }
       }
     } catch {
-      // Ignore polling errors silently
+      // Track errors for navigation detection
+      const errCount = (this.consecutiveErrors.get(watch.watchId) ?? 0) + 1;
+      this.consecutiveErrors.set(watch.watchId, errCount);
+      if (errCount >= 3) {
+        const event: WatchEvent = {
+          watchId: watch.watchId,
+          timestamp: Date.now(),
+          changes: [{ field: '_status', old: 'connected', new: 'disconnected' }],
+          snapshot: { _status: 'disconnected', _reason: 'Poll error — tab may have navigated' },
+        };
+        for (const listener of watch.listeners) {
+          try { listener(event); } catch { /* ignore */ }
+        }
+        this.stopWatch(watch.watchId);
+      }
     }
   }
 
@@ -194,7 +231,13 @@ export class WatchManager {
           timeoutMs: 10_000,
         });
         if (result && typeof result === 'object') {
-          const data = (result as Record<string, unknown>).data ?? result;
+          const r = result as Record<string, unknown>;
+          const data = r.data ?? r;
+          // Unwrap nested result property from extension response
+          if (data && typeof data === 'object') {
+            const d = data as Record<string, unknown>;
+            return (d.result ?? data) as Record<string, unknown>;
+          }
           return data as Record<string, unknown>;
         }
         return null;

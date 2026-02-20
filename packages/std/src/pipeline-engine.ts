@@ -110,16 +110,18 @@ export class PipelineEngine {
       for (let i = 0; i < parallelSteps.length; i++) {
         const step = parallelSteps[i];
         const settled = parallelResults[i];
+        // Use explicit output name or fall back to step id
+        const varName = step.output || step.id;
         if (settled.status === 'fulfilled') {
           outcomes.push(settled.value);
-          if (settled.value.status === 'ok' && step.output) {
-            variables[step.output] = settled.value.result;
+          if (settled.value.status === 'ok') {
+            variables[varName] = settled.value.result;
           }
         } else {
           const outcome = this.handleStepError(step, settled.reason);
           outcomes.push(outcome);
-          if (outcome.status === 'ok' && step.output) {
-            variables[step.output] = outcome.result;
+          if (outcome.status === 'ok') {
+            variables[varName] = outcome.result;
           }
         }
       }
@@ -136,8 +138,10 @@ export class PipelineEngine {
       try {
         const outcome = await this.executeStep(step, variables);
         outcomes.push(outcome);
-        if (outcome.status === 'ok' && step.output) {
-          variables[step.output] = outcome.result;
+        // Use explicit output name or fall back to step id
+        const varName = step.output || step.id;
+        if (outcome.status === 'ok') {
+          variables[varName] = outcome.result;
         }
         if (outcome.status === 'error' && step.onError === 'abort') {
           aborted = true;
@@ -280,10 +284,16 @@ export class PipelineEngine {
             payload: { schema: resolvedSchema },
             timeoutMs: 15_000,
           });
-          // Unwrap result.data if present
+          // Unwrap result.data.result if present (extension wraps in {result, _meta})
           if (result && typeof result === 'object') {
             const r = result as Record<string, unknown>;
-            result = r.data ?? r;
+            const data = r.data ?? r;
+            if (data && typeof data === 'object') {
+              const d = data as Record<string, unknown>;
+              result = d.result ?? data;
+            } else {
+              result = data;
+            }
           }
           break;
         }

@@ -259,15 +259,16 @@ export interface PipelineResult {
 // ---------------------------------------------------------------------------
 
 export interface RecordedAction {
-  type: 'click' | 'input' | 'submit' | 'keydown' | 'navigate' | 'scroll';
+  type: 'click' | 'input' | 'submit' | 'keydown' | 'navigate' | 'scroll' | 'act' | 'select' | 'dblclick' | 'extract' | 'press' | 'type' | string;
   timestamp: number;
-  selectors: {
+  selectors?: {
     css?: string;
     ariaLabel?: string;
     textContent?: string;
     xpath?: string;
     nthChild?: string;
   };
+  selector?: string;     // flat selector from extension export format
   value?: string;        // typed text, key name, URL, etc.
   coordinates?: { x: number; y: number };
   tabId?: string;

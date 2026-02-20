@@ -161,6 +161,11 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         response = { success: true, data: { recorded: recordingEnabled } };
         break;
       }
+      case 'discover': {
+        // Collect DOM snapshot for gateway-side discover engine
+        response = { success: true, data: collectDomSnapshot() };
+        break;
+      }
       case 'screenshot':
         response = { success: false, error: 'Screenshot not implemented in content script' };
         break;
@@ -4014,6 +4019,127 @@ async function handleScroll(command: {
 }
 
 // ============================================================================
+// Discover — DOM Snapshot for gateway-side classification
+// ============================================================================
+
+function collectDomSnapshot(): Record<string, unknown> {
+  const snapshot: Record<string, unknown> = {
+    url: location.href,
+    title: document.title,
+  };
+
+  // Meta tags (OG, description, etc.)
+  const meta: Record<string, string> = {};
+  document.querySelectorAll('meta[property], meta[name]').forEach((el) => {
+    const key = el.getAttribute('property') || el.getAttribute('name') || '';
+    const val = el.getAttribute('content') || '';
+    if (key && val) meta[key] = val;
+  });
+  snapshot.meta = meta;
+
+  // JSON-LD structured data
+  const jsonLd: Record<string, unknown>[] = [];
+  document.querySelectorAll('script[type="application/ld+json"]').forEach((el) => {
+    try {
+      const parsed = JSON.parse(el.textContent || '');
+      if (Array.isArray(parsed)) jsonLd.push(...parsed);
+      else jsonLd.push(parsed);
+    } catch { /* skip malformed JSON-LD */ }
+  });
+  snapshot.jsonLd = jsonLd;
+
+  // Sample interactive + structural elements (max 200)
+  const elements: Array<Record<string, unknown>> = [];
+  const selectors = 'h1, h2, h3, a, button, input, textarea, select, img, article, [role], [itemprop], [aria-label], [data-testid]';
+  const els = document.querySelectorAll(selectors);
+  for (let i = 0; i < Math.min(els.length, 200); i++) {
+    const el = els[i];
+    const entry: Record<string, unknown> = {
+      tag: el.tagName.toLowerCase(),
+      text: (el.textContent || '').trim().slice(0, 100),
+    };
+    if (el.id) entry.id = el.id;
+    const classList = Array.from(el.classList);
+    if (classList.length) entry.classes = classList;
+    if (el.getAttribute('aria-label')) entry.ariaLabel = el.getAttribute('aria-label');
+    // Build a simple CSS selector
+    if (el.id) {
+      entry.selector = `#${el.id}`;
+    } else if (el.getAttribute('data-testid')) {
+      entry.selector = `[data-testid="${el.getAttribute('data-testid')}"]`;
+    } else if (el.getAttribute('aria-label')) {
+      entry.selector = `${el.tagName.toLowerCase()}[aria-label="${el.getAttribute('aria-label')}"]`;
+    } else if (classList.length) {
+      entry.selector = `${el.tagName.toLowerCase()}.${classList[0]}`;
+    }
+    // Collect relevant attributes
+    const attrs: Record<string, string> = {};
+    for (const attr of ['type', 'name', 'href', 'src', 'role', 'itemprop', 'contenteditable']) {
+      const v = el.getAttribute(attr);
+      if (v) attrs[attr] = v;
+    }
+    if (Object.keys(attrs).length) entry.attributes = attrs;
+    elements.push(entry);
+  }
+  snapshot.elements = elements;
+
+  // Detect tables
+  const tables: Array<Record<string, unknown>> = [];
+  document.querySelectorAll('table').forEach((table, idx) => {
+    const headers = Array.from(table.querySelectorAll('th')).map((th) => (th.textContent || '').trim());
+    const rowCount = table.querySelectorAll('tr').length;
+    if (rowCount > 1) {
+      tables.push({
+        selector: table.id ? `#${table.id}` : `table:nth-of-type(${idx + 1})`,
+        headers,
+        rowCount,
+      });
+    }
+  });
+  snapshot.tables = tables;
+
+  // Detect forms
+  const forms: Array<Record<string, unknown>> = [];
+  document.querySelectorAll('form').forEach((form, idx) => {
+    const inputs = Array.from(form.querySelectorAll('input, textarea, select')).map((inp) => {
+      const label = inp.getAttribute('aria-label') || inp.getAttribute('placeholder') || '';
+      return {
+        name: inp.getAttribute('name') || '',
+        type: inp.getAttribute('type') || inp.tagName.toLowerCase(),
+        selector: inp.id ? `#${inp.id}` : `form:nth-of-type(${idx + 1}) ${inp.tagName.toLowerCase()}[name="${inp.getAttribute('name')}"]`,
+        label,
+      };
+    });
+    forms.push({
+      selector: form.id ? `#${form.id}` : `form:nth-of-type(${idx + 1})`,
+      action: form.getAttribute('action') || '',
+      method: form.getAttribute('method') || 'GET',
+      inputs,
+    });
+  });
+  snapshot.forms = forms;
+
+  // Detect repeated groups (lists of similar items)
+  const repeatedGroups: Array<Record<string, unknown>> = [];
+  const listContainers = document.querySelectorAll('ul, ol, [role="list"], [role="feed"]');
+  listContainers.forEach((container) => {
+    const items = container.children;
+    if (items.length >= 3) {
+      const containerSel = container.id ? `#${container.id}` : smartSelector(container);
+      const itemTag = items[0]?.tagName?.toLowerCase() || 'li';
+      repeatedGroups.push({
+        containerSelector: containerSel,
+        itemSelector: `${containerSel} > ${itemTag}`,
+        count: items.length,
+      });
+    }
+  });
+  snapshot.repeatedGroups = repeatedGroups;
+
+  return snapshot;
+}
+
+// ============================================================================
 // Part B: Workflow Recorder
 // ============================================================================
 
@@ -4065,7 +4191,29 @@ function stopRecording() {
 }
 
 function exportRecording(name: string): WorkflowExport {
-  const steps: WorkflowStep[] = recordedActions.map((a) => {
+  // Deduplicate: when an API-driven act/click executes, the DOM event listener
+  // also captures the resulting clicks. Remove DOM-captured clicks that fall
+  // within 2s of an API-driven action on the same page.
+  const deduped: RecordedAction[] = [];
+  for (let i = 0; i < recordedActions.length; i++) {
+    const a = recordedActions[i];
+    // Keep API-driven actions (act, extract, navigate, etc.) always
+    if (a.type === 'act' || a.type === 'extract' || a.type === 'navigate') {
+      deduped.push(a);
+      continue;
+    }
+    // For DOM-captured clicks, check if an API-driven action exists nearby
+    if (a.type === 'click') {
+      const hasNearbyApiAction = recordedActions.some((other) =>
+        (other.type === 'act' || other.type === 'navigate') &&
+        Math.abs(other.timestamp - a.timestamp) < 2000
+      );
+      if (hasNearbyApiAction) continue; // skip this duplicate click
+    }
+    deduped.push(a);
+  }
+
+  const steps: WorkflowStep[] = deduped.map((a) => {
     const step: WorkflowStep = { op: a.type };
     if (a.selector) step.selector = a.selector;
     if (a.text) step.text = a.text;

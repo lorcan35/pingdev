@@ -13,7 +13,7 @@ import { logGateway, serializeError } from './gw-log.js';
 import { loadConfig } from './config.js';
 import { SelectorCache } from './selector-cache.js';
 import { attemptHeal, configureSelfHeal } from './self-heal.js';
-import { registerAppRoutes } from './app-routes.js';
+import { registerAppRoutes, PINGAPP_FUNCTION_DEFS } from './app-routes.js';
 import { suggest as llmSuggest, callLLM as directLLM } from './llm.js';
 import { discoverPage } from './discover-engine.js';
 import { FunctionRegistry } from './function-registry.js';
@@ -720,6 +720,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
   // ---------------------------------------------------------------------------
 
   const funcRegistry = new FunctionRegistry(extBridge);
+  funcRegistry.registerPingApps(PINGAPP_FUNCTION_DEFS);
 
   // GET /v1/functions — list all callable functions
   app.get('/v1/functions', async () => {
