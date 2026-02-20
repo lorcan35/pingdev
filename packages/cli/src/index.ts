@@ -1471,6 +1471,78 @@ switch (command) {
       return body;
     }, 'pingdev select-option <device> <selector> [--value v] [--text t] [--search s]').catch(cliErr('select-option'));
     break;
+  case 'navigate':
+    runDeviceOp('smartNavigate', args.slice(1), (argv) => {
+      const to = argv.filter((a) => !a.startsWith('--')).slice(1).join(' ');
+      if (!to) return null;
+      return { to };
+    }, 'pingdev navigate <device> <keyword_or_url>').catch(cliErr('navigate'));
+    break;
+  case 'hover':
+    runDeviceOp('hover', args.slice(1), (argv) => {
+      const selector = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!selector) return null;
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = { selector };
+      if (typeof flags['duration'] === 'string') body.duration_ms = parseInt(flags['duration'] as string, 10);
+      return body;
+    }, 'pingdev hover <device> <selector> [--duration ms]').catch(cliErr('hover'));
+    break;
+  case 'assert':
+    runDeviceOp('assert', args.slice(1), (argv) => {
+      const jsonStr = argv.filter((a) => !a.startsWith('--')).slice(1).join(' ');
+      if (!jsonStr) return null;
+      try { return { assertions: JSON.parse(jsonStr) }; } catch { return null; }
+    }, 'pingdev assert <device> \'[{"type":"exists","selector":"#foo"}]\'').catch(cliErr('assert'));
+    break;
+  case 'network':
+    runDeviceOp('network', args.slice(1), (argv) => {
+      const action = argv.filter((a) => !a.startsWith('--'))[1] || 'list';
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = { action };
+      if (typeof flags['url'] === 'string' || typeof flags['method'] === 'string') {
+        body.filter = {};
+        if (typeof flags['url'] === 'string') (body.filter as Record<string, string>).url = flags['url'] as string;
+        if (typeof flags['method'] === 'string') (body.filter as Record<string, string>).method = flags['method'] as string;
+      }
+      return body;
+    }, 'pingdev network <device> [start|stop|list] [--url pat] [--method GET]').catch(cliErr('network'));
+    break;
+  case 'storage':
+    runDeviceOp('storage', args.slice(1), (argv) => {
+      const positional = argv.filter((a) => !a.startsWith('--'));
+      const action = positional[1] || 'list';
+      const store = positional[2] || 'local';
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = { action, store };
+      if (typeof flags['key'] === 'string') body.key = flags['key'];
+      if (typeof flags['value'] === 'string') body.value = flags['value'];
+      return body;
+    }, 'pingdev storage <device> <action> <store> [--key k] [--value v]').catch(cliErr('storage'));
+    break;
+  case 'capture':
+    runDeviceOp('capture', args.slice(1), (argv) => {
+      const format = argv.filter((a) => !a.startsWith('--'))[1] || 'dom';
+      return { format };
+    }, 'pingdev capture <device> [dom|pdf|mhtml|har]').catch(cliErr('capture'));
+    break;
+  case 'download':
+    runDeviceOp('download', args.slice(1), (argv) => {
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = {};
+      if (typeof flags['url'] === 'string') body.url = flags['url'];
+      if (typeof flags['selector'] === 'string') body.selector = flags['selector'];
+      if (typeof flags['save'] === 'string') body.savePath = flags['save'];
+      return body;
+    }, 'pingdev download <device> [--url u] [--selector s] [--save path]').catch(cliErr('download'));
+    break;
+  case 'annotate':
+    runDeviceOp('annotate', args.slice(1), (argv) => {
+      const jsonStr = argv.filter((a) => !a.startsWith('--')).slice(1).join(' ');
+      if (!jsonStr) return null;
+      try { return { annotations: JSON.parse(jsonStr) }; } catch { return null; }
+    }, 'pingdev annotate <device> \'[{"selector":"#foo","label":"Click here"}]\'').catch(cliErr('annotate'));
+    break;
   case 'init':
     console.log('pingdev init — not yet implemented (Phase 2)');
     break;
@@ -1505,6 +1577,14 @@ switch (command) {
     console.log('  dialog <dev> [action]  Handle dialogs/modals/cookie banners');
     console.log('  paginate <dev> [act]   Auto-pagination');
     console.log('  select-option <dev>    Complex dropdown selection');
+    console.log('  navigate <dev> <to>    Intelligent navigation by keyword/URL');
+    console.log('  hover <dev> <sel>      Trigger hover state');
+    console.log('  assert <dev> <json>    Run page assertions');
+    console.log('  network <dev> <act>    Intercept network calls');
+    console.log('  storage <dev> <act>    Browser storage access');
+    console.log('  capture <dev> [fmt]    Rich page capture (dom)');
+    console.log('  download <dev>         Trigger file download');
+    console.log('  annotate <dev> <json>  Visual page annotations');
     console.log('');
     console.log('Lifecycle:');
     console.log('  up [--daemon]          Start gateway + Chrome with PingOS extension');
