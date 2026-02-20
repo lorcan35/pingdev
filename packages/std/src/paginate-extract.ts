@@ -21,6 +21,33 @@ export interface PaginateExtractResult {
 }
 
 /**
+ * Wait for the content script to reconnect after page navigation by polling
+ * with a lightweight domStable check. Returns true if content script is alive.
+ */
+async function waitForContentScript(
+  extBridge: ExtensionBridge,
+  deviceId: string,
+  maxWaitMs: number = 10_000,
+): Promise<boolean> {
+  const start = Date.now();
+  const pollInterval = 1000;
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      await extBridge.callDevice({
+        deviceId,
+        op: 'wait',
+        payload: { condition: 'domStable', timeoutMs: 3000 },
+        timeoutMs: 5_000,
+      });
+      return true; // content script is alive
+    } catch {
+      await sleep(pollInterval);
+    }
+  }
+  return false;
+}
+
+/**
  * Extract data across multiple pages by combining extract + paginate operations.
  *
  * Flow:
@@ -55,7 +82,7 @@ export async function paginateExtract(
     if (query) extractPayload.query = query;
 
     let extractResult: unknown;
-    const maxRetries = page === 0 ? 1 : 3; // more retries after navigation
+    const maxRetries = page === 0 ? 1 : 4; // more retries after navigation
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         extractResult = await extBridge.callDevice({
@@ -67,8 +94,8 @@ export async function paginateExtract(
         break; // success
       } catch (err) {
         if (attempt < maxRetries - 1) {
-          // Wait for content script to reconnect after page navigation
-          await sleep(2000 * (attempt + 1));
+          // Exponential backoff: 2s, 4s, 8s
+          await sleep(2000 * Math.pow(2, attempt));
         } else {
           throw err; // all retries exhausted
         }
@@ -117,6 +144,7 @@ export async function paginateExtract(
       // the content script, which destroys the port on full-page navigation).
       const nextUrl = (innerData?.nextUrl ?? paginateData?.nextUrl) as string | undefined;
       let navigationSucceeded = false;
+      let usedClickNav = false; // click-based nav is less predictable
 
       if (nextUrl) {
         // Use navigate — this goes through background.ts which handles
@@ -137,6 +165,7 @@ export async function paginateExtract(
         // clicking triggers a full page navigation which destroys the content
         // script. The bfcache/IO error is expected — it means navigation
         // succeeded.
+        usedClickNav = true;
         try {
           const nextResult = await extBridge.callDevice({
             deviceId,
@@ -160,30 +189,20 @@ export async function paginateExtract(
 
       if (!navigationSucceeded) break;
 
-      // 4. Wait for page to load after full-page navigation.
+      // 4. Wait for content script to reconnect after full-page navigation.
       // Navigation destroys the old content script; the new page's content
       // script needs time to load and reconnect to the extension background.
-      // Use a longer base wait, then retry domStable with backoff.
-      await sleep(Math.max(delay, 3000));
+      // Click-based nav is less predictable, so use a longer initial wait.
+      const baseWait = usedClickNav ? Math.max(delay, 4000) : Math.max(delay, 2000);
+      await sleep(baseWait);
 
-      // Try to confirm the new page is ready via domStable.
-      // The first attempt may fail if the content script hasn't reconnected yet.
-      for (let waitAttempt = 0; waitAttempt < 3; waitAttempt++) {
-        try {
-          await extBridge.callDevice({
-            deviceId,
-            op: 'wait',
-            payload: { condition: 'domStable', timeoutMs: 5000 },
-            timeoutMs: 8_000,
-          });
-          break; // content script is alive and DOM is stable
-        } catch {
-          // Content script may not be ready yet — wait and retry
-          if (waitAttempt < 2) {
-            await sleep(2000);
-          }
-          // On final attempt, proceed anyway — the extract retry will handle it
-        }
+      // Poll until the content script is alive, with a generous timeout.
+      // This replaces the fixed-retry domStable loop with adaptive polling.
+      const reconnected = await waitForContentScript(extBridge, deviceId, 10_000);
+      if (!reconnected) {
+        // Content script didn't reconnect in time — stop pagination.
+        // Data collected so far is still returned.
+        break;
       }
     } else {
       // Check if there are more pages beyond our limit

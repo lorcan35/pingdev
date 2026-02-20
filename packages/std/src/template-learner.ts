@@ -193,6 +193,22 @@ export async function learnTemplate(
     }
   }
 
+  // Fallback: eval window.location.href if still no URL
+  if (!url || url === 'about:blank') {
+    try {
+      const evalResult = await extBridge.callDevice({
+        deviceId,
+        op: 'eval',
+        payload: { expression: 'window.location.href' },
+        timeoutMs: 5_000,
+      });
+      const evalUrl = unwrapString(evalResult);
+      if (evalUrl.startsWith('http')) {
+        url = evalUrl;
+      }
+    } catch { /* ignore */ }
+  }
+
   // Try to discover page type
   try {
     const discoverResult = await extBridge.callDevice({
@@ -215,16 +231,29 @@ export async function learnTemplate(
   // Generate URL pattern from the current URL
   const urlPattern = generateUrlPattern(url);
 
-  // Collect alternative selectors from the extraction metadata
-  const alternatives: Record<string, string[]> = {};
+  // Collect CSS selectors from the extraction metadata
   const meta = extractionResult._meta as Record<string, unknown> | undefined;
   const selectorsUsed = (meta?.selectors_used as Record<string, string>) ?? {};
 
-  for (const [key, sel] of Object.entries(schema)) {
-    const used = selectorsUsed[key];
-    const alts = [sel];
-    if (used && used !== sel) alts.push(used);
-    alternatives[key] = alts;
+  // Build selectors map: prefer actual CSS selectors from metadata,
+  // fall back to schema values only if they look like CSS selectors
+  const selectors: Record<string, string> = {};
+  const alternatives: Record<string, string[]> = {};
+  for (const key of Object.keys(schema)) {
+    const alts: string[] = [];
+    if (selectorsUsed[key]) {
+      // Use the actual CSS selector that worked
+      selectors[key] = selectorsUsed[key];
+      alts.push(selectorsUsed[key]);
+    }
+    // Check if the schema value looks like a CSS selector
+    const schemaVal = schema[key];
+    if (looksLikeCssSelector(schemaVal)) {
+      if (!selectors[key]) selectors[key] = schemaVal;
+      if (!alts.includes(schemaVal)) alts.push(schemaVal);
+    }
+    // Otherwise, don't store the schema description as a selector
+    if (alts.length > 0) alternatives[key] = alts;
   }
 
   // Check for existing template
@@ -234,7 +263,7 @@ export async function learnTemplate(
     domain,
     urlPattern,
     pageType,
-    selectors: { ...schema, ...selectorsUsed },
+    selectors,
     alternatives,
     schema,
     sampleData: extractionResult.result as Record<string, unknown> ?? extractionResult,
@@ -244,6 +273,12 @@ export async function learnTemplate(
     successCount: (existing?.successCount ?? 0) + 1,
     failCount: existing?.failCount ?? 0,
   };
+
+  // Don't persist templates with unknown domain — they can't be matched later
+  if (domain === 'unknown') {
+    logGateway('[template-learner] cannot learn template — URL unknown', { deviceId });
+    return template;
+  }
 
   saveTemplate(template);
   logGateway('[template-learner] learned template', { domain, urlPattern, fields: Object.keys(schema).length });
@@ -260,32 +295,42 @@ export async function applyTemplate(
   deviceId: string,
   template: ExtractionTemplate,
 ): Promise<{ data: Record<string, unknown>; healed: boolean }> {
-  // Try primary selectors
-  try {
-    const result = await extBridge.callDevice({
-      deviceId,
-      op: 'extract',
-      payload: { schema: template.selectors },
-      timeoutMs: 20_000,
-    });
-
-    const resObj = result as Record<string, unknown>;
-    const resData = (resObj?.result ?? resObj?.data ?? resObj) as Record<string, unknown>;
-
-    // Check if extraction was successful (non-empty)
-    const nonEmpty = Object.entries(resData).filter(
-      ([k, v]) => !k.startsWith('_') && v !== '' && v !== null && !(Array.isArray(v) && v.length === 0),
-    );
-
-    if (nonEmpty.length > 0) {
-      // Update hit count
-      template.hitCount++;
-      template.successCount++;
-      template.updatedAt = Date.now();
-      saveTemplate(template);
-      return { data: resData, healed: false };
+  // Build a clean selector map — only include entries that look like valid CSS
+  const cleanSelectors: Record<string, string> = {};
+  for (const [key, sel] of Object.entries(template.selectors)) {
+    if (sel && looksLikeCssSelector(sel)) {
+      cleanSelectors[key] = sel;
     }
-  } catch { /* primary selectors failed */ }
+  }
+
+  // Try primary selectors (only if we have any valid ones)
+  if (Object.keys(cleanSelectors).length > 0) {
+    try {
+      const result = await extBridge.callDevice({
+        deviceId,
+        op: 'extract',
+        payload: { schema: cleanSelectors },
+        timeoutMs: 20_000,
+      });
+
+      const resObj = result as Record<string, unknown>;
+      const resData = (resObj?.result ?? resObj?.data ?? resObj) as Record<string, unknown>;
+
+      // Check if extraction was successful (non-empty)
+      const nonEmpty = Object.entries(resData).filter(
+        ([k, v]) => !k.startsWith('_') && v !== '' && v !== null && !(Array.isArray(v) && v.length === 0),
+      );
+
+      if (nonEmpty.length > 0) {
+        // Update hit count
+        template.hitCount++;
+        template.successCount++;
+        template.updatedAt = Date.now();
+        saveTemplate(template);
+        return { data: resData, healed: false };
+      }
+    } catch { /* primary selectors failed */ }
+  }
 
   // Try alternative selectors
   if (template.alternatives) {
@@ -330,7 +375,34 @@ export async function applyTemplate(
     } catch { /* fall through */ }
   }
 
-  // All selectors failed
+  // All selectors failed — try schema-based extraction as last resort
+  if (template.schema && Object.keys(template.schema).length > 0) {
+    try {
+      const result = await extBridge.callDevice({
+        deviceId,
+        op: 'extract',
+        payload: { schema: template.schema },
+        timeoutMs: 20_000,
+      });
+
+      const resObj = result as Record<string, unknown>;
+      const resData = (resObj?.result ?? resObj?.data ?? resObj) as Record<string, unknown>;
+
+      const nonEmpty = Object.entries(resData).filter(
+        ([k, v]) => !k.startsWith('_') && v !== '' && v !== null && !(Array.isArray(v) && v.length === 0),
+      );
+
+      if (nonEmpty.length > 0) {
+        template.hitCount++;
+        template.successCount++;
+        template.updatedAt = Date.now();
+        saveTemplate(template);
+        return { data: resData, healed: true };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Everything failed
   template.hitCount++;
   template.failCount++;
   template.updatedAt = Date.now();
@@ -342,6 +414,30 @@ export async function applyTemplate(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Check if a string looks like a CSS selector (starts with ., #, [, or a tag name). */
+function looksLikeCssSelector(val: string): boolean {
+  if (!val || typeof val !== 'string') return false;
+  // CSS selectors start with ., #, [, or a tag/element name, and often contain
+  // selector-specific characters. Text descriptions typically contain spaces and
+  // no selector operators.
+  return /^[.#\[]/.test(val) || /^[a-z][\w-]*(\s*[>.~+\[:]|\s*$)/i.test(val);
+}
+
+/** Unwrap a possibly nested result into a string. */
+function unwrapString(val: unknown): string {
+  if (typeof val === 'string') return val;
+  if (val && typeof val === 'object') {
+    const obj = val as Record<string, unknown>;
+    const candidate = obj.data ?? obj.result ?? obj.url ?? '';
+    if (typeof candidate === 'string') return candidate;
+    if (candidate && typeof candidate === 'object') {
+      const inner = candidate as Record<string, unknown>;
+      return (inner.result ?? inner.url ?? '') as string;
+    }
+  }
+  return '';
+}
 
 /**
  * Generate a URL pattern from a concrete URL.
