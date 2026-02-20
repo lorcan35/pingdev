@@ -38,12 +38,34 @@ const CURRENCY_MAP: Record<string, string> = {
 const CURRENCY_PATTERN = /^[\s]*([A-Z]{3}|[$€£¥₹₩₽₺]|R\$|A\$|C\$|CHF|kr|zł)\s*([\d,]+\.?\d*)\s*$|^[\s]*([\d,]+\.?\d*)\s*([A-Z]{3}|[$€£¥₹₩₽₺]|R\$|A\$|C\$|CHF|kr|zł)\s*$/;
 
 const parsers: TypeParser[] = [
-  // Currency: $29.99, €15.00, 29.99 USD
+  // Currency: $29.99, €15.00, 29.99 USD, or multi-line "$50\n$25\n$30"
   {
     type: 'currency',
-    test: (raw) => CURRENCY_PATTERN.test(raw.trim()),
+    test: (raw) => {
+      const trimmed = raw.trim();
+      // Test each line for multi-value strings
+      const lines = trimmed.split(/\n/).map(l => l.trim()).filter(Boolean);
+      return lines.some(l => CURRENCY_PATTERN.test(l));
+    },
     parse: (raw) => {
       const trimmed = raw.trim();
+      const lines = trimmed.split(/\n/).map(l => l.trim()).filter(Boolean);
+      // If multiple lines, parse each separately
+      if (lines.length > 1) {
+        const parsed = lines.map(line => {
+          const match = line.match(CURRENCY_PATTERN);
+          if (!match) return null;
+          const symbol = (match[1] || match[4] || '').trim();
+          const numStr = (match[2] || match[3] || '').replace(/,/g, '');
+          const amount = parseFloat(numStr);
+          const currency = CURRENCY_MAP[symbol] || symbol;
+          return { value: amount, currency, raw: line };
+        }).filter(Boolean);
+        if (parsed.length > 0) {
+          return { value: parsed.length === 1 ? parsed[0] : parsed, confidence: 0.9 };
+        }
+      }
+      // Single value
       const match = trimmed.match(CURRENCY_PATTERN);
       if (!match) return { value: raw, confidence: 0 };
       const symbol = (match[1] || match[4] || '').trim();
@@ -130,6 +152,29 @@ const parsers: TypeParser[] = [
     },
     parse: (raw) => {
       const trimmed = raw.trim();
+      // Handle relative dates: "5 minutes ago", "2 hours ago", "3 days ago"
+      const relMatch = trimmed.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$/i);
+      if (relMatch) {
+        const amount = parseInt(relMatch[1], 10);
+        const unit = relMatch[2].toLowerCase();
+        const now = new Date();
+        const msMap: Record<string, number> = {
+          second: 1000, minute: 60_000, hour: 3_600_000,
+          day: 86_400_000, week: 604_800_000,
+          month: 2_592_000_000, year: 31_536_000_000,
+        };
+        const ms = msMap[unit] || 0;
+        const computed = new Date(now.getTime() - amount * ms);
+        return { value: { iso: computed.toISOString(), raw: trimmed }, confidence: 0.8 };
+      }
+      // Handle "today", "yesterday", "tomorrow"
+      const todayMap: Record<string, number> = { today: 0, yesterday: -1, tomorrow: 1 };
+      const lowerTrimmed = trimmed.toLowerCase();
+      if (lowerTrimmed in todayMap) {
+        const d = new Date();
+        d.setDate(d.getDate() + todayMap[lowerTrimmed]);
+        return { value: { iso: d.toISOString().split('T')[0], raw: trimmed }, confidence: 0.9 };
+      }
       try {
         const d = new Date(trimmed);
         if (!isNaN(d.getTime())) {

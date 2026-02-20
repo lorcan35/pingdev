@@ -49,17 +49,31 @@ export async function paginateExtract(
   let hasMore = false;
 
   for (let page = 0; page < maxPages; page++) {
-    // 1. Extract from current page
+    // 1. Extract from current page (with retry for bfcache recovery after navigation)
     const extractPayload: Record<string, unknown> = {};
     if (schema) extractPayload.schema = schema;
     if (query) extractPayload.query = query;
 
-    const extractResult = await extBridge.callDevice({
-      deviceId,
-      op: 'extract',
-      payload: extractPayload,
-      timeoutMs: 20_000,
-    });
+    let extractResult: unknown;
+    const maxRetries = page === 0 ? 1 : 3; // more retries after navigation
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        extractResult = await extBridge.callDevice({
+          deviceId,
+          op: 'extract',
+          payload: extractPayload,
+          timeoutMs: 20_000,
+        });
+        break; // success
+      } catch (err) {
+        if (attempt < maxRetries - 1) {
+          // Wait for content script to reconnect after page navigation
+          await sleep(2000 * (attempt + 1));
+        } else {
+          throw err; // all retries exhausted
+        }
+      }
+    }
 
     // Parse extraction results
     const items = parseExtractItems(extractResult);
@@ -97,34 +111,79 @@ export async function paginateExtract(
         break;
       }
 
-      // 3. Navigate to next page
-      const nextResult = await extBridge.callDevice({
-        deviceId,
-        op: 'paginate',
-        payload: { action: 'next' },
-        timeoutMs: 15_000,
-      });
+      // 3. Navigate to next page.
+      // Prefer using `navigate` via the next URL (goes through background.ts,
+      // properly handles page load) over `paginate next` (clicks the link in
+      // the content script, which destroys the port on full-page navigation).
+      const nextUrl = (innerData?.nextUrl ?? paginateData?.nextUrl) as string | undefined;
+      let navigationSucceeded = false;
 
-      const nextData = nextResult as Record<string, unknown>;
-      if (!nextData?.success && !(nextData?.data as Record<string, unknown>)?.action) {
-        break;
+      if (nextUrl) {
+        // Use navigate — this goes through background.ts which handles
+        // chrome.tabs.update and waits for page load completion.
+        try {
+          await extBridge.callDevice({
+            deviceId,
+            op: 'navigate',
+            payload: { url: nextUrl },
+            timeoutMs: 20_000,
+          });
+          navigationSucceeded = true;
+        } catch {
+          // navigate failure — stop pagination
+        }
+      } else {
+        // Fallback: use paginate next (click). For link-based pagination,
+        // clicking triggers a full page navigation which destroys the content
+        // script. The bfcache/IO error is expected — it means navigation
+        // succeeded.
+        try {
+          const nextResult = await extBridge.callDevice({
+            deviceId,
+            op: 'paginate',
+            payload: { action: 'next' },
+            timeoutMs: 15_000,
+          });
+
+          const nextData = nextResult as Record<string, unknown>;
+          if (nextData?.success || (nextData?.data as Record<string, unknown>)?.action) {
+            navigationSucceeded = true;
+          }
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (errMsg.includes('back/forward cache') || errMsg.includes('message channel closed') ||
+              errMsg.includes('io_error') || errMsg.includes('I/O error') || errMsg.includes('EIO')) {
+            navigationSucceeded = true; // navigation happened, port closed as expected
+          }
+        }
       }
 
-      // 4. Wait for page to load
-      if (delay > 0) {
-        await sleep(delay);
-      }
+      if (!navigationSucceeded) break;
 
-      // Also wait for DOM stability
-      try {
-        await extBridge.callDevice({
-          deviceId,
-          op: 'wait',
-          payload: { condition: 'domStable', timeoutMs: 5000 },
-          timeoutMs: 8_000,
-        });
-      } catch {
-        // domStable timeout is ok — continue anyway
+      // 4. Wait for page to load after full-page navigation.
+      // Navigation destroys the old content script; the new page's content
+      // script needs time to load and reconnect to the extension background.
+      // Use a longer base wait, then retry domStable with backoff.
+      await sleep(Math.max(delay, 3000));
+
+      // Try to confirm the new page is ready via domStable.
+      // The first attempt may fail if the content script hasn't reconnected yet.
+      for (let waitAttempt = 0; waitAttempt < 3; waitAttempt++) {
+        try {
+          await extBridge.callDevice({
+            deviceId,
+            op: 'wait',
+            payload: { condition: 'domStable', timeoutMs: 5000 },
+            timeoutMs: 8_000,
+          });
+          break; // content script is alive and DOM is stable
+        } catch {
+          // Content script may not be ready yet — wait and retry
+          if (waitAttempt < 2) {
+            await sleep(2000);
+          }
+          // On final attempt, proceed anyway — the extract retry will handle it
+        }
       }
     } else {
       // Check if there are more pages beyond our limit

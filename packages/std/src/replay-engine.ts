@@ -71,8 +71,22 @@ export class ReplayEngine {
         }
       }
 
+      // Skip actions without a valid type
+      if (!action.type) {
+        const durationMs = Date.now() - stepStart;
+        steps.push({ index: i, action, status: 'skipped', error: 'No action type', durationMs });
+        continue;
+      }
+
       try {
         const selector = this.pickBestSelector(action);
+        // Skip selector-dependent actions with no selector
+        const selectorRequired = ['click', 'input', 'submit', 'select', 'dblclick'].includes(action.type);
+        if (selectorRequired && !selector) {
+          const durationMs = Date.now() - stepStart;
+          steps.push({ index: i, action, status: 'skipped', error: 'No selector available', durationMs });
+          continue;
+        }
         await this.executeAction(deviceId, action, selector, timeout);
         const durationMs = Date.now() - stepStart;
         steps.push({ index: i, action, status: 'ok', selector, durationMs });
@@ -114,15 +128,17 @@ export class ReplayEngine {
   // ---- internal ----
 
   private pickBestSelector(action: RecordedAction): string | undefined {
-    // Handle both formats:
+    // Handle multiple recording formats:
     // - Gateway format: { type, selectors: { css, ariaLabel, ... } }
     // - Extension export format: { type, selector: "..." }
+    // - Extension raw format: { type, value: "...", url: "..." }
     const raw = action as unknown as Record<string, unknown>;
     if (typeof raw.selector === 'string' && raw.selector) {
       return raw.selector;
     }
     if (!action.selectors) return undefined;
     const s = action.selectors;
+    if (!s || typeof s !== 'object') return undefined;
     // Priority: CSS > ariaLabel > textContent > xpath > nthChild
     return s.css ?? s.ariaLabel ?? s.textContent ?? s.xpath ?? s.nthChild;
   }

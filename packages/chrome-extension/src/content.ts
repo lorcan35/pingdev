@@ -112,7 +112,7 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         response = await handleWaitFor(command.selector, command.timeoutMs);
         break;
       case 'navigate':
-        response = await handleNavigate(command.url);
+        response = await handleNavigate(command.url || command.to);
         break;
       case 'getUrl':
         response = { success: true, data: window.location.href };
@@ -623,10 +623,20 @@ const shadowRootCache = new WeakMap<Element, ShadowRoot>();
  */
 function getShadowRoot(el: Element): ShadowRoot | null {
   if (shadowRootCache.has(el)) return shadowRootCache.get(el)!;
+  // Check open shadow root
   if (el.shadowRoot) {
     shadowRootCache.set(el, el.shadowRoot);
     return el.shadowRoot;
   }
+  // Try chrome.dom API for closed shadow roots (available in extensions)
+  try {
+    const shadow = (chrome as any)?.dom?.openOrClosedShadowRoot?.(el);
+    if (shadow) {
+      shadowRootCache.set(el, shadow);
+      return shadow;
+    }
+  } catch { /* not available */ }
+  // Don't cache null — shadow root may be attached later
   return null;
 }
 
@@ -1714,9 +1724,52 @@ function extractViewCounts(): NLExtractResult {
 
 function extractDescriptions(): NLExtractResult {
   const descriptions: string[] = [];
+
+  // Wikipedia-specific: extract lead paragraph(s) from article body
+  if (location.hostname.includes('wikipedia.org')) {
+    const wikiSelectors = [
+      '#mw-content-text .mw-parser-output > p:not(.mw-empty-elt)',
+      '.mw-body-content .mw-parser-output > p:not(.mw-empty-elt)',
+      '#bodyContent p',
+    ];
+    for (const sel of wikiSelectors) {
+      const paras = document.querySelectorAll(sel);
+      for (const p of Array.from(paras)) {
+        const text = p.textContent?.trim();
+        // Skip very short (probably just brackets/citations) or empty paragraphs
+        if (text && text.length > 50) {
+          descriptions.push(text);
+          if (descriptions.length >= 3) break; // first few paragraphs
+        }
+      }
+      if (descriptions.length > 0) break;
+    }
+    if (descriptions.length > 0) {
+      return { items: descriptions, method: 'wikipedia-article-body' };
+    }
+  }
+
+  // Article-specific: try main content paragraphs
+  const mainContent = document.querySelector('main, article, [role="main"], #content, .content, .post-body, .article-body');
+  if (mainContent) {
+    const paras = mainContent.querySelectorAll('p');
+    for (const p of Array.from(paras)) {
+      // Skip nav/sidebar elements
+      if (p.closest('nav, aside, footer, [role="navigation"], [role="complementary"]')) continue;
+      const text = p.textContent?.trim();
+      if (text && text.length > 50 && text.length < 2000) {
+        descriptions.push(text);
+        if (descriptions.length >= 5) break;
+      }
+    }
+    if (descriptions.length > 0) {
+      return { items: descriptions, method: 'article-paragraphs' };
+    }
+  }
+
+  // Repeated container fallback
   const repeated = findRepeatedContainers();
   for (const container of repeated) {
-    // Look for paragraphs, spans, or description-like elements
     const desc = container.querySelector(
       'p, [class*="description"], [class*="snippet"], [class*="summary"], [class*="preview"], ' +
       '[class*="subtitle"], [class*="meta"]'

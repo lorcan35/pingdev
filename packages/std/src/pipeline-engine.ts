@@ -116,6 +116,14 @@ export class PipelineEngine {
           outcomes.push(settled.value);
           if (settled.value.status === 'ok') {
             variables[varName] = settled.value.result;
+            // Spread object results into top-level variables
+            if (settled.value.result && typeof settled.value.result === 'object' && !Array.isArray(settled.value.result)) {
+              for (const [key, value] of Object.entries(settled.value.result as Record<string, unknown>)) {
+                if (!key.startsWith('_')) {
+                  variables[key] = value;
+                }
+              }
+            }
           }
         } else {
           const outcome = this.handleStepError(step, settled.reason);
@@ -142,6 +150,15 @@ export class PipelineEngine {
         const varName = step.output || step.id;
         if (outcome.status === 'ok') {
           variables[varName] = outcome.result;
+          // Also spread object results into top-level variables for easier template access
+          // e.g., extract result {titles: [...]} → variables.titles = [...]
+          if (outcome.result && typeof outcome.result === 'object' && !Array.isArray(outcome.result)) {
+            for (const [key, value] of Object.entries(outcome.result as Record<string, unknown>)) {
+              if (!key.startsWith('_')) {
+                variables[key] = value;
+              }
+            }
+          }
         }
         if (outcome.status === 'error' && step.onError === 'abort') {
           aborted = true;

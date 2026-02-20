@@ -167,12 +167,31 @@ export async function learnTemplate(
       payload: {},
       timeoutMs: 5_000,
     });
-    const urlObj = urlResult as Record<string, unknown>;
-    url = (urlObj?.data as string) ?? (urlObj?.url as string) ?? '';
-    if (typeof url === 'object') {
-      url = ((url as Record<string, unknown>)?.url as string) ?? '';
+    // callDevice returns response.data from the extension — for getUrl this is
+    // the URL string directly (background.ts sends result: response.data).
+    if (typeof urlResult === 'string') {
+      url = urlResult;
+    } else {
+      const urlObj = urlResult as Record<string, unknown>;
+      url = (urlObj?.data as string) ?? (urlObj?.url as string) ?? '';
+      if (typeof url === 'object') {
+        url = ((url as Record<string, unknown>)?.url as string) ?? '';
+      }
     }
   } catch { /* ignore */ }
+
+  // Fallback: get URL from shared tabs list if getUrl failed or returned empty
+  if (!url || url === 'about:blank') {
+    for (const { tabs } of extBridge.listSharedTabs()) {
+      for (const tab of tabs ?? []) {
+        if (tab.deviceId === deviceId && tab.url) {
+          url = tab.url;
+          break;
+        }
+      }
+      if (url) break;
+    }
+  }
 
   // Try to discover page type
   try {
