@@ -234,6 +234,115 @@ class Tab:
         """
         return self._op('diff', schema=schema)
 
+    # ------------------------------------------------------------------
+    # Phase 1 core ops
+    # ------------------------------------------------------------------
+
+    def fill(self, fields):
+        """Smart form filling — auto-detect inputs by label/placeholder/name.
+
+        Args:
+            fields: dict mapping field labels/selectors to values.
+                    e.g. {"Email": "user@example.com", "Password": "secret"}
+
+        Returns:
+            dict with 'filled' (list of {field, value, selector, success}) and 'skipped'.
+        """
+        return self._op('fill', fields=fields)
+
+    def wait_for(self, condition, selector=None, text=None, timeout=None):
+        """Smart conditional wait.
+
+        Args:
+            condition: One of 'visible', 'hidden', 'text', 'textChange',
+                       'networkIdle', 'domStable', 'exists'.
+            selector: CSS selector (required for most conditions).
+            text: Text to wait for (required for 'text' condition).
+            timeout: Timeout in ms (default 10000, max 30000).
+
+        Returns:
+            dict with 'waited', 'duration_ms', 'condition_met'.
+        """
+        kwargs = {'condition': condition}
+        if selector is not None:
+            kwargs['selector'] = selector
+        if text is not None:
+            kwargs['text'] = text
+        if timeout is not None:
+            kwargs['timeout'] = timeout
+        return self._op('wait', **kwargs)
+
+    def table(self, selector=None, index=None):
+        """Extract tabular data from the page.
+
+        Args:
+            selector: Optional CSS selector of a specific table.
+            index: Optional index of auto-detected table (0-based).
+
+        Returns:
+            dict with 'tables' list, each having 'headers', 'rows', 'rowCount'.
+        """
+        kwargs = {}
+        if selector is not None:
+            kwargs['selector'] = selector
+        if index is not None:
+            kwargs['index'] = index
+        return self._op('table', **kwargs)
+
+    def dialog(self, action='detect', text=None):
+        """Handle dialogs, modals, cookie banners, and overlays.
+
+        Args:
+            action: 'detect', 'dismiss', 'accept', or 'interact'.
+            text: Button text to click (required for 'interact').
+
+        Returns:
+            dict with 'found', 'action_taken', 'success'.
+        """
+        kwargs = {'action': action}
+        if text is not None:
+            kwargs['text'] = text
+        return self._op('dialog', **kwargs)
+
+    def paginate(self, action='detect', page=None):
+        """Auto-pagination — detect and navigate pages.
+
+        Args:
+            action: 'detect', 'next', 'prev', or 'goto'.
+            page: Page number (required for 'goto').
+
+        Returns:
+            dict with 'currentPage', 'totalPages', 'hasNext', 'hasPrev', 'paginationType'.
+        """
+        kwargs = {'action': action}
+        if page is not None:
+            kwargs['page'] = page
+        return self._op('paginate', **kwargs)
+
+    def select_option(self, selector, value=None, text=None, search=None, values=None):
+        """Handle complex dropdown selection (native + React/MUI/custom).
+
+        Args:
+            selector: CSS selector of the dropdown trigger.
+            value: Option value to select.
+            text: Option display text to select.
+            search: Text to type into search input first.
+            values: List of values for multi-select.
+
+        Returns:
+            dict with 'selected', 'display', 'success'.
+        """
+        kwargs = {'selector': selector}
+        if value is not None:
+            kwargs['value'] = value
+        if text is not None:
+            kwargs['text'] = text
+        if search is not None:
+            kwargs['search'] = search
+        if values is not None:
+            kwargs['values'] = values
+        return self._op('selectOption', **kwargs)
+
 
 class Browser:
     """High-level interface to the PingOS gateway."""
