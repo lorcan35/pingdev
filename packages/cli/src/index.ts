@@ -1549,6 +1549,145 @@ switch (command) {
   case 'health':
     console.log('pingdev health — not yet implemented (Phase 2)');
     break;
+  case 'extract':
+    (async () => {
+      const device = args.slice(1).filter((a) => !a.startsWith('--'))[0];
+      if (!device) {
+        console.error('Usage: pingdev extract <device> [options]');
+        console.error('');
+        console.error('Options:');
+        console.error('  --auto             Zero-config extraction (no schema needed)');
+        console.error('  --schema <json>    Schema mapping: \'{"title": "h1", "price": ".price"}\'');
+        console.error('  --query <text>     Natural language extraction query');
+        console.error('  --semantic <text>  LLM-powered semantic extraction');
+        console.error('  --visual           Use screenshot-based extraction');
+        console.error('  --paginate         Extract across multiple pages');
+        console.error('  --max-pages <n>    Max pages when paginating (default 10)');
+        console.error('  --fallback visual  Fallback to visual if DOM extract fails');
+        console.error('  --host <host>      Gateway host (default: localhost)');
+        console.error('  --port <port>      Gateway port (default: 3500)');
+        process.exit(1);
+      }
+      const flags = parseFlags(args.slice(1));
+      const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+      const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+
+      // Build the extract payload
+      const body: Record<string, unknown> = {};
+      if (typeof flags['schema'] === 'string') {
+        try { body.schema = JSON.parse(flags['schema'] as string); }
+        catch { console.error('[extract] Invalid JSON in --schema'); process.exit(1); }
+      }
+      if (typeof flags['query'] === 'string') body.query = flags['query'];
+      if (flags['visual']) body.strategy = 'visual';
+      if (flags['paginate']) {
+        body.paginate = true;
+        if (typeof flags['max-pages'] === 'string') body.maxPages = parseInt(flags['max-pages'] as string, 10);
+      }
+      if (typeof flags['fallback'] === 'string') body.fallback = flags['fallback'];
+
+      // Semantic mode
+      if (typeof flags['semantic'] === 'string') {
+        const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/extract/semantic`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: flags['semantic'] }),
+        });
+        const data = await res.json() as any;
+        if (!res.ok) { console.error(`[extract] Error: ${data.message || res.statusText}`); process.exit(1); }
+        console.log(JSON.stringify(data.result ?? data, null, 2));
+        return;
+      }
+
+      // Normal extract (auto, schema, query, visual, paginate)
+      const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/extract`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) { console.error(`[extract] Error: ${data.message || res.statusText}`); process.exit(1); }
+      console.log(JSON.stringify(data.result ?? data, null, 2));
+    })().catch(cliErr('extract'));
+    break;
+  case 'templates':
+    (async () => {
+      const sub = args[1];
+      const flags = parseFlags(args.slice(1));
+      const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+      const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+      const baseUrl = `http://${host}:${port}`;
+
+      switch (sub) {
+        case 'list':
+        case undefined: {
+          const res = await fetch(`${baseUrl}/v1/templates`);
+          const data = await res.json() as any;
+          if (!res.ok) { console.error(`[templates] Error: ${data.message || res.statusText}`); process.exit(1); }
+          const templates = data.templates || [];
+          if (templates.length === 0) {
+            console.log('No saved templates.');
+          } else {
+            console.log(`${templates.length} template(s):\n`);
+            for (const t of templates) {
+              const rate = (t.successRate * 100).toFixed(0);
+              console.log(`  ${t.domain}  (${t.hitCount} hits, ${rate}% success)`);
+              console.log(`    URL pattern: ${t.urlPattern}`);
+            }
+          }
+          break;
+        }
+        case 'get': {
+          const domain = args[2];
+          if (!domain) { console.error('Usage: pingdev templates get <domain>'); process.exit(1); }
+          const res = await fetch(`${baseUrl}/v1/templates/${encodeURIComponent(domain)}`);
+          const data = await res.json() as any;
+          if (!res.ok) { console.error(`[templates] Error: ${data.message || res.statusText}`); process.exit(1); }
+          console.log(JSON.stringify(data.template ?? data, null, 2));
+          break;
+        }
+        case 'delete': {
+          const domain = args[2];
+          if (!domain) { console.error('Usage: pingdev templates delete <domain>'); process.exit(1); }
+          const res = await fetch(`${baseUrl}/v1/templates/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+          const data = await res.json() as any;
+          if (!res.ok) { console.error(`[templates] Error: ${data.message || res.statusText}`); process.exit(1); }
+          console.log(`Template for ${domain} deleted.`);
+          break;
+        }
+        case 'export': {
+          const domain = args[2];
+          if (!domain) { console.error('Usage: pingdev templates export <domain>'); process.exit(1); }
+          const res = await fetch(`${baseUrl}/v1/templates/${encodeURIComponent(domain)}/export`);
+          const data = await res.json() as any;
+          if (!res.ok) { console.error(`[templates] Error: ${data.message || res.statusText}`); process.exit(1); }
+          console.log(JSON.stringify(data, null, 2));
+          break;
+        }
+        case 'import': {
+          const jsonStr = args.slice(2).filter((a) => !a.startsWith('--')).join(' ');
+          if (!jsonStr) { console.error('Usage: pingdev templates import \'<json>\''); process.exit(1); }
+          let template;
+          try { template = JSON.parse(jsonStr); }
+          catch { console.error('[templates] Invalid JSON'); process.exit(1); }
+          const res = await fetch(`${baseUrl}/v1/templates/import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(template),
+          });
+          const data = await res.json() as any;
+          if (!res.ok) { console.error(`[templates] Error: ${data.message || res.statusText}`); process.exit(1); }
+          console.log('Template imported successfully.');
+          break;
+        }
+        default:
+          console.error('Usage: pingdev templates [list|get|delete|export|import] [domain]');
+          process.exit(1);
+      }
+    })().catch(cliErr('templates'));
+    break;
   default:
     console.log('Usage: pingdev <command> [options]');
     console.log('');
@@ -1569,6 +1708,10 @@ switch (command) {
     console.log('  mcp [--sse] [--port] Start MCP server for Claude Desktop / Cursor');
     console.log('  init <url>           Scaffold a new PingApp for the given URL');
     console.log('  health               Check system health');
+    console.log('');
+    console.log('Smart Extract:');
+    console.log('  extract <dev>          Smart extraction (auto, schema, query, visual)');
+    console.log('  templates [sub]        Manage extraction templates (list|get|delete|export|import)');
     console.log('');
     console.log('Core Ops:');
     console.log('  fill <dev> <json>      Smart form filling');
