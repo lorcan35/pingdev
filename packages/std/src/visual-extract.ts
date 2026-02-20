@@ -3,7 +3,7 @@
 // or explicitly via strategy: "visual", or for canvas/SVG content.
 
 import type { ExtensionBridge } from './ext-bridge.js';
-import { callLLM } from './llm.js';
+import { callLLMVision } from './llm.js';
 import { logGateway } from './gw-log.js';
 
 export interface VisualExtractOptions {
@@ -88,41 +88,20 @@ Do not include explanations.
 
 JSON:`;
 
-  // 3. Call the LLM
-  // Note: if a vision model is available, we'd include the screenshot as an image.
-  // For text-only LLMs, we'll fall back to asking about the page context.
+  // 3. Call the LLM (vision model when screenshot available, text fallback otherwise)
   let llmResponse: string;
   try {
     if (screenshotData) {
-      // If we have a screenshot but can only use text LLM, include page context
-      // The gateway's eval op can get us visible text
-      let pageText = '';
-      try {
-        const evalResult = await extBridge.callDevice({
-          deviceId,
-          op: 'eval',
-          payload: { expression: 'document.body.innerText.substring(0, 3000)' },
-          timeoutMs: 5_000,
-        });
-        const evalObj = evalResult as Record<string, unknown>;
-        pageText = (evalObj?.data as string) ?? (evalObj?.result as string) ?? '';
-        if (typeof pageText === 'object') {
-          pageText = (pageText as Record<string, unknown>)?.result as string ?? '';
-        }
-      } catch { /* ignore */ }
-
-      const contextPrompt = `Given this visible text from a webpage, ${prompt}
-
-Visible text:
-${pageText}`;
-
-      llmResponse = await callLLM(contextPrompt, {
-        maxTokens: 1000,
+      // Send screenshot to vision model
+      llmResponse = await callLLMVision(prompt, {
+        images: [screenshotData],
+        model: 'anthropic/claude-sonnet-4',
+        maxTokens: 2000,
         temperature: 0.1,
-        systemPrompt: 'You are a data extraction expert. Extract structured data from webpage content. Return only valid JSON.',
+        systemPrompt: 'You are a data extraction expert. Extract structured data from webpage screenshots. Return only valid JSON.',
       });
     } else {
-      // No screenshot — try page text extraction fallback
+      // No screenshot — fall back to text extraction
       let pageText = '';
       try {
         const evalResult = await extBridge.callDevice({
@@ -138,12 +117,9 @@ ${pageText}`;
         }
       } catch { /* ignore */ }
 
-      const contextPrompt = `Given this visible text from a webpage, ${prompt}
+      const contextPrompt = `Given this visible text from a webpage, ${prompt}\n\nVisible text:\n${pageText}`;
 
-Visible text:
-${pageText}`;
-
-      llmResponse = await callLLM(contextPrompt, {
+      llmResponse = await callLLMVision(contextPrompt, {
         maxTokens: 1000,
         temperature: 0.1,
         systemPrompt: 'You are a data extraction expert. Extract structured data from webpage content. Return only valid JSON.',
@@ -173,7 +149,9 @@ ${pageText}`;
   }
 
   const fieldCount = Object.keys(extractedData).length;
-  const confidence = Math.min(0.8, fieldCount * 0.15); // visual extraction is less reliable
+  const confidence = screenshotData
+    ? Math.min(0.9, fieldCount * 0.2)   // vision-based: higher confidence
+    : Math.min(0.8, fieldCount * 0.15); // text-fallback: lower confidence
 
   return {
     data: extractedData,
@@ -181,6 +159,7 @@ ${pageText}`;
       strategy: 'visual',
       confidence,
       duration_ms: Date.now() - startMs,
+      model: screenshotData ? 'anthropic/claude-sonnet-4' : undefined,
     },
   };
 }

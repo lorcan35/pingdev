@@ -636,6 +636,15 @@ function getShadowRoot(el: Element): ShadowRoot | null {
       return shadow;
     }
   } catch { /* not available */ }
+  // Try declarative shadow DOM: check for <template shadowrootmode>
+  try {
+    const template = el.querySelector(':scope > template[shadowrootmode]');
+    if (template && (template as any).content) {
+      // Declarative shadow DOM not yet attached — return template content as-is
+      // (this is a DocumentFragment, not a ShadowRoot, but querySelector works on it)
+      return (template as any).content as ShadowRoot;
+    }
+  } catch { /* ignore */ }
   // Don't cache null — shadow root may be attached later
   return null;
 }
@@ -688,9 +697,24 @@ function piercingQuerySelectorAll(root: Document | Element | ShadowRoot, parts: 
         try {
           results.push(...Array.from(shadow.querySelectorAll(remainingParts[0])));
         } catch { /* invalid selector */ }
+        // ALSO search light DOM children that may be slotted
+        try {
+          results.push(...Array.from(host.querySelectorAll(remainingParts[0])).filter(el => !results.includes(el)));
+        } catch { /* invalid selector */ }
       } else {
         // Recursive piercing for multi-level: a >>> b >>> c
         results.push(...piercingQuerySelectorAll(shadow, remainingParts));
+      }
+    } else {
+      // No shadow root accessible — search light DOM children as fallback
+      // This handles cases where shadow content is slotted or where
+      // shadow roots are closed and we can't access them
+      if (remainingParts.length === 1) {
+        try {
+          results.push(...Array.from(host.querySelectorAll(remainingParts[0])));
+        } catch { /* invalid selector */ }
+      } else {
+        results.push(...piercingQuerySelectorAll(host, remainingParts));
       }
     }
   }

@@ -133,6 +133,113 @@ Provide a concise suggestion.`;
   return { suggestion: text.trim(), confidence: 0.5 };
 }
 
+/* ─── Vision support ─── */
+
+export interface VisionContent {
+  type: 'image_url';
+  image_url: {
+    url: string; // data:image/png;base64,... or https://...
+  };
+}
+
+export interface TextContent {
+  type: 'text';
+  text: string;
+}
+
+export type MessageContent = string | Array<TextContent | VisionContent>;
+
+export interface CallLLMVisionOptions extends CallLLMOptions {
+  images?: string[]; // base64 data URLs or HTTP URLs
+}
+
+/** Call an OpenAI-compatible LLM with optional vision (image) content. */
+export async function callLLMVision(prompt: string, opts?: CallLLMVisionOptions): Promise<string> {
+  const cfg = getLLMConfig();
+  // For vision, prefer a vision-capable model
+  const model = opts?.model ?? 'anthropic/claude-sonnet-4';
+  const maxTokens = opts?.maxTokens ?? cfg.maxTokens ?? 1000;
+  const temperature = opts?.temperature ?? cfg.temperature ?? 0.2;
+  const timeoutMs = cfg.timeoutMs ?? 30_000; // longer timeout for vision
+
+  const url = `${cfg.baseUrl}/chat/completions`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (cfg.apiKey) {
+      headers['Authorization'] = `Bearer ${cfg.apiKey}`;
+    }
+
+    // Build content array with text and images
+    const content: Array<TextContent | VisionContent> = [];
+
+    // Add images first
+    if (opts?.images) {
+      for (const img of opts.images) {
+        const imgUrl = img.startsWith('data:') ? img : `data:image/png;base64,${img}`;
+        content.push({
+          type: 'image_url',
+          image_url: { url: imgUrl },
+        });
+      }
+    }
+
+    // Add text prompt
+    content.push({ type: 'text', text: prompt });
+
+    const messages: Array<{ role: string; content: MessageContent }> = [];
+    if (opts?.systemPrompt) {
+      messages.push({ role: 'system', content: opts.systemPrompt });
+    }
+    messages.push({ role: 'user', content: content });
+
+    const body = {
+      model,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+    };
+
+    logGateway('[llm] callLLMVision', { model, promptLength: prompt.length, imageCount: opts?.images?.length ?? 0 });
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      logGateway('[llm] vision request failed', { status: res.status, statusText: res.statusText, body: text.slice(0, 200) });
+      throw new Error(`LLM vision request failed: ${res.status} ${res.statusText}`);
+    }
+
+    const data: any = await res.json();
+    const responseContent = data?.choices?.[0]?.message?.content;
+
+    if (typeof responseContent === 'string') {
+      return responseContent;
+    }
+
+    logGateway('[llm] vision response missing content', { data });
+    throw new Error('LLM vision response missing content');
+  } catch (err) {
+    if ((err as any).name === 'AbortError') {
+      logGateway('[llm] vision request timeout', { timeoutMs });
+      throw new Error(`LLM vision request timeout after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function tryParseJson(text: string): any {
   const t = (text ?? '').trim();
   if (!t) return null;
