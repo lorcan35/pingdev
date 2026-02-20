@@ -1278,7 +1278,7 @@ async function runDemoCommand(argv: string[]) {
     const devRes = await fetch('http://localhost:3500/v1/devices');
     if (devRes.ok) {
       const devData = await devRes.json() as any;
-      devices = devData.devices || [];
+      devices = devData.devices || devData.extension?.devices || [];
     }
   } catch {
     // devices endpoint failed
@@ -1297,16 +1297,17 @@ async function runDemoCommand(argv: string[]) {
 
   // Pick the first device and run an extract
   const device = devices[0];
+  const deviceId = device.deviceId || device.id;
   const title = (device.title || 'Untitled').slice(0, 60);
   const url = (device.url || '').slice(0, 80);
-  console.log(`  Target:   ${bold(device.id)}`);
+  console.log(`  Target:   ${bold(deviceId)}`);
   console.log(`            ${title}`);
   console.log(`            ${dim(url)}`);
   console.log('');
   console.log('  Running extract...');
 
   try {
-    const extractRes = await fetch(`http://localhost:3500/v1/dev/${encodeURIComponent(device.id)}/extract`, {
+    const extractRes = await fetch(`http://localhost:3500/v1/dev/${encodeURIComponent(deviceId)}/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
