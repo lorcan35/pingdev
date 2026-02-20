@@ -6,7 +6,11 @@ import { fullCleanup, injectAdBlockCSS, removeAdElements, detectClutter } from '
 import { extractStructuredData } from './structured-data';
 import { autoParseValue, parseExtractResult, validateExtractResult } from './type-parser';
 import type { ParsedType } from './type-parser';
-import { handleFill, handleWait, handleTable, handleDialog, handlePaginate, handleSelectOption } from './ops';
+import {
+  handleFill, handleWait, handleTable, handleDialog, handlePaginate, handleSelectOption,
+  handleSmartNavigate, handleHover, handleAssert, handleNetwork, handleStorage,
+  handleCapture, handleUpload, handleDownload, handleAnnotate,
+} from './ops';
 
 // ============================================================================
 // Part A: Bridge Executor
@@ -205,6 +209,34 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
         break;
       case 'selectOption':
         response = await handleSelectOption(command as any);
+        break;
+      // Phase 2 core ops
+      case 'smartNavigate':
+        response = await handleSmartNavigate(command as any);
+        break;
+      case 'hover':
+        response = await handleHover(command as any);
+        break;
+      case 'assert':
+        response = await handleAssert(command as any);
+        break;
+      case 'network':
+        response = await handleNetwork(command as any);
+        break;
+      case 'storage':
+        response = await handleStorage(command as any);
+        break;
+      case 'capture':
+        response = await handleCapture(command as any);
+        break;
+      case 'upload':
+        response = await handleUpload(command as any);
+        break;
+      case 'download':
+        response = await handleDownload(command as any);
+        break;
+      case 'annotate':
+        response = await handleAnnotate(command as any);
         break;
       default:
         response = { success: false, error: 'Unknown command type' };

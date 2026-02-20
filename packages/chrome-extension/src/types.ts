@@ -29,6 +29,7 @@ export type BridgeCommand =
   | { type: 'paginate'; action: 'detect' | 'next' | 'prev' | 'goto'; page?: number; stealth?: boolean }
   | { type: 'selectOption'; selector: string; value?: string; text?: string; search?: string; values?: string[]; stealth?: boolean }
   // Phase 2 core ops
+  | { type: 'smartNavigate'; to: string; stealth?: boolean }
   | { type: 'hover'; selector: string; duration_ms?: number; stealth?: boolean }
   | { type: 'assert'; assertions: Array<{ type: string; selector?: string; expected?: string; attribute?: string }>; stealth?: boolean }
   | { type: 'network'; action: 'start' | 'stop' | 'list'; filter?: { url?: string; method?: string }; stealth?: boolean }

@@ -343,6 +343,136 @@ class Tab:
             kwargs['values'] = values
         return self._op('selectOption', **kwargs)
 
+    # ------------------------------------------------------------------
+    # Phase 2 core ops
+    # ------------------------------------------------------------------
+
+    def smart_navigate(self, to):
+        """Intelligent navigation by keyword or URL.
+
+        Args:
+            to: URL or keyword like 'checkout', 'settings', 'profile'.
+
+        Returns:
+            dict with 'navigated', 'url', 'steps'.
+        """
+        return self._op('smartNavigate', to=to)
+
+    def hover(self, selector, duration_ms=500):
+        """Trigger hover state on an element and capture new content.
+
+        Args:
+            selector: CSS selector of the element to hover.
+            duration_ms: How long to hold hover in ms (default 500).
+
+        Returns:
+            dict with 'hovered', optionally 'newContent'.
+        """
+        return self._op('hover', selector=selector, duration_ms=duration_ms)
+
+    def assert_page(self, assertions):
+        """Run verification assertions against the page.
+
+        Args:
+            assertions: List of dicts with 'type', 'selector', 'expected'.
+                        Types: exists, notExists, visible, hidden, text,
+                        textContains, value, class, attribute, count.
+
+        Returns:
+            dict with 'passed' (bool), 'results' (list).
+        """
+        return self._op('assert', assertions=assertions)
+
+    def network(self, action, filter=None):
+        """Intercept and capture network requests.
+
+        Args:
+            action: 'start', 'stop', or 'list'.
+            filter: Optional dict with 'url' and/or 'method' patterns.
+
+        Returns:
+            dict with captured requests info.
+        """
+        kwargs = {'action': action}
+        if filter is not None:
+            kwargs['filter'] = filter
+        return self._op('network', **kwargs)
+
+    def storage(self, action, store, key=None, value=None):
+        """Access browser storage (localStorage, sessionStorage, cookies).
+
+        Args:
+            action: 'get', 'set', 'delete', or 'list'.
+            store: 'local', 'session', or 'cookies'.
+            key: Storage key (required for get/set/delete).
+            value: Value to set (required for set).
+
+        Returns:
+            dict with storage data.
+        """
+        kwargs = {'action': action, 'store': store}
+        if key is not None:
+            kwargs['key'] = key
+        if value is not None:
+            kwargs['value'] = value
+        return self._op('storage', **kwargs)
+
+    def capture(self, format='dom'):
+        """Capture page content in various formats.
+
+        Args:
+            format: 'dom' (HTML snapshot), 'pdf', 'mhtml', or 'har'.
+                    Only 'dom' is supported from content script.
+
+        Returns:
+            dict with captured content.
+        """
+        return self._op('capture', format=format)
+
+    def upload(self, selector, file_path):
+        """Upload a file to a file input element.
+
+        Args:
+            selector: CSS selector of the file input.
+            file_path: Path to the file to upload.
+
+        Returns:
+            dict with upload result.
+        """
+        return self._op('upload', selector=selector, filePath=file_path)
+
+    def download(self, url=None, selector=None, save_path=None):
+        """Trigger a file download.
+
+        Args:
+            url: Direct URL to download.
+            selector: CSS selector of a download link/button.
+            save_path: Filename for the download.
+
+        Returns:
+            dict with 'downloaded', 'url', 'fileName'.
+        """
+        kwargs = {}
+        if url is not None:
+            kwargs['url'] = url
+        if selector is not None:
+            kwargs['selector'] = selector
+        if save_path is not None:
+            kwargs['savePath'] = save_path
+        return self._op('download', **kwargs)
+
+    def annotate(self, annotations):
+        """Add visual annotations to page elements.
+
+        Args:
+            annotations: List of dicts with 'selector', optional 'label',
+                         'color', 'style' ('box'|'highlight'|'arrow').
+
+        Returns:
+            dict with 'annotated', 'count', 'results'.
+        """
+        return self._op('annotate', annotations=annotations)
+
 
 class Browser:
     """High-level interface to the PingOS gateway."""
