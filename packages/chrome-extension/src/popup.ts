@@ -7,6 +7,10 @@ const tabList = document.getElementById('tabList')!;
 const exportBtn = document.getElementById('exportBtn')!;
 const shareAllBtn = document.getElementById('shareAllBtn')!;
 const unshareAllBtn = document.getElementById('unshareAllBtn')!;
+const statusText = document.getElementById('statusText')!;
+const gatewayUrl = document.getElementById('gatewayUrl')!;
+const tabCountEl = document.getElementById('tabCount')!;
+const versionText = document.getElementById('versionText')!;
 
 interface TabListItem {
   tabId: number;
@@ -23,12 +27,34 @@ async function updateConnectionStatus() {
     });
 
     statusDot.classList.remove('connected', 'connecting', 'disconnected');
-    statusDot.classList.add(status.state ?? (status.connected ? 'connected' : 'disconnected'));
+    const state = status.state ?? (status.connected ? 'connected' : 'disconnected');
+    statusDot.classList.add(state);
+
+    statusText.classList.remove('connected', 'disconnected');
+    if (state === 'connected') {
+      statusText.textContent = 'Connected to gateway';
+      statusText.classList.add('connected');
+    } else if (state === 'connecting') {
+      statusText.textContent = 'Connecting...';
+    } else {
+      statusText.textContent = 'Disconnected';
+      statusText.classList.add('disconnected');
+    }
+
+    gatewayUrl.textContent = status.gatewayUrl?.replace('ws://', '').replace('/ext', '') || 'localhost:3500';
   } catch (err) {
     console.error('[Popup] Error getting connection status:', err);
     statusDot.classList.remove('connected', 'connecting');
     statusDot.classList.add('disconnected');
+    statusText.textContent = 'Disconnected';
+    statusText.classList.add('disconnected');
   }
+
+  // Show version
+  try {
+    const manifest = chrome.runtime.getManifest();
+    versionText.textContent = `v${manifest.version}`;
+  } catch { /* ignore */ }
 }
 
 // Load and render tab list
@@ -49,6 +75,9 @@ async function loadTabs() {
       }));
     
     renderTabs(tabs);
+
+    const sharedCount = tabs.filter(t => t.shared).length;
+    tabCountEl.textContent = `${sharedCount} tab${sharedCount !== 1 ? 's' : ''} shared`;
   } catch (err) {
     console.error('[Popup] Error loading tabs:', err);
     tabList.innerHTML = '<div class="info-text">Error loading tabs</div>';

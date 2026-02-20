@@ -178,6 +178,38 @@
       font-family: 'Courier New', monospace;
       margin-top: 4px;
     }
+
+    .status-text {
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .status-text.connected {
+      color: #22c55e;
+    }
+
+    .status-text.disconnected {
+      color: #ef4444;
+    }
+
+    .gateway-url {
+      font-size: 11px;
+      color: #666;
+      font-family: 'Courier New', monospace;
+      margin-bottom: 4px;
+    }
+
+    .tab-count {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 4px;
+    }
+
+    .version-text {
+      font-size: 11px;
+      color: #555;
+    }
   </style>
 </head>
 <body>
@@ -185,7 +217,14 @@
     <span class="status-dot" id="statusDot"></span>
     PingOS Bridge
   </h1>
-  
+
+  <div class="section" id="statusSection">
+    <div id="statusText" class="status-text">Checking...</div>
+    <div id="gatewayUrl" class="gateway-url">localhost:3500</div>
+    <div id="tabCount" class="tab-count"></div>
+    <div id="versionText" class="version-text"></div>
+  </div>
+
   <div class="section">
     <div class="section-title">Shared Tabs</div>
 
