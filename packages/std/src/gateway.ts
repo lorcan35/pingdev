@@ -1160,6 +1160,131 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
     },
   );
 
+  // ---- POST /v1/dev/:device/extract/semantic — Semantic LLM-driven extraction ----
+  const semanticSelectorCache = new Map<string, { selectors: Record<string, string>; timestamp: number }>();
+  const SEMANTIC_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+  app.post<{ Params: { device: string }; Body: { query: string; limit?: number } }>(
+    '/v1/dev/:device/extract/semantic',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { query?: string; limit?: number } | null;
+      if (!body || !body.query) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.gateway.bad_request',
+          message: 'Missing required field: query',
+          retryable: false,
+        });
+      }
+      if (!extBridge.ownsDevice(device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${device} not found`,
+          retryable: false,
+        });
+      }
+
+      try {
+        const deviceUrl = getDeviceUrlFromShares(extBridge, device) ?? '';
+        const domain = deviceUrl ? new URL(deviceUrl).hostname : '';
+        const cacheKey = `${domain}::${body.query}`;
+
+        // Check cache first
+        const cached = semanticSelectorCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < SEMANTIC_CACHE_TTL_MS) {
+          const result = await extBridge.callDevice({
+            deviceId: device,
+            op: 'extract',
+            payload: { schema: cached.selectors, limit: body.limit },
+            timeoutMs: 20_000,
+          });
+          return { ok: true, result, _cached: true, _selectors: cached.selectors };
+        }
+
+        // Get page context for LLM
+        const snapshot = await extBridge.callDevice({
+          deviceId: device,
+          op: 'discover',
+          payload: {},
+          timeoutMs: 10_000,
+        });
+
+        // Build a summary for the LLM
+        const snapshotObj = snapshot as Record<string, unknown>;
+        const elements = (snapshotObj.elements as Array<Record<string, unknown>> || []).slice(0, 50);
+        const elemSummary = elements.map(e =>
+          `<${e.tag}${e.id ? ` id="${e.id}"` : ''}${e.ariaLabel ? ` aria-label="${e.ariaLabel}"` : ''}${e.selector ? ` selector="${e.selector}"` : ''}>${(e.text as string || '').slice(0, 60)}</${e.tag}>`,
+        ).join('\n');
+
+        const prompt = `Given this web page DOM summary, generate CSS selectors to extract: "${body.query}"
+
+Page URL: ${snapshotObj.url || ''}
+Page Title: ${snapshotObj.title || ''}
+
+DOM Elements:
+${elemSummary}
+
+Return ONLY a JSON object mapping field names to CSS selectors. Example:
+{"titles": "h2.post-title", "prices": ".product-price span"}
+
+JSON:`;
+
+        const llmResponse = await directLLM(prompt, {
+          maxTokens: 300,
+          temperature: 0.1,
+          systemPrompt: 'You are a CSS selector expert. Return only valid JSON with field names mapped to CSS selectors. No explanation.',
+        });
+
+        // Parse LLM response
+        let selectors: Record<string, string> = {};
+        try {
+          const jsonMatch = llmResponse.match(/\{[\s\S]*\}/);
+          if (jsonMatch) selectors = JSON.parse(jsonMatch[0]);
+        } catch {
+          return reply.status(500).send({
+            errno: 'EIO',
+            code: 'ping.extract.llm_parse_error',
+            message: 'Failed to parse LLM selector response',
+            retryable: true,
+          });
+        }
+
+        // Cache the selectors
+        semanticSelectorCache.set(cacheKey, { selectors, timestamp: Date.now() });
+
+        // Execute the extraction
+        const result = await extBridge.callDevice({
+          deviceId: device,
+          op: 'extract',
+          payload: { schema: selectors, limit: body.limit },
+          timeoutMs: 20_000,
+        });
+
+        // If extraction returned empty, retry with broader LLM context
+        const resultObj = result as Record<string, unknown>;
+        const resultData = resultObj?.result as Record<string, unknown> || resultObj || {};
+        const allEmpty = Object.values(resultData).every(v => v === '' || (Array.isArray(v) && v.length === 0));
+
+        if (allEmpty && Object.keys(selectors).length > 0) {
+          // Fallback: use the content script's own NL extraction
+          const fallbackResult = await extBridge.callDevice({
+            deviceId: device,
+            op: 'extract',
+            payload: { query: body.query, limit: body.limit },
+            timeoutMs: 20_000,
+          });
+          return { ok: true, result: fallbackResult, _strategy: 'semantic-fallback-nl' };
+        }
+
+        return { ok: true, result, _selectors: selectors, _strategy: 'semantic' };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
   // ---- Recording endpoints ----
   app.post<{ Body: { device: string } }>('/v1/record/start', async (request, reply) => {
     const body = request.body as { device?: string } | null;
