@@ -71,12 +71,28 @@ interface RegisteredApp {
   functions: FunctionDef[];
 }
 
+export interface PingAppFunctionDef {
+  app: string;
+  domain: string;
+  functions: Array<{
+    name: string;
+    description: string;
+    params: Array<{ name: string; type: string; required?: boolean; description?: string }>;
+  }>;
+}
+
 export class FunctionRegistry {
   private apps = new Map<string, RegisteredApp>();
   private extBridge: ExtensionBridge;
+  private pingAppDefs: PingAppFunctionDef[] = [];
 
   constructor(extBridge: ExtensionBridge) {
     this.extBridge = extBridge;
+  }
+
+  /** Register PingApp function definitions (from app-routes). */
+  registerPingApps(defs: PingAppFunctionDef[]): void {
+    this.pingAppDefs = defs;
   }
 
   /** Refresh the registry from currently connected tabs. */
@@ -87,6 +103,31 @@ export class FunctionRegistry {
       for (const tab of tabs ?? []) {
         const appName = this.deriveAppName(tab.url, tab.title);
         const functions = this.buildFunctions(tab.deviceId, appName);
+
+        // Merge PingApp-specific functions if this tab matches a registered app
+        const pingApp = this.pingAppDefs.find(
+          (def) => tab.url?.toLowerCase().includes(def.domain),
+        );
+        if (pingApp) {
+          for (const fn of pingApp.functions) {
+            // Only add if not already covered by generic ops
+            const qualifiedName = `${appName}.${fn.name}`;
+            if (!functions.some((f) => f.name === qualifiedName)) {
+              functions.push({
+                name: qualifiedName,
+                description: fn.description,
+                params: fn.params.map((p) => ({
+                  name: p.name,
+                  type: (p.type || 'string') as 'string' | 'number' | 'boolean' | 'object',
+                  required: p.required,
+                  description: p.description,
+                })),
+                tab: tab.deviceId,
+              });
+            }
+          }
+        }
+
         this.apps.set(appName, {
           tabId: tab.deviceId,
           appName,

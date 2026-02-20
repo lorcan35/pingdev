@@ -99,7 +99,8 @@ describe('PipelineEngine', () => {
 
   describe('run', () => {
     it('executes a simple sequential pipeline', async () => {
-      bridge._setResult('tab-1', 'extract', { data: { price: '$29.99' } });
+      // Realistic response: extension wraps extract data in { result, _meta }
+      bridge._setResult('tab-1', 'extract', { data: { result: { price: '$29.99' }, _meta: { price: '1-match' } } });
 
       const result = await engine.run({
         name: 'simple',
@@ -118,9 +119,26 @@ describe('PipelineEngine', () => {
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
     });
 
+    it('auto-assigns step id as variable name when output is omitted', async () => {
+      bridge._setResult('tab-1', 'extract', { data: { result: { title: 'Widget' }, _meta: {} } });
+
+      const result = await engine.run({
+        name: 'auto-output',
+        steps: [
+          { id: 'data', op: 'extract', tab: 'tab-1', schema: { title: 'h1' } },
+          { id: 'msg', op: 'transform', template: 'Title: {{data.title}}' },
+        ],
+      });
+
+      expect(result.steps[0].status).toBe('ok');
+      expect(result.steps[1].status).toBe('ok');
+      expect(result.steps[1].result).toBe('Title: Widget');
+      expect(result.variables['data']).toEqual({ title: 'Widget' });
+    });
+
     it('executes parallel steps', async () => {
-      bridge._setResult('tab-1', 'extract', { data: { price: '$29.99' } });
-      bridge._setResult('tab-2', 'extract', { data: { price: '$24.99' } });
+      bridge._setResult('tab-1', 'extract', { data: { result: { price: '$29.99' }, _meta: {} } });
+      bridge._setResult('tab-2', 'extract', { data: { result: { price: '$24.99' }, _meta: {} } });
 
       const result = await engine.run({
         name: 'parallel-compare',
@@ -171,7 +189,7 @@ describe('PipelineEngine', () => {
     });
 
     it('resolves tab names by URL match', async () => {
-      bridge._setResult('tab-1', 'extract', { data: { title: 'Widget' } });
+      bridge._setResult('tab-1', 'extract', { data: { result: { title: 'Widget' }, _meta: {} } });
 
       const result = await engine.run({
         name: 'name-resolve',

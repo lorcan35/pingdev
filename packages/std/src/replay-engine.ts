@@ -114,14 +114,28 @@ export class ReplayEngine {
   // ---- internal ----
 
   private pickBestSelector(action: RecordedAction): string | undefined {
+    // Handle both formats:
+    // - Gateway format: { type, selectors: { css, ariaLabel, ... } }
+    // - Extension export format: { type, selector: "..." }
+    const raw = action as unknown as Record<string, unknown>;
+    if (typeof raw.selector === 'string' && raw.selector) {
+      return raw.selector;
+    }
+    if (!action.selectors) return undefined;
     const s = action.selectors;
     // Priority: CSS > ariaLabel > textContent > xpath > nthChild
     return s.css ?? s.ariaLabel ?? s.textContent ?? s.xpath ?? s.nthChild;
   }
 
   private getAllSelectors(action: RecordedAction): string[] {
-    const s = action.selectors;
     const result: string[] = [];
+    // Handle extension export format with flat `selector` field
+    const raw = action as unknown as Record<string, unknown>;
+    if (typeof raw.selector === 'string' && raw.selector) {
+      result.push(raw.selector);
+    }
+    if (!action.selectors) return result;
+    const s = action.selectors;
     if (s.css) result.push(s.css);
     if (s.ariaLabel) result.push(`[aria-label="${s.ariaLabel}"]`);
     if (s.textContent) result.push(`:has-text("${s.textContent}")`);
@@ -193,6 +207,35 @@ export class ReplayEngine {
           payload: { direction: 'down', amount: 3 },
           timeoutMs: timeout,
         });
+
+      case 'act':
+        // Replay an LLM-driven instruction
+        return this.extBridge.callDevice({
+          deviceId,
+          op: 'act',
+          payload: { instruction: action.value ?? '' },
+          timeoutMs: timeout,
+        });
+
+      case 'select':
+        return this.extBridge.callDevice({
+          deviceId,
+          op: 'select',
+          payload: { selector, value: action.value },
+          timeoutMs: timeout,
+        });
+
+      case 'dblclick':
+        return this.extBridge.callDevice({
+          deviceId,
+          op: 'dblclick',
+          payload: { selector },
+          timeoutMs: timeout,
+        });
+
+      case 'extract':
+        // Read-only action — no-op during replay (data already captured)
+        return { ok: true, skipped: true };
 
       default:
         throw new Error(`Unknown action type: ${action.type}`);

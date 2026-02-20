@@ -264,6 +264,59 @@ const EXTRACTORS = {
   })()`,
 };
 
+/**
+ * PingApp function definitions for the function registry.
+ * These describe the high-level app actions that can be called via /v1/functions.
+ */
+export const PINGAPP_FUNCTION_DEFS: Array<{
+  app: string;
+  domain: string;
+  functions: Array<{ name: string; description: string; params: Array<{ name: string; type: string; required?: boolean; description?: string }> }>;
+}> = [
+  {
+    app: 'aliexpress',
+    domain: 'aliexpress',
+    functions: [
+      { name: 'search', description: 'Search for products on AliExpress', params: [{ name: 'query', type: 'string', required: true, description: 'Search query' }] },
+      { name: 'product', description: 'View product details by ID', params: [{ name: 'id', type: 'string', required: true, description: 'Product ID' }] },
+      { name: 'cart_add', description: 'Add current product to cart', params: [] },
+      { name: 'cart', description: 'View shopping cart', params: [] },
+      { name: 'orders', description: 'View order history', params: [] },
+      { name: 'clean', description: 'Remove ads and clutter from page', params: [] },
+      { name: 'recon', description: 'Analyze page structure', params: [] },
+    ],
+  },
+  {
+    app: 'amazon',
+    domain: 'amazon',
+    functions: [
+      { name: 'search', description: 'Search for products on Amazon', params: [{ name: 'query', type: 'string', required: true, description: 'Search query' }] },
+      { name: 'product', description: 'View product details by ASIN', params: [{ name: 'asin', type: 'string', required: true, description: 'Amazon ASIN' }] },
+      { name: 'cart_add', description: 'Add current product to cart', params: [] },
+      { name: 'cart', description: 'View shopping cart', params: [] },
+      { name: 'orders', description: 'View order history', params: [] },
+      { name: 'deals', description: 'View current deals', params: [] },
+      { name: 'clean', description: 'Remove ads and clutter from page', params: [] },
+      { name: 'recon', description: 'Analyze page structure', params: [] },
+    ],
+  },
+  {
+    app: 'claude',
+    domain: 'claude.ai',
+    functions: [
+      { name: 'chat', description: 'Send a message to Claude', params: [{ name: 'message', type: 'string', required: true, description: 'Message text' }] },
+      { name: 'chat_new', description: 'Start a new conversation', params: [] },
+      { name: 'chat_read', description: 'Read the latest response', params: [] },
+      { name: 'conversations', description: 'List recent conversations', params: [] },
+      { name: 'model', description: 'Get or set the active model', params: [{ name: 'model', type: 'string', description: 'Model name to set (omit to get current)' }] },
+      { name: 'projects', description: 'List projects', params: [] },
+      { name: 'artifacts', description: 'List artifacts', params: [] },
+      { name: 'clean', description: 'Remove clutter from page', params: [] },
+      { name: 'recon', description: 'Analyze page structure', params: [] },
+    ],
+  },
+];
+
 export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
   app.setErrorHandler((error, _request, reply) => {
     const message = error instanceof Error ? error.message : 'App route failed';
