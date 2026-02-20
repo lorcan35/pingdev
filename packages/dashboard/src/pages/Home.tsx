@@ -4,6 +4,9 @@ import { useMultiHealth } from '../hooks/useHealth';
 import { useApps } from '../hooks/useApps';
 import { AppCard } from '../components/AppCard';
 import { ActivityFeed, useActivity } from '../components/Activity';
+import { SystemHealth } from '../components/SystemHealth';
+import { GettingStarted } from '../components/GettingStarted';
+import { TryExtract } from '../components/TryExtract';
 
 export function HomePage() {
   const { apps, addApp, removeApp } = useApps();
@@ -43,6 +46,22 @@ export function HomePage() {
 
   return (
     <div className="page">
+      {/* System Health Bar */}
+      <div className="mb-5">
+        <SystemHealth />
+      </div>
+
+      {/* Getting Started */}
+      <div className="mb-5">
+        <GettingStarted />
+      </div>
+
+      {/* Try Extract */}
+      <div className="mb-6">
+        <TryExtract />
+      </div>
+
+      {/* Existing PingApps section */}
       <div className="hero">
         <div className="hero-main">
           <div className="h1">PingApps</div>
