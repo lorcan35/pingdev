@@ -2514,21 +2514,19 @@ async function handleExtract(command: {
       continue;
     }
 
-    // Standard CSS selector path
-    // Try querySelectorAll first — return array if multiple matches
+    // Standard CSS selector path — early-exit when first tier matches
     let elements: Element[] = [];
     try {
       elements = Array.from(document.querySelectorAll(selectorOrDesc as string));
     } catch { /* invalid CSS selector syntax */ }
 
-    // Shadow DOM fallback with >>> piercing combinator support (Level 8)
+    // Only try shadow DOM fallback if standard selector found nothing
     if (elements.length === 0) {
       elements = deepQuerySelectorAll(document, selectorOrDesc as string);
       if (elements.length > 0) meta[key] = 'shadow-dom';
     }
 
     if (elements.length > 1) {
-      // Multiple matches: return array of all texts
       result[key] = elements.map(el => readText(el)).filter(t => t.length > 0);
       meta[key] = meta[key] || `${elements.length}-matches`;
       selectorsUsed[key] = selectorOrDesc as string;
@@ -4307,9 +4305,57 @@ async function typeInto(el: HTMLInputElement | HTMLTextAreaElement | HTMLElement
   } catch { /* ignore */ }
 }
 
+/**
+ * Deep text content extraction that handles shadow DOM slotted content.
+ * When text is distributed via <slot>, the shadow host's light DOM children
+ * contain the actual text, not the shadow element itself.
+ */
+function deepTextContent(el: Element): string {
+  // Try normal textContent first
+  const text = el.textContent?.trim() || '';
+  if (text) return text;
+
+  // If element is a shadow host, read its light DOM children text
+  // (these are the nodes distributed into <slot> elements)
+  if (el.childNodes.length > 0) {
+    const lightText = Array.from(el.childNodes)
+      .map(n => n.textContent?.trim() || '')
+      .filter(Boolean)
+      .join(' ');
+    if (lightText) return lightText;
+  }
+
+  // If element has shadowRoot, look for slots and read assignedNodes
+  if (el.shadowRoot) {
+    const slots = el.shadowRoot.querySelectorAll('slot');
+    for (const slot of slots) {
+      const assigned = slot.assignedNodes({ flatten: true });
+      const slotText = assigned
+        .map(n => n.textContent?.trim() || '')
+        .filter(Boolean)
+        .join(' ');
+      if (slotText) return slotText;
+    }
+    // Fallback: try shadowRoot's own textContent
+    const shadowText = el.shadowRoot.textContent?.trim() || '';
+    if (shadowText) return shadowText;
+  }
+
+  // Check if THIS element is slotted (it was assigned to a slot in a parent shadow)
+  if ((el as any).assignedSlot) {
+    const parent = (el as any).assignedSlot.parentElement;
+    if (parent) {
+      const parentText = parent.textContent?.trim() || '';
+      if (parentText) return parentText;
+    }
+  }
+
+  return '';
+}
+
 function readText(el: Element): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return (el.value ?? '').toString();
-  return el.textContent?.trim() ?? '';
+  return deepTextContent(el);
 }
 
 function toJsonSafe(value: unknown): unknown {
@@ -4770,7 +4816,7 @@ let lastTypeSelector = '';
       if (Array.isArray(state.recordedActions)) {
         recordedActions.push(...state.recordedActions);
       }
-      console.log('[Recorder] Resumed recording from storage —', recordedActions.length, 'steps so far');
+      // Recording state restored from storage
     }
   } catch {
     // ignore — storage may not be available
@@ -4794,13 +4840,13 @@ function startRecording() {
   recordedActions.length = 0;
   recordingEnabled = true;
   chrome.storage.local.set({ recordingEnabled: true, recordedActions: [] }).catch(() => {});
-  console.log('[Recorder] Recording started');
+  // Recording started
 }
 
 function stopRecording() {
   recordingEnabled = false;
   chrome.storage.local.set({ recordingEnabled: false }).catch(() => {});
-  console.log('[Recorder] Recording stopped —', recordedActions.length, 'steps');
+  // Recording stopped
 }
 
 function exportRecording(name: string): WorkflowExport {
@@ -4930,7 +4976,7 @@ document.addEventListener('click', (event) => {
 
   recordedActions.push(action);
   saveRecordedActions(recordedActions);
-  console.log('[Recorder] Click:', selector);
+  // Click recorded
 }, true);
 
 // Record input events (debounced — only save final value per field)
@@ -4969,7 +5015,7 @@ document.addEventListener('input', (event) => {
   typeDebounceTimer = setTimeout(() => {
     saveRecordedActions(recordedActions);
   }, 500);
-  console.log('[Recorder] Type:', selector);
+  // Type recorded
 }, true);
 
 // Record select/change events
@@ -4989,7 +5035,7 @@ document.addEventListener('change', (event) => {
 
   recordedActions.push(action);
   saveRecordedActions(recordedActions);
-  console.log('[Recorder] Select:', selector, target.value);
+  // Select recorded
 }, true);
 
 // Record key presses (Enter, Escape, Tab — important for form submission)
@@ -5011,9 +5057,9 @@ document.addEventListener('keydown', (event) => {
 
   recordedActions.push(action);
   saveRecordedActions(recordedActions);
-  console.log('[Recorder] Press:', key, selector);
+  // Key press recorded
 }, true);
 
 // Don't enable recording by default — wait for explicit start
-console.log('[Content] Bridge executor and recorder loaded — v3-workflow-recorder');
+// Content script loaded — v3-workflow-recorder
 (window as any).__PINGOS_CONTENT_VERSION = 'v3-workflow-recorder';

@@ -192,13 +192,26 @@ export async function paginateExtract(
       // 4. Wait for content script to reconnect after full-page navigation.
       // Navigation destroys the old content script; the new page's content
       // script needs time to load and reconnect to the extension background.
-      // Click-based nav is less predictable, so use a longer initial wait.
-      const baseWait = usedClickNav ? Math.max(delay, 4000) : Math.max(delay, 2000);
-      await sleep(baseWait);
+      // Optimized: start with a shorter wait, extend only if DOM isn't stable.
+      const shortWait = usedClickNav ? Math.max(delay, 2000) : Math.max(delay, 1500);
+      await sleep(shortWait);
 
-      // Poll until the content script is alive, with a generous timeout.
-      // This replaces the fixed-retry domStable loop with adaptive polling.
-      const reconnected = await waitForContentScript(extBridge, deviceId, 10_000);
+      // Quick stability check — if DOM is already stable, skip the long wait
+      let reconnected = false;
+      try {
+        await extBridge.callDevice({
+          deviceId,
+          op: 'wait',
+          payload: { condition: 'domStable', timeoutMs: 2000 },
+          timeoutMs: 3000,
+        });
+        reconnected = true;
+      } catch {
+        // DOM not stable yet — wait the remaining time then poll
+        const extraWait = usedClickNav ? 2000 : 1500;
+        await sleep(extraWait);
+        reconnected = await waitForContentScript(extBridge, deviceId, 8_000);
+      }
       if (!reconnected) {
         // Content script didn't reconnect in time — stop pagination.
         // Data collected so far is still returned.

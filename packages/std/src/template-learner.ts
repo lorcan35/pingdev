@@ -295,11 +295,16 @@ export async function applyTemplate(
   deviceId: string,
   template: ExtractionTemplate,
 ): Promise<{ data: Record<string, unknown>; healed: boolean }> {
-  // Build a clean selector map — only include entries that look like valid CSS
+  // Build a clean selector map — prefer CSS selectors, skip non-CSS values.
+  // Also merge in any alternative CSS selectors that weren't set as primary.
   const cleanSelectors: Record<string, string> = {};
   for (const [key, sel] of Object.entries(template.selectors)) {
     if (sel && looksLikeCssSelector(sel)) {
       cleanSelectors[key] = sel;
+    } else if (template.alternatives?.[key]) {
+      // Primary isn't a valid CSS selector — use first valid alternative
+      const firstCss = template.alternatives[key].find(a => looksLikeCssSelector(a));
+      if (firstCss) cleanSelectors[key] = firstCss;
     }
   }
 
@@ -375,13 +380,29 @@ export async function applyTemplate(
     } catch { /* fall through */ }
   }
 
-  // All selectors failed — try schema-based extraction as last resort
+  // All selectors failed — try schema-based extraction as last resort.
+  // Namespace field lookups to avoid collisions (e.g., a template field named
+  // "title" should not accidentally match the page's <title> element).
   if (template.schema && Object.keys(template.schema).length > 0) {
     try {
+      // Build a namespaced schema: for fields that share names with common HTML
+      // elements (title, link, meta, etc.), add a context qualifier to the
+      // description so the extractor targets content-area elements, not head tags.
+      const COLLISION_TAGS = new Set(['title', 'link', 'meta', 'style', 'script', 'head', 'body', 'html']);
+      const namespacedSchema: Record<string, string> = {};
+      for (const [key, desc] of Object.entries(template.schema)) {
+        if (COLLISION_TAGS.has(key.toLowerCase()) && !looksLikeCssSelector(desc)) {
+          // Qualify the description to avoid matching the HTML tag itself
+          namespacedSchema[key] = `${desc} (from the main content area, not the <${key.toLowerCase()}> HTML element)`;
+        } else {
+          namespacedSchema[key] = desc;
+        }
+      }
+
       const result = await extBridge.callDevice({
         deviceId,
         op: 'extract',
-        payload: { schema: template.schema },
+        payload: { schema: namespacedSchema },
         timeoutMs: 20_000,
       });
 
