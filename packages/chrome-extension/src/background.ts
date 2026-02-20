@@ -399,6 +399,35 @@ async function handleDeviceRequest(request: DeviceRequest) {
     }
   }
 
+  // Special handling for 'screenshot' — use chrome.debugger CDP to capture viewport
+  if (command.type === 'screenshot') {
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      try {
+        const result = await chrome.debugger.sendCommand(
+          { tabId },
+          'Page.captureScreenshot',
+          { format: 'png' },
+        ) as Record<string, any>;
+        await chrome.debugger.detach({ tabId });
+        sendDeviceResponse(requestId, {
+          success: true,
+          data: { screenshot: result.data },
+        });
+        return;
+      } catch (debugErr) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        throw debugErr;
+      }
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : 'Screenshot failed',
+      });
+      return;
+    }
+  }
+
   // Special handling for 'eval' — use chrome.debugger CDP to bypass CSP completely
   if (command.type === 'eval') {
     try {
