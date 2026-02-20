@@ -408,9 +408,410 @@ async function runRecordCommand(argv: string[]) {
       console.log('[record] Status:', JSON.stringify(data.result, null, 2));
       break;
     }
+    case 'replay': {
+      const recordingFile = typeof flags['file'] === 'string' ? flags['file'] : '';
+      if (!recordingFile) {
+        console.error('[record] replay requires --file <recording.json>');
+        process.exit(1);
+      }
+      const { readFileSync } = await import('node:fs');
+      const recording = JSON.parse(readFileSync(recordingFile, 'utf-8'));
+      const speed = typeof flags['speed'] === 'string' ? parseFloat(flags['speed']) : 0;
+      const res = await fetch(`${baseUrl}/v1/recordings/replay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device, recording, speed }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[record] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      const result = data.result;
+      console.log(`Replay: ${result.successCount}/${result.steps.length} steps ok (${result.totalDurationMs}ms)`);
+      for (const step of result.steps) {
+        const icon = step.status === 'ok' ? 'OK' : 'ERR';
+        console.log(`  [${icon}] ${step.action.type}${step.error ? ': ' + step.error : ''}`);
+      }
+      break;
+    }
+    case 'generate': {
+      const recordingFile = typeof flags['file'] === 'string' ? flags['file'] : '';
+      if (!recordingFile) {
+        console.error('[record] generate requires --file <recording.json>');
+        process.exit(1);
+      }
+      const { readFileSync } = await import('node:fs');
+      const recording = JSON.parse(readFileSync(recordingFile, 'utf-8'));
+      const appName = typeof flags['name'] === 'string' ? flags['name'] : undefined;
+      const res = await fetch(`${baseUrl}/v1/recordings/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recording, name: appName }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[record] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      console.log(`Generated PingApp: ${data.app.manifest.name}`);
+      console.log(`  URL: ${data.app.manifest.url}`);
+      console.log(`  Actions: ${data.app.manifest.actionCount}`);
+      console.log(`  Selectors: ${Object.keys(data.app.selectors).length}`);
+      console.log(`  Files: ${Object.keys(data.files).join(', ')}`);
+      if (flags['json']) {
+        console.log(JSON.stringify(data, null, 2));
+      }
+      break;
+    }
     default:
-      console.error('Usage: pingdev record <start|stop|export|status> <device> [options]');
+      console.error('Usage: pingdev record <start|stop|export|status|replay|generate> <device> [options]');
       process.exit(1);
+  }
+}
+
+async function runQueryCommand(argv: string[]) {
+  const device = argv[0];
+  const question = argv.slice(1).filter((a) => !a.startsWith('--')).join(' ');
+  if (!device || !question) {
+    console.error('Usage: pingdev query <device> <question>');
+    console.error('');
+    console.error('Options:');
+    console.error('  --host <host>   Gateway host (default: localhost)');
+    console.error('  --port <port>   Gateway port (default: 3500)');
+    process.exit(1);
+  }
+
+  const flags = parseFlags(argv);
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+
+  const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/query`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question }),
+  });
+
+  const data = await res.json() as any;
+  if (!res.ok) {
+    console.error(`[query] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+
+  console.log(`Answer: ${data.answer}`);
+  console.log(`Selector: ${data.selector}`);
+  if (data.cached) console.log('(cached)');
+  if (data.model) console.log(`Model: ${data.model}`);
+}
+
+async function runWatchCommand(argv: string[]) {
+  const device = argv[0];
+  if (!device) {
+    console.error('Usage: pingdev watch <device> --schema \'{"key": "selector"}\' [--interval 5000]');
+    console.error('');
+    console.error('Options:');
+    console.error('  --schema <json>    JSON mapping of field names to CSS selectors (required)');
+    console.error('  --interval <ms>    Polling interval in milliseconds (default: 5000)');
+    console.error('  --host <host>      Gateway host (default: localhost)');
+    console.error('  --port <port>      Gateway port (default: 3500)');
+    process.exit(1);
+  }
+
+  const flags = parseFlags(argv.slice(1));
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+  const schemaStr = typeof flags['schema'] === 'string' ? flags['schema'] : '';
+  const interval = typeof flags['interval'] === 'string' ? parseInt(flags['interval'], 10) : 5000;
+
+  if (!schemaStr) {
+    console.error('[watch] Missing --schema flag. Example: --schema \'{"price": ".price-tag"}\'');
+    process.exit(1);
+  }
+
+  let schema: Record<string, string> = {};
+  try {
+    schema = JSON.parse(schemaStr);
+  } catch {
+    console.error('[watch] Invalid JSON in --schema');
+    process.exit(1);
+  }
+
+  const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/watch`;
+  console.log('[watch] Connecting to SSE stream (Ctrl+C to stop)...');
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema, interval }),
+  });
+
+  if (!res.ok || !res.body) {
+    const text = await res.text();
+    console.error(`[watch] Error: ${text}`);
+    process.exit(1);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    for (const line of chunk.split('\n')) {
+      if (line.startsWith('data: ')) {
+        console.log(line.slice(6));
+      }
+    }
+  }
+}
+
+async function runDiffCommand(argv: string[]) {
+  const device = argv[0];
+  if (!device) {
+    console.error('Usage: pingdev diff <device> --schema \'{"key": "selector"}\'');
+    console.error('');
+    console.error('Options:');
+    console.error('  --schema <json>  JSON mapping of field names to CSS selectors (required)');
+    console.error('  --host <host>    Gateway host (default: localhost)');
+    console.error('  --port <port>    Gateway port (default: 3500)');
+    process.exit(1);
+  }
+
+  const flags = parseFlags(argv.slice(1));
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+  const schemaStr = typeof flags['schema'] === 'string' ? flags['schema'] : '';
+
+  if (!schemaStr) {
+    console.error('[diff] Missing --schema flag. Example: --schema \'{"price": ".price-tag"}\'');
+    process.exit(1);
+  }
+
+  let schema: Record<string, string> = {};
+  try {
+    schema = JSON.parse(schemaStr);
+  } catch {
+    console.error('[diff] Invalid JSON in --schema');
+    process.exit(1);
+  }
+
+  const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/diff`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema }),
+  });
+
+  const data = await res.json() as any;
+  if (!res.ok) {
+    console.error(`[diff] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+
+  if (data.isFirstExtraction) {
+    console.log('[diff] First extraction — baseline captured.');
+    console.log('Snapshot:', JSON.stringify(data.snapshot, null, 2));
+  } else if (data.changes.length === 0) {
+    console.log('[diff] No changes detected.');
+  } else {
+    console.log(`[diff] ${data.changes.length} change(s) detected:`);
+    for (const c of data.changes) {
+      console.log(`  ${c.field}: "${c.old}" -> "${c.new}"`);
+    }
+    if (data.unchanged.length > 0) {
+      console.log(`  Unchanged: ${data.unchanged.join(', ')}`);
+    }
+  }
+}
+
+async function runDiscoverCommand(argv: string[]) {
+  const device = argv.find((a) => !a.startsWith('--'));
+  if (!device) {
+    console.error('Usage: pingdev discover <device> [options]');
+    console.error('');
+    console.error('Options:');
+    console.error('  --host <host>   Gateway host (default: localhost)');
+    console.error('  --port <port>   Gateway port (default: 3500)');
+    console.error('  --json          Output raw JSON');
+    process.exit(1);
+  }
+
+  const flags = parseFlags(argv);
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+
+  const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/discover`;
+  const res = await fetch(url, { method: 'GET' });
+  const data = await res.json() as any;
+
+  if (!res.ok) {
+    console.error(`[discover] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+
+  if (flags['json']) {
+    console.log(JSON.stringify(data.result, null, 2));
+  } else {
+    const r = data.result;
+    console.log(`Page type: ${r.pageType} (confidence: ${r.confidence})`);
+    if (r.title) console.log(`Title: ${r.title}`);
+    if (r.schemas && r.schemas.length > 0) {
+      for (const schema of r.schemas) {
+        console.log(`\nSchema: ${schema.name}`);
+        for (const [field, def] of Object.entries(schema.fields)) {
+          const f = def as any;
+          console.log(`  ${field}: ${f.selector}${f.multiple ? ' (multiple)' : ''}`);
+        }
+      }
+    }
+  }
+}
+
+async function runCallCommand(argv: string[]) {
+  // Format: pingdev call app.function --param1=val1 --param2=val2
+  const functionName = argv.find((a) => !a.startsWith('--'));
+  if (!functionName || !functionName.includes('.')) {
+    console.error('Usage: pingdev call <app.function> [--param=value ...]');
+    console.error('');
+    console.error('Examples:');
+    console.error('  pingdev call gmail.extract --schema \'{"subject": ".subject"}\'');
+    console.error('  pingdev call amazon.click --selector ".add-to-cart"');
+    console.error('');
+    console.error('Options:');
+    console.error('  --host <host>   Gateway host (default: localhost)');
+    console.error('  --port <port>   Gateway port (default: 3500)');
+    process.exit(1);
+  }
+
+  const flags = parseFlags(argv);
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+  const dotIdx = functionName.indexOf('.');
+  const appName = functionName.slice(0, dotIdx);
+
+  // Build params from flags (excluding host/port)
+  const params: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(flags)) {
+    if (key === 'host' || key === 'port') continue;
+    // Try parsing JSON values
+    if (typeof val === 'string') {
+      try {
+        params[key] = JSON.parse(val);
+      } catch {
+        params[key] = val;
+      }
+    } else {
+      params[key] = val;
+    }
+  }
+
+  const url = `http://${host}:${port}/v1/functions/${encodeURIComponent(appName)}/call`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ function: functionName, params }),
+  });
+
+  const data = await res.json() as any;
+  if (!res.ok) {
+    console.error(`[call] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data.result, null, 2));
+}
+
+async function runMcpCommand(argv: string[]) {
+  const flags = parseFlags(argv);
+  const useSSE = flags['sse'] === true;
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3600';
+
+  if (useSSE) {
+    console.log(`[mcp] Starting PingOS MCP server in SSE mode on port ${port}...`);
+    console.log(`[mcp] SSE endpoint: GET http://localhost:${port}/sse`);
+    console.log(`[mcp] Messages endpoint: POST http://localhost:${port}/messages`);
+  } else {
+    console.log('[mcp] Starting PingOS MCP server in stdio mode...');
+    console.log('[mcp] Connect via Claude Desktop or Cursor.');
+  }
+
+  const { execFileSync, spawn } = await import('node:child_process');
+  const { resolve } = await import('node:path');
+
+  // Resolve the mcp-server entry point
+  let mcpBin: string;
+  try {
+    // Try compiled dist first
+    const distPath = resolve(__dirname, '../../mcp-server/dist/index.js');
+    const { existsSync } = await import('node:fs');
+    if (existsSync(distPath)) {
+      mcpBin = distPath;
+    } else {
+      // Fallback to tsx for development
+      mcpBin = resolve(__dirname, '../../mcp-server/src/index.ts');
+    }
+  } catch {
+    console.error('[mcp] Could not locate MCP server. Run `npm run build` first.');
+    process.exit(1);
+  }
+
+  const mcpArgs: string[] = [];
+  if (useSSE) {
+    mcpArgs.push('--sse', '--port', port);
+  }
+
+  // Spawn the MCP server process; inherit stdio for stdio mode
+  const child = spawn(process.execPath, [mcpBin, ...mcpArgs], {
+    stdio: useSSE ? ['ignore', 'inherit', 'inherit'] : 'inherit',
+    env: { ...process.env },
+  });
+
+  child.on('error', (err) => {
+    console.error(`[mcp] Failed to start MCP server: ${err.message}`);
+    process.exit(1);
+  });
+
+  child.on('exit', (code) => {
+    process.exit(code ?? 0);
+  });
+
+  // Forward termination signals
+  process.on('SIGINT', () => child.kill('SIGINT'));
+  process.on('SIGTERM', () => child.kill('SIGTERM'));
+}
+
+async function runFunctionsCommand(argv: string[]) {
+  const appName = argv.find((a) => !a.startsWith('--'));
+  const flags = parseFlags(argv);
+  const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+
+  const path = appName ? `/v1/functions/${encodeURIComponent(appName)}` : '/v1/functions';
+  const url = `http://${host}:${port}${path}`;
+  const res = await fetch(url, { method: 'GET' });
+  const data = await res.json() as any;
+
+  if (!res.ok) {
+    console.error(`[functions] Error: ${data.message || res.statusText}`);
+    process.exit(1);
+  }
+
+  if (flags['json']) {
+    console.log(JSON.stringify(data.functions, null, 2));
+  } else {
+    const fns = data.functions || [];
+    if (fns.length === 0) {
+      console.log('No functions available. Connect browser tabs first.');
+    } else {
+      console.log(`Available functions (${fns.length}):`);
+      for (const fn of fns) {
+        const paramStr = (fn.params || []).map((p: any) => `${p.name}${p.required ? '' : '?'}: ${p.type}`).join(', ');
+        console.log(`  ${fn.name}(${paramStr})`);
+        console.log(`    ${fn.description}`);
+      }
+    }
   }
 }
 
@@ -457,6 +858,93 @@ switch (command) {
       process.exit(1);
     });
     break;
+  case 'query':
+    runQueryCommand(args.slice(1)).catch((err) => {
+      console.error(`[query] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'watch':
+    runWatchCommand(args.slice(1)).catch((err) => {
+      console.error(`[watch] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'diff':
+    runDiffCommand(args.slice(1)).catch((err) => {
+      console.error(`[diff] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'discover':
+    runDiscoverCommand(args.slice(1)).catch((err) => {
+      console.error(`[discover] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'call':
+    runCallCommand(args.slice(1)).catch((err) => {
+      console.error(`[call] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'functions':
+    runFunctionsCommand(args.slice(1)).catch((err) => {
+      console.error(`[functions] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'pipe':
+    (async () => {
+      const pipeStr = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
+      if (!pipeStr) {
+        console.error('Usage: pingdev pipe \'extract:amazon:.price | type:slack:#deals\'');
+        process.exit(1);
+      }
+      const flags = parseFlags(args.slice(1));
+      const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
+      const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
+      const res = await fetch(`http://${host}:${port}/v1/pipelines/pipe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pipe: pipeStr }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        console.error(`[pipe] Error: ${data.message || res.statusText}`);
+        process.exit(1);
+      }
+      const result = data.result;
+      console.log(`Pipeline "${result.name}" completed in ${result.durationMs}ms`);
+      for (const step of result.steps) {
+        const icon = step.status === 'ok' ? 'OK' : step.status === 'skipped' ? 'SKIP' : 'ERR';
+        console.log(`  [${icon}] ${step.id}${step.error ? ': ' + step.error : ''}`);
+      }
+      if (Object.keys(result.variables).length > 0) {
+        console.log('\nVariables:');
+        for (const [k, v] of Object.entries(result.variables)) {
+          console.log(`  ${k}: ${JSON.stringify(v)}`);
+        }
+      }
+    })().catch((err) => {
+      console.error(`[pipe] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
+  case 'mcp':
+    runMcpCommand(args.slice(1)).catch((err) => {
+      console.error(`[mcp] Fatal error: ${err.message || err}`);
+      if (err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+    break;
   case 'init':
     console.log('pingdev init — not yet implemented (Phase 2)');
     break;
@@ -473,6 +961,14 @@ switch (command) {
     console.log('  serve <app-dir>      Show PingApp config and how to start');
     console.log('  suggest <dev> <q>    Get an LLM suggestion for a device');
     console.log('  record <sub> <dev>   Record workflows (start|stop|export|status)');
+    console.log('  query <dev> <q>      Natural language query about a page');
+    console.log('  watch <dev>          Watch for live data changes (SSE)');
+    console.log('  diff <dev>           Differential extraction (track changes)');
+    console.log('  discover <dev>       Auto-detect page type and extraction schemas');
+    console.log('  call <app.fn>        Call a tab function (e.g. gmail.extract)');
+    console.log('  functions [app]      List callable functions');
+    console.log('  pipe \'expr\'          Cross-tab data pipe (e.g. extract:amazon:.price)');
+    console.log('  mcp [--sse] [--port] Start MCP server for Claude Desktop / Cursor');
     console.log('  init <url>           Scaffold a new PingApp for the given URL');
     console.log('  health               Check system health');
     process.exit(command ? 1 : 0);

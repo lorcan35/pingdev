@@ -33,6 +33,14 @@ export interface LLMProviderConfig {
     siteUrl?: string;
     siteName?: string;
   };
+  anthropic?: {
+    apiKey?: string;
+    model?: string;
+  };
+  openai?: {
+    apiKey?: string;
+    model?: string;
+  };
   ollama?: {
     baseUrl: string;
     model: string;

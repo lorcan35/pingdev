@@ -15,7 +15,11 @@ This document catalogs every driver adapter in PingOS, including capability matr
   - [ChatGPT](#chatgpt)
 - [API Drivers](#api-drivers)
   - [OpenAI-Compatible](#openai-compatible-adapter)
+  - [OpenRouter](#openrouter-adapter)
+  - [OpenAI Direct](#openai-direct-adapter)
   - [Anthropic](#anthropic-adapter)
+  - [LM Studio](#lm-studio-adapter)
+- [Auto-Discovery](#auto-discovery)
 - [Adding a New Driver](#adding-a-new-driver)
 
 ---
@@ -47,16 +51,16 @@ In addition, PingOS includes a **Chrome Extension Auth Bridge** (gateway-side cl
 
 Full capability comparison across all current drivers:
 
-| Capability | Gemini (PingApp) | AI Studio (PingApp) | ChatGPT (PingApp) | Ollama (API) | OpenAI (API) | Anthropic (API) |
-|------------|:---:|:---:|:---:|:---:|:---:|:---:|
-| `llm` | Yes | Yes | Yes | Yes | Yes | Yes |
-| `streaming` | Yes | Yes | Yes | Yes | Yes | Yes |
-| `vision` | Yes | Yes | Yes | Model-dependent | GPT-4o/4V | Yes |
-| `toolCalling` | Yes | Yes | Yes | Model-dependent | Yes | Yes |
-| `imageGen` | Yes | No | Yes | No | DALL-E (separate) | No |
-| `search` | Yes | No | Yes | No | No | No |
-| `deepResearch` | Yes | No | Yes | No | No | No |
-| `thinking` | Yes | Yes | Yes | DeepSeek/Qwen | o1/o3 | Claude 3.5+ |
+| Capability | Gemini (PingApp) | AI Studio (PingApp) | ChatGPT (PingApp) | Ollama (API) | OpenRouter (API) | OpenAI Direct (API) | LM Studio (Local) | Anthropic (API) |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `llm` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| `streaming` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| `vision` | Yes | Yes | Yes | Model-dep. | Model-dep. | GPT-4o/4V | No | Yes |
+| `toolCalling` | Yes | Yes | Yes | Model-dep. | Model-dep. | Yes | No | Yes |
+| `imageGen` | Yes | No | Yes | No | No | No | No | No |
+| `search` | Yes | No | Yes | No | No | No | No | No |
+| `deepResearch` | Yes | No | Yes | No | No | No | No | No |
+| `thinking` | Yes | Yes | Yes | DeepSeek/Qwen | Model-dep. | o1/o3 | No | Claude 3.5+ |
 
 > Note: extension-backed tab devices are *operation* based (read/click/type/extract/eval) rather than capability routed LLM backends, so they are not included in the capability matrix.
 
@@ -461,6 +465,178 @@ Anthropic doesn't have a dedicated health endpoint. The adapter sends a minimal 
 - **Max tokens**: Default max output tokens is 4096. Override by setting model parameters (not yet exposed in `DeviceRequest`).
 - **Tool calling**: The Anthropic API supports tool calling, but the adapter doesn't yet translate PingOS tool calls to Anthropic's format. Tool calling works through the PingApp drivers instead.
 - **Streaming format**: Anthropic uses a unique SSE event format (`message_start`, `content_block_delta`, `message_delta`, `message_stop`). The adapter normalizes this to PingOS `StreamChunk` format.
+
+---
+
+### OpenRouter Adapter
+
+Routes requests through OpenRouter's unified API, which provides access to 100+ models from multiple providers through a single endpoint.
+
+| Field | Value |
+|-------|-------|
+| **Adapter Class** | `OpenRouterAdapter` (extends `OpenAICompatAdapter`) |
+| **Backend Type** | `api` |
+| **Protocol** | OpenAI-compatible `/v1/chat/completions` |
+| **Auth** | Bearer token (`OPENROUTER_API_KEY`) |
+| **Auto-registration** | Yes — registered automatically if `OPENROUTER_API_KEY` is set |
+
+#### Configuration
+
+OpenRouter is auto-registered by the gateway when the `OPENROUTER_API_KEY` environment variable is set. No manual configuration needed.
+
+**Environment variable:**
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+**Manual configuration:**
+
+```typescript
+import { OpenRouterAdapter } from '@pingdev/std';
+
+const openrouter = new OpenRouterAdapter({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+  model: 'anthropic/claude-sonnet-4-5',
+  priority: 5,
+});
+```
+
+**Config file format:**
+
+```json
+{
+  "id": "openrouter",
+  "type": "openai_compat",
+  "endpoint": "https://openrouter.ai/api",
+  "apiKeyEnv": "OPENROUTER_API_KEY",
+  "model": "anthropic/claude-sonnet-4-5",
+  "priority": 5
+}
+```
+
+#### Features
+
+- `listModels()` fetches all available models from the OpenRouter catalog
+- Automatic routing to the cheapest/fastest provider for each model
+- Supports streaming via SSE
+- Token usage tracking
+
+---
+
+### OpenAI Direct Adapter
+
+Direct OpenAI API access with streaming support and model filtering.
+
+| Field | Value |
+|-------|-------|
+| **Adapter Class** | `OpenAIAdapter` |
+| **Backend Type** | `api` |
+| **Protocol** | OpenAI `/v1/chat/completions` |
+| **Auth** | Bearer token (`OPENAI_API_KEY`) |
+| **Default Model** | `gpt-4o` |
+| **Auto-registration** | Yes — registered automatically if `OPENAI_API_KEY` is set |
+
+#### Configuration
+
+```typescript
+import { OpenAIAdapter } from '@pingdev/std';
+
+const openai = new OpenAIAdapter({
+  apiKey: process.env.OPENAI_API_KEY!,
+  model: 'gpt-4o',
+  priority: 5,
+});
+```
+
+**Environment variable:**
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+#### Features
+
+| Feature | Supported |
+|---------|:-:|
+| Sync `execute()` | Yes |
+| `stream()` (SSE) | Yes |
+| `listModels()` | Yes (filters for `gpt-*`, `o1`, `o3` models) |
+| Token usage tracking | Yes |
+| Auth error detection | Yes (401/403 → `EACCES`) |
+
+#### Health check behavior
+
+Calls `GET https://api.openai.com/v1/models` with auth header:
+- `200` → `online`
+- `401` / `403` → `offline` (auth failure)
+- Connection error → `offline`
+
+#### Known limitations
+
+- `listModels()` falls back to a static list (`gpt-4o`, `gpt-4o-mini`, `o1`, `o3`) if the API call fails
+- Image generation uses a separate DALL-E endpoint (not implemented in this adapter)
+
+---
+
+### LM Studio Adapter
+
+Local LM Studio server with OpenAI-compatible API. Designed for zero-configuration local inference.
+
+| Field | Value |
+|-------|-------|
+| **Adapter Class** | `LMStudioAdapter` |
+| **Backend Type** | `local` |
+| **Protocol** | OpenAI `/v1/chat/completions` |
+| **Auth** | None |
+| **Default Endpoint** | `http://localhost:1234` |
+| **Default Model** | `default` (uses whatever model is loaded) |
+| **Auto-registration** | Yes — registered automatically, gracefully offline when not running |
+
+#### Configuration
+
+```typescript
+import { LMStudioAdapter } from '@pingdev/std';
+
+const lmstudio = new LMStudioAdapter({
+  endpoint: 'http://localhost:1234',
+  model: 'default',
+  priority: 10,
+});
+```
+
+LM Studio is auto-registered by the gateway. If LM Studio is not running, the driver reports `offline` status and `listModels()` returns an empty array — no crashes.
+
+#### Features
+
+| Feature | Supported |
+|---------|:-:|
+| Sync `execute()` | Yes |
+| `stream()` (SSE) | Yes |
+| `listModels()` | Yes (from LM Studio's loaded models) |
+| Graceful offline | Yes (returns empty/offline instead of crashing) |
+
+#### Health check behavior
+
+Calls `GET http://localhost:1234/v1/models` with a 5-second timeout:
+- `200` → `online`
+- Connection refused → `offline` (LM Studio not running)
+
+---
+
+## Auto-Discovery
+
+PingOS automatically registers drivers based on environment variables during gateway startup:
+
+| Environment Variable | Driver Registered |
+|---------------------|-------------------|
+| `OPENROUTER_API_KEY` | OpenRouter (priority 5) |
+| `ANTHROPIC_API_KEY` | Anthropic (priority 5) |
+| `OPENAI_API_KEY` | OpenAI Direct (priority 5) |
+| _(always)_ | LM Studio (priority 10, gracefully offline) |
+| _(always)_ | Ollama (priority 20, gracefully offline) |
+
+Drivers from `~/.pingos/config.json` are also loaded and merged. Config-file drivers take precedence over auto-discovered ones for the same ID.
 
 ---
 

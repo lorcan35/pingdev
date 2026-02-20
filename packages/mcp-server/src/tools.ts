@@ -1,0 +1,199 @@
+// @pingdev/mcp-server — MCP tool definitions wrapping the PingOS gateway API
+import { z } from 'zod';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+
+const GATEWAY_URL = process.env.PINGOS_GATEWAY_URL || 'http://localhost:3500';
+
+async function gw(path: string, method: string = 'GET', body?: unknown): Promise<unknown> {
+  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(`${GATEWAY_URL}${path}`, opts);
+  return res.json();
+}
+
+function textResult(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+export function registerTools(server: McpServer): void {
+  // 1. pingos_devices — List connected browser tabs
+  server.tool(
+    'pingos_devices',
+    'List connected browser tabs (devices) managed by PingOS',
+    {},
+    async () => textResult(await gw('/v1/devices')),
+  );
+
+  // 2. pingos_recon — Get page structure
+  server.tool(
+    'pingos_recon',
+    'Get page structure / DOM snapshot from a device',
+    { device: z.string().describe('Device ID (tab ID)') },
+    async ({ device }) => textResult(await gw(`/v1/dev/${device}/recon`, 'POST', {})),
+  );
+
+  // 3. pingos_observe — List available actions
+  server.tool(
+    'pingos_observe',
+    'List available actions / interactive elements on a device page',
+    { device: z.string().describe('Device ID') },
+    async ({ device }) => textResult(await gw(`/v1/dev/${device}/observe`, 'POST', {})),
+  );
+
+  // 4. pingos_extract — Extract structured data
+  server.tool(
+    'pingos_extract',
+    'Extract structured data from a device page',
+    {
+      device: z.string().describe('Device ID'),
+      query: z.string().optional().describe('Natural language query describing what to extract'),
+      schema: z.record(z.string(), z.unknown()).optional().describe('JSON Schema for the extraction result'),
+    },
+    async ({ device, query, schema }) =>
+      textResult(await gw(`/v1/dev/${device}/extract`, 'POST', { query, schema })),
+  );
+
+  // 5. pingos_act — Execute instruction
+  server.tool(
+    'pingos_act',
+    'Execute a natural language instruction on a device (e.g. "click the login button")',
+    {
+      device: z.string().describe('Device ID'),
+      instruction: z.string().describe('Natural language instruction to execute'),
+    },
+    async ({ device, instruction }) =>
+      textResult(await gw(`/v1/dev/${device}/act`, 'POST', { instruction })),
+  );
+
+  // 6. pingos_click — Click element
+  server.tool(
+    'pingos_click',
+    'Click an element on a device page by CSS selector',
+    {
+      device: z.string().describe('Device ID'),
+      selector: z.string().describe('CSS selector of the element to click'),
+    },
+    async ({ device, selector }) =>
+      textResult(await gw(`/v1/dev/${device}/click`, 'POST', { selector })),
+  );
+
+  // 7. pingos_type — Type text
+  server.tool(
+    'pingos_type',
+    'Type text into an element on a device page',
+    {
+      device: z.string().describe('Device ID'),
+      text: z.string().describe('Text to type'),
+      selector: z.string().optional().describe('CSS selector of the input element (optional — uses focused element if omitted)'),
+    },
+    async ({ device, text, selector }) =>
+      textResult(await gw(`/v1/dev/${device}/type`, 'POST', { text, selector })),
+  );
+
+  // 8. pingos_read — Read element text
+  server.tool(
+    'pingos_read',
+    'Read the text content of an element on a device page',
+    {
+      device: z.string().describe('Device ID'),
+      selector: z.string().describe('CSS selector of the element to read'),
+    },
+    async ({ device, selector }) =>
+      textResult(await gw(`/v1/dev/${device}/read`, 'POST', { selector })),
+  );
+
+  // 9. pingos_press — Press keyboard key
+  server.tool(
+    'pingos_press',
+    'Press a keyboard key on a device (e.g. "Enter", "Tab", "Escape")',
+    {
+      device: z.string().describe('Device ID'),
+      key: z.string().describe('Key to press (e.g. "Enter", "Tab", "Escape", "ArrowDown")'),
+    },
+    async ({ device, key }) =>
+      textResult(await gw(`/v1/dev/${device}/press`, 'POST', { key })),
+  );
+
+  // 10. pingos_scroll — Scroll page
+  server.tool(
+    'pingos_scroll',
+    'Scroll the page on a device',
+    {
+      device: z.string().describe('Device ID'),
+      direction: z.enum(['up', 'down', 'left', 'right']).optional().describe('Scroll direction (default: down)'),
+      amount: z.number().optional().describe('Scroll amount in pixels'),
+    },
+    async ({ device, direction, amount }) =>
+      textResult(await gw(`/v1/dev/${device}/scroll`, 'POST', { direction, amount })),
+  );
+
+  // 11. pingos_screenshot — Take screenshot
+  server.tool(
+    'pingos_screenshot',
+    'Take a screenshot of a device page (returns base64 PNG)',
+    { device: z.string().describe('Device ID') },
+    async ({ device }) => {
+      const result = await gw(`/v1/dev/${device}/screenshot`, 'POST', {}) as Record<string, unknown>;
+      // If result contains a base64 image, return it as an image content
+      const inner = (result?.result ?? result) as Record<string, unknown>;
+      if (typeof inner?.data === 'string' && inner.data.length > 100) {
+        return {
+          content: [{
+            type: 'image' as const,
+            data: inner.data as string,
+            mimeType: (inner.mimeType as string) || 'image/png',
+          }],
+        };
+      }
+      return textResult(result);
+    },
+  );
+
+  // 12. pingos_eval — Evaluate JavaScript
+  server.tool(
+    'pingos_eval',
+    'Evaluate a JavaScript expression in the context of a device page',
+    {
+      device: z.string().describe('Device ID'),
+      expression: z.string().describe('JavaScript expression to evaluate'),
+    },
+    async ({ device, expression }) =>
+      textResult(await gw(`/v1/dev/${device}/eval`, 'POST', { expression })),
+  );
+
+  // 13. pingos_query — Natural language query
+  server.tool(
+    'pingos_query',
+    'Ask a natural language question about a device page (uses LLM to answer based on page content)',
+    {
+      device: z.string().describe('Device ID'),
+      question: z.string().describe('Natural language question about the page'),
+    },
+    async ({ device, question }) =>
+      textResult(await gw(`/v1/dev/${device}/suggest`, 'POST', { question })),
+  );
+
+  // 14. pingos_apps — List PingApps
+  server.tool(
+    'pingos_apps',
+    'List available PingApps (high-level website drivers like AliExpress, Amazon, Claude)',
+    {},
+    async () => textResult(await gw('/v1/apps')),
+  );
+
+  // 15. pingos_app_run — Run PingApp endpoint
+  server.tool(
+    'pingos_app_run',
+    'Run a PingApp action (e.g. app="aliexpress", endpoint="search", body={query:"laptop"})',
+    {
+      app: z.string().describe('App name (e.g. "aliexpress", "amazon", "claude")'),
+      endpoint: z.string().optional().describe('Action endpoint (e.g. "search", "product", "cart")'),
+      body: z.record(z.string(), z.unknown()).optional().describe('Request body as JSON object'),
+    },
+    async ({ app, endpoint, body }) => {
+      const path = endpoint ? `/v1/app/${app}/${endpoint}` : `/v1/app/${app}`;
+      const method = body ? 'POST' : 'GET';
+      return textResult(await gw(path, method, body));
+    },
+  );
+}

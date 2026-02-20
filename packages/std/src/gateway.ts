@@ -14,7 +14,15 @@ import { loadConfig } from './config.js';
 import { SelectorCache } from './selector-cache.js';
 import { attemptHeal, configureSelfHeal } from './self-heal.js';
 import { registerAppRoutes } from './app-routes.js';
-import { suggest as llmSuggest } from './llm.js';
+import { suggest as llmSuggest, callLLM as directLLM } from './llm.js';
+import { discoverPage } from './discover-engine.js';
+import { FunctionRegistry } from './function-registry.js';
+import { WatchManager } from './watch-manager.js';
+import type { WatchEvent, PipelineDef } from './types.js';
+import { PipelineEngine } from './pipeline-engine.js';
+import { ReplayEngine } from './replay-engine.js';
+import { PingAppGenerator } from './pingapp-generator.js';
+import type { Recording } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Request / Reply schemas
@@ -205,6 +213,31 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     return { ok: true, device, status };
   });
 
+  // ---- GET /v1/dev/:device/discover — Zero-Shot Site Adaptation ----
+  app.get<{ Params: { device: string } }>('/v1/dev/:device/discover', async (request, reply) => {
+    const { device } = request.params;
+    if (!extBridge.ownsDevice(device)) {
+      return reply.status(404).send({
+        errno: 'ENODEV',
+        code: 'ping.gateway.device_not_found',
+        message: `Device ${device} not found`,
+        retryable: false,
+      });
+    }
+    try {
+      const snapshot = await extBridge.callDevice({
+        deviceId: device,
+        op: 'discover',
+        payload: {},
+        timeoutMs: 10_000,
+      });
+      const result = discoverPage(snapshot as Record<string, unknown>);
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
   // ---- POST /v1/dev/:device/suggest ----
   app.post<{ Params: { device: string }; Body: { context?: string; question: string } }>(
     '/v1/dev/:device/suggest',
@@ -309,6 +342,674 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
         }
       }
       return { drivers: allModels };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Novel Features — Query, Watch, Diff, Generate
+  // ---------------------------------------------------------------------------
+
+  const queryCache = new Map<string, { selector: string; url: string }>();
+  const diffStorage = new Map<string, Record<string, string>>();
+
+  function featureHash(str: string): string {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return 'h' + Math.abs(h).toString(36);
+  }
+
+  async function getDeviceDom(deviceId: string, maxChars = 15_000): Promise<string> {
+    try {
+      const result = await extBridge.callDevice({
+        deviceId,
+        op: 'eval',
+        payload: {
+          expression: `(() => {
+            const r = document.querySelector('main') || document.body;
+            if (!r) return '';
+            const c = r.cloneNode(true);
+            if (c.querySelectorAll) c.querySelectorAll('script,style,noscript,svg,link').forEach(n => n.remove());
+            return (c.innerHTML || '').substring(0, ${maxChars});
+          })()`,
+        },
+        timeoutMs: 5_000,
+      });
+      if (typeof result === 'string') return result.slice(0, maxChars);
+      if (result && typeof result === 'object') {
+        const html = (result as any).html ?? (result as any).data ?? result;
+        return String(html).slice(0, maxChars);
+      }
+      return String(result ?? '').slice(0, maxChars);
+    } catch {
+      return '';
+    }
+  }
+
+  async function extractSchemaFromDevice(
+    deviceId: string,
+    schema: Record<string, string>,
+  ): Promise<Record<string, string>> {
+    try {
+      const res = await extBridge.callDevice({
+        deviceId,
+        op: 'extract',
+        payload: { schema },
+        timeoutMs: 10_000,
+      });
+      if (res && typeof res === 'object') {
+        const src = (res as any).data ?? res;
+        const out: Record<string, string> = {};
+        for (const key of Object.keys(schema)) {
+          out[key] = typeof src[key] === 'string' ? src[key] : String(src[key] ?? '');
+        }
+        return out;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  function extractTextFromResult(result: unknown): string {
+    if (typeof result === 'string') return result;
+    if (result && typeof result === 'object') {
+      const r = result as any;
+      if (typeof r.data === 'string') return r.data;
+      if (typeof r.text === 'string') return r.text;
+      if (typeof r.result === 'string') return r.result;
+      if (r.data && typeof r.data === 'object') {
+        if (typeof r.data.text === 'string') return r.data.text;
+        if (typeof r.data.result === 'string') return r.data.result;
+      }
+    }
+    return String(result ?? '');
+  }
+
+  async function callFeatureLLM(prompt: string): Promise<{ text: string; model: string }> {
+    try {
+      const driver = registry.resolve({ prompt, require: { llm: true } });
+      const res = await driver.execute({ prompt, timeout_ms: 30_000 });
+      return { text: res.text, model: res.model ?? driver.registration.id };
+    } catch {
+      const text = await directLLM(prompt);
+      return { text, model: 'direct' };
+    }
+  }
+
+  function featureParseJson(text: string): any {
+    const t = (text ?? '').trim();
+    if (!t) return null;
+    const fenced = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    const candidate = fenced ? fenced[1].trim() : t;
+    try { return JSON.parse(candidate); } catch { /* continue */ }
+    const fb = candidate.indexOf('{');
+    const lb = candidate.lastIndexOf('}');
+    if (fb >= 0 && lb > fb) {
+      try { return JSON.parse(candidate.slice(fb, lb + 1)); } catch { /* continue */ }
+    }
+    const fa = candidate.indexOf('[');
+    const la = candidate.lastIndexOf(']');
+    if (fa >= 0 && la > fa) {
+      try { return JSON.parse(candidate.slice(fa, la + 1)); } catch { /* continue */ }
+    }
+    return null;
+  }
+
+  // ---- POST /v1/dev/:device/query — Natural language query ----
+  app.post<{ Params: { device: string }; Body: { question: string } }>(
+    '/v1/dev/:device/query',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { question?: string } | null;
+      if (!body || !body.question) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.gateway.bad_request',
+          message: 'Missing required field: question',
+          retryable: false,
+        });
+      }
+      if (!extBridge.ownsDevice(device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${device} not found`,
+          retryable: false,
+        });
+      }
+
+      try {
+        const qHash = featureHash(body.question.toLowerCase().trim());
+        const cached = queryCache.get(qHash);
+
+        if (cached) {
+          const result = await extBridge.callDevice({
+            deviceId: device,
+            op: 'read',
+            payload: { selector: cached.selector },
+            timeoutMs: 10_000,
+          });
+          return { answer: extractTextFromResult(result), selector: cached.selector, cached: true };
+        }
+
+        const dom = await getDeviceDom(device);
+        if (!dom) {
+          return reply.status(502).send({
+            errno: 'EIO',
+            code: 'ping.gateway.dom_unavailable',
+            message: 'Could not retrieve page DOM',
+            retryable: true,
+          });
+        }
+
+        const prompt = `You are a CSS selector expert. Given a web page DOM and a user question, provide the best CSS selector to extract the answer.
+
+Question: ${body.question}
+
+DOM excerpt:
+${dom.slice(0, 12_000)}
+
+Respond ONLY with JSON: {"selector": "css-selector-here", "reasoning": "brief explanation"}`;
+
+        const llmRes = await callFeatureLLM(prompt);
+        const parsed = featureParseJson(llmRes.text);
+        if (!parsed || typeof parsed.selector !== 'string') {
+          return reply.status(502).send({
+            errno: 'EIO',
+            code: 'ping.gateway.llm_parse_error',
+            message: 'LLM did not return a valid selector',
+            retryable: true,
+          });
+        }
+
+        const selector = String(parsed.selector).trim();
+        const result = await extBridge.callDevice({
+          deviceId: device,
+          op: 'read',
+          payload: { selector },
+          timeoutMs: 10_000,
+        });
+        const answer = extractTextFromResult(result);
+        queryCache.set(qHash, { selector, url: getDeviceUrlFromShares(extBridge, device) ?? '' });
+        return { answer, selector, cached: false, model: llmRes.model };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // ---- POST /v1/dev/:device/watch — Live data stream (SSE) ----
+  app.post<{ Params: { device: string }; Body: { schema: Record<string, string>; interval?: number } }>(
+    '/v1/dev/:device/watch',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { schema?: Record<string, string>; interval?: number } | null;
+      if (!body || !body.schema || typeof body.schema !== 'object') {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.gateway.bad_request',
+          message: 'Missing required field: schema',
+          retryable: false,
+        });
+      }
+      if (!extBridge.ownsDevice(device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${device} not found`,
+          retryable: false,
+        });
+      }
+
+      const schema = body.schema;
+      const interval = Math.max(1000, body.interval ?? 5000);
+
+      reply.hijack();
+      const raw = reply.raw;
+      raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+
+      let previousData = await extractSchemaFromDevice(device, schema);
+      raw.write(`data: ${JSON.stringify({ ...previousData, timestamp: Date.now() })}\n\n`);
+
+      const intervalId = setInterval(async () => {
+        try {
+          const data = await extractSchemaFromDevice(device, schema);
+          const currentJson = JSON.stringify(data);
+          if (currentJson !== JSON.stringify(previousData)) {
+            raw.write(`data: ${JSON.stringify({ ...data, timestamp: Date.now() })}\n\n`);
+            previousData = data;
+          }
+        } catch {
+          // Ignore extraction errors during polling
+        }
+      }, interval);
+
+      request.raw.on('close', () => {
+        clearInterval(intervalId);
+      });
+    },
+  );
+
+  // ---- POST /v1/dev/:device/diff — Differential extraction ----
+  app.post<{ Params: { device: string }; Body: { schema: Record<string, string> } }>(
+    '/v1/dev/:device/diff',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { schema?: Record<string, string> } | null;
+      if (!body || !body.schema || typeof body.schema !== 'object') {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.gateway.bad_request',
+          message: 'Missing required field: schema',
+          retryable: false,
+        });
+      }
+      if (!extBridge.ownsDevice(device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${device} not found`,
+          retryable: false,
+        });
+      }
+
+      try {
+        const schema = body.schema;
+        const schemaKey = `${device}_${featureHash(JSON.stringify(schema))}`;
+        const snapshot = await extractSchemaFromDevice(device, schema);
+        const previousSnapshot = diffStorage.get(schemaKey);
+        diffStorage.set(schemaKey, snapshot);
+
+        if (!previousSnapshot) {
+          return {
+            changes: [],
+            unchanged: Object.keys(schema),
+            snapshot,
+            previousSnapshot: null,
+            isFirstExtraction: true,
+          };
+        }
+
+        const changes: Array<{ field: string; old: string; new: string }> = [];
+        const unchanged: string[] = [];
+        for (const key of Object.keys(schema)) {
+          if (snapshot[key] !== previousSnapshot[key]) {
+            changes.push({ field: key, old: previousSnapshot[key] ?? '', new: snapshot[key] ?? '' });
+          } else {
+            unchanged.push(key);
+          }
+        }
+
+        return { changes, unchanged, snapshot, previousSnapshot, isFirstExtraction: false };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // ---- POST /v1/apps/generate — PingApp generator ----
+  app.post<{ Body: { url: string; description: string } }>(
+    '/v1/apps/generate',
+    async (request, reply) => {
+      const body = request.body as { url?: string; description?: string } | null;
+      if (!body || !body.url || !body.description) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.gateway.bad_request',
+          message: 'Missing required fields: url, description',
+          retryable: false,
+        });
+      }
+
+      try {
+        let dom = '';
+        const targetHost = body.url.replace(/^https?:\/\//, '').split('/')[0].toLowerCase();
+        for (const { tabs } of extBridge.listSharedTabs()) {
+          for (const tab of tabs ?? []) {
+            if (tab.url && tab.url.toLowerCase().includes(targetHost)) {
+              dom = await getDeviceDom(tab.deviceId);
+              break;
+            }
+          }
+          if (dom) break;
+        }
+
+        const prompt = `You are a PingApp generator for PingOS, a browser automation platform. Create a complete PingApp definition.
+
+URL: ${body.url}
+Description: ${body.description}${dom ? `\n\nDOM excerpt:\n${dom.slice(0, 10_000)}` : '\n\nNo live DOM available — generate based on common patterns for this type of site.'}
+
+Create a PingApp definition with:
+- name: short kebab-case name derived from the URL
+- url: the target URL
+- description: what this app does
+- selectors: CSS selectors as {"selectorName": {"tiers": ["primary", "fallback"]}}
+- actions: [{"name": "actionName", "description": "...", "inputSelector": "css", "submitTrigger": "css", "outputSelector": "css"}]
+- schemas: [{"name": "schemaName", "fields": {"fieldName": "css-selector"}}]
+
+Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "selectors": {...}, "actions": [...], "schemas": [...]}`;
+
+        const llmRes = await callFeatureLLM(prompt);
+        const parsed = featureParseJson(llmRes.text);
+        if (!parsed || !parsed.name) {
+          return reply.status(502).send({
+            errno: 'EIO',
+            code: 'ping.gateway.llm_parse_error',
+            message: 'LLM did not return a valid PingApp definition',
+            retryable: true,
+          });
+        }
+
+        return { app: parsed, model: llmRes.model };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tab-as-a-Function — /v1/functions namespace
+  // ---------------------------------------------------------------------------
+
+  const funcRegistry = new FunctionRegistry(extBridge);
+
+  // GET /v1/functions — list all callable functions
+  app.get('/v1/functions', async () => {
+    const functions = funcRegistry.listAll();
+    return { ok: true, functions };
+  });
+
+  // GET /v1/functions/:app — describe functions for a specific app
+  app.get<{ Params: { app: string } }>('/v1/functions/:app', async (request, reply) => {
+    const { app: appName } = request.params;
+    const functions = funcRegistry.listForApp(appName);
+    if (!functions) {
+      return reply.status(404).send({
+        errno: 'ENOENT',
+        code: 'ping.functions.app_not_found',
+        message: `App "${appName}" not found`,
+        retryable: false,
+      });
+    }
+    return { ok: true, app: appName, functions };
+  });
+
+  // POST /v1/functions/:app/call — call a single function
+  app.post<{ Params: { app: string }; Body: { function: string; params?: Record<string, unknown> } }>(
+    '/v1/functions/:app/call',
+    async (request, reply) => {
+      const { app: appName } = request.params;
+      const body = request.body as { function?: string; params?: Record<string, unknown> } | null;
+      if (!body || !body.function) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.functions.bad_request',
+          message: 'Missing required field: function',
+          retryable: false,
+        });
+      }
+
+      // Support both "app.op" and just "op" format
+      const qualifiedName = body.function.includes('.')
+        ? body.function
+        : `${appName}.${body.function}`;
+
+      try {
+        const result = await funcRegistry.call(qualifiedName, body.params ?? {});
+        return { ok: true, result };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // POST /v1/functions/:app/batch — call multiple functions in sequence
+  app.post<{
+    Params: { app: string };
+    Body: { calls: Array<{ function: string; params?: Record<string, unknown> }> };
+  }>(
+    '/v1/functions/:app/batch',
+    async (request, reply) => {
+      const { app: appName } = request.params;
+      const body = request.body as { calls?: Array<{ function: string; params?: Record<string, unknown> }> } | null;
+      if (!body || !Array.isArray(body.calls) || body.calls.length === 0) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.functions.bad_request',
+          message: 'Missing required field: calls (array of {function, params})',
+          retryable: false,
+        });
+      }
+
+      try {
+        const results = await funcRegistry.batch(
+          body.calls.map((c) => ({
+            function: c.function.includes('.') ? c.function : `${appName}.${c.function}`,
+            params: c.params ?? {},
+          })),
+        );
+        return { ok: true, results };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Real-Time Page Subscriptions — Watch Manager + SSE
+  // ---------------------------------------------------------------------------
+
+  const watchManager = new WatchManager(extBridge);
+
+  // POST /v1/dev/:device/watch — start watching, returns watchId + SSE stream URL
+  app.post<{ Params: { device: string }; Body: { selector: string; fields?: Record<string, string>; interval?: number } }>(
+    '/v1/dev/:device/watch/start',
+    async (request, reply) => {
+      const { device } = request.params;
+      const body = request.body as { selector?: string; fields?: Record<string, string>; interval?: number } | null;
+      if (!body || !body.selector) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.watch.bad_request',
+          message: 'Missing required field: selector',
+          retryable: false,
+        });
+      }
+      if (!extBridge.ownsDevice(device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${device} not found`,
+          retryable: false,
+        });
+      }
+
+      const watch = watchManager.startWatch(device, {
+        selector: body.selector,
+        fields: body.fields,
+        interval: body.interval,
+      });
+
+      return {
+        ok: true,
+        watchId: watch.watchId,
+        stream: `/v1/watches/${watch.watchId}/events`,
+      };
+    },
+  );
+
+  // GET /v1/watches/:watchId/events — SSE stream of changes
+  app.get<{ Params: { watchId: string } }>(
+    '/v1/watches/:watchId/events',
+    async (request, reply) => {
+      const { watchId } = request.params;
+      const watch = watchManager.getWatch(watchId);
+      if (!watch) {
+        return reply.status(404).send({
+          errno: 'ENOENT',
+          code: 'ping.watch.not_found',
+          message: `Watch ${watchId} not found`,
+          retryable: false,
+        });
+      }
+
+      reply.hijack();
+      const raw = reply.raw;
+      raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+
+      const listener = (event: WatchEvent) => {
+        try {
+          raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        } catch {
+          // Connection closed
+          watchManager.removeListener(watchId, listener);
+        }
+      };
+
+      watchManager.addListener(watchId, listener);
+
+      request.raw.on('close', () => {
+        watchManager.removeListener(watchId, listener);
+      });
+    },
+  );
+
+  // DELETE /v1/watches/:watchId — stop watching
+  app.delete<{ Params: { watchId: string } }>(
+    '/v1/watches/:watchId',
+    async (request, reply) => {
+      const { watchId } = request.params;
+      const stopped = watchManager.stopWatch(watchId);
+      if (!stopped) {
+        return reply.status(404).send({
+          errno: 'ENOENT',
+          code: 'ping.watch.not_found',
+          message: `Watch ${watchId} not found`,
+          retryable: false,
+        });
+      }
+      return { ok: true, watchId };
+    },
+  );
+
+  // GET /v1/watches — list all active watches
+  app.get('/v1/watches', async () => {
+    return { ok: true, watches: watchManager.listAll() };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Cross-Tab Data Pipes — Pipeline Engine
+  // ---------------------------------------------------------------------------
+
+  const pipelineEngine = new PipelineEngine(extBridge);
+  const savedPipelines = new Map<string, PipelineDef>();
+
+  // POST /v1/pipelines/run — execute a pipeline
+  app.post<{ Body: PipelineDef }>('/v1/pipelines/run', async (request, reply) => {
+    const body = request.body as PipelineDef | null;
+    if (!body || !body.steps) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.pipeline.bad_request',
+        message: 'Missing pipeline definition with steps',
+        retryable: false,
+      });
+    }
+
+    const errors = pipelineEngine.validate(body);
+    if (errors.length > 0) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.pipeline.invalid',
+        message: `Pipeline validation failed: ${errors.join('; ')}`,
+        retryable: false,
+      });
+    }
+
+    try {
+      const result = await pipelineEngine.run(body);
+      return { ok: true, result };
+    } catch (err) {
+      return sendPingError(reply, err);
+    }
+  });
+
+  // POST /v1/pipelines/validate — validate a pipeline definition
+  app.post<{ Body: PipelineDef }>('/v1/pipelines/validate', async (request, reply) => {
+    const body = request.body as PipelineDef | null;
+    if (!body) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.pipeline.bad_request',
+        message: 'Missing pipeline definition',
+        retryable: false,
+      });
+    }
+    const errors = pipelineEngine.validate(body);
+    return { ok: errors.length === 0, errors };
+  });
+
+  // GET /v1/pipelines — list saved pipelines
+  app.get('/v1/pipelines', async () => {
+    const list = Array.from(savedPipelines.entries()).map(([name, def]) => ({
+      name,
+      stepCount: def.steps.length,
+    }));
+    return { ok: true, pipelines: list };
+  });
+
+  // POST /v1/pipelines/save — save a named pipeline
+  app.post<{ Body: PipelineDef }>('/v1/pipelines/save', async (request, reply) => {
+    const body = request.body as PipelineDef | null;
+    if (!body || !body.name || !body.steps) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.pipeline.bad_request',
+        message: 'Missing pipeline name or steps',
+        retryable: false,
+      });
+    }
+    savedPipelines.set(body.name, body);
+    return { ok: true, name: body.name };
+  });
+
+  // POST /v1/pipelines/pipe — execute pipe shorthand
+  app.post<{ Body: { pipe: string } }>('/v1/pipelines/pipe', async (request, reply) => {
+    const body = request.body as { pipe?: string } | null;
+    if (!body || !body.pipe) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.pipeline.bad_request',
+        message: 'Missing required field: pipe',
+        retryable: false,
+      });
+    }
+
+    try {
+      const pipeline = PipelineEngine.parsePipeShorthand(body.pipe);
+      const errors = pipelineEngine.validate(pipeline);
+      if (errors.length > 0) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.pipeline.invalid',
+          message: `Pipe validation failed: ${errors.join('; ')}`,
+          retryable: false,
+        });
+      }
+      const result = await pipelineEngine.run(pipeline);
+      return { ok: true, result };
     } catch (err) {
       return sendPingError(reply, err);
     }
@@ -582,6 +1283,167 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       return sendPingError(reply, err);
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // Record → Replay → PingApp Generator
+  // ---------------------------------------------------------------------------
+
+  const replayEngine = new ReplayEngine(extBridge);
+  const pingAppGenerator = new PingAppGenerator();
+  const savedRecordings = new Map<string, Recording>();
+
+  // POST /v1/recordings/replay — replay a recording on a device
+  app.post<{ Body: { device: string; recording: Recording; speed?: number; timeout?: number } }>(
+    '/v1/recordings/replay',
+    async (request, reply) => {
+      const body = request.body as {
+        device?: string;
+        recording?: Recording;
+        recordingId?: string;
+        speed?: number;
+        timeout?: number;
+      } | null;
+
+      if (!body || !body.device) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing required field: device',
+          retryable: false,
+        });
+      }
+
+      // Support both inline recording and saved recording ID
+      let recording = body.recording;
+      if (!recording && body.recordingId) {
+        recording = savedRecordings.get(body.recordingId);
+        if (!recording) {
+          return reply.status(404).send({
+            errno: 'ENOENT',
+            code: 'ping.recordings.not_found',
+            message: `Recording "${body.recordingId}" not found`,
+            retryable: false,
+          });
+        }
+      }
+      if (!recording || !recording.actions) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing recording or recordingId',
+          retryable: false,
+        });
+      }
+
+      if (!extBridge.ownsDevice(body.device)) {
+        return reply.status(404).send({
+          errno: 'ENODEV',
+          code: 'ping.gateway.device_not_found',
+          message: `Device ${body.device} not found`,
+          retryable: false,
+        });
+      }
+
+      try {
+        const result = await replayEngine.replay(body.device, recording, {
+          speed: body.speed,
+          timeout: body.timeout,
+        });
+        return { ok: true, result };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // POST /v1/recordings/generate — generate PingApp from recording
+  app.post<{ Body: { recording: Recording; name?: string } }>(
+    '/v1/recordings/generate',
+    async (request, reply) => {
+      const body = request.body as {
+        recording?: Recording;
+        recordingId?: string;
+        name?: string;
+      } | null;
+
+      if (!body) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing request body',
+          retryable: false,
+        });
+      }
+
+      let recording = body.recording;
+      if (!recording && body.recordingId) {
+        recording = savedRecordings.get(body.recordingId);
+      }
+      if (!recording || !recording.actions) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing recording or recordingId',
+          retryable: false,
+        });
+      }
+
+      try {
+        const app = pingAppGenerator.generate(recording, body.name);
+        const files = pingAppGenerator.serialize(app);
+        return { ok: true, app, files };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // POST /v1/recordings/save — save a recording
+  app.post<{ Body: Recording }>(
+    '/v1/recordings/save',
+    async (request, reply) => {
+      const body = request.body as Recording | null;
+      if (!body || !body.id || !body.actions) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.recordings.bad_request',
+          message: 'Missing recording id or actions',
+          retryable: false,
+        });
+      }
+      savedRecordings.set(body.id, body);
+      return { ok: true, id: body.id };
+    },
+  );
+
+  // GET /v1/recordings — list saved recordings
+  app.get('/v1/recordings', async () => {
+    const list = Array.from(savedRecordings.entries()).map(([id, rec]) => ({
+      id,
+      url: rec.url,
+      actionCount: rec.actions.length,
+      startedAt: rec.startedAt,
+    }));
+    return { ok: true, recordings: list };
+  });
+
+  // DELETE /v1/recordings/:id — delete a recording
+  app.delete<{ Params: { id: string } }>(
+    '/v1/recordings/:id',
+    async (request, reply) => {
+      const { id } = request.params;
+      const deleted = savedRecordings.delete(id);
+      if (!deleted) {
+        return reply.status(404).send({
+          errno: 'ENOENT',
+          code: 'ping.recordings.not_found',
+          message: `Recording "${id}" not found`,
+          retryable: false,
+        });
+      }
+      return { ok: true, id };
+    },
+  );
 
   // ---- WebSocket upgrade handler ----
   logGateway('[gw] starting ExtensionBridge');

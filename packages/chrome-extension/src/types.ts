@@ -19,6 +19,7 @@ export type BridgeCommand =
   | { type: 'scroll'; direction?: 'up' | 'down' | 'left' | 'right'; amount?: number; selector?: string; to?: 'top' | 'bottom'; stealth?: boolean }
   | { type: 'act'; instruction: string; stealth?: boolean }
   | { type: 'extract'; range?: string; format?: 'array' | 'object' | 'csv'; schema?: Record<string, string>; query?: string; limit?: number; stealth?: boolean }
+  | { type: 'watch'; schema: Record<string, string>; interval?: number; stealth?: boolean }
   | { type: 'record_api_action'; action: { type: string; selector?: string; text?: string; key?: string; url?: string; timestamp: number; source: string }; stealth?: boolean };
 
 export interface BridgeResponse {

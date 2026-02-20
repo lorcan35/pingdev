@@ -6,7 +6,7 @@
   "types": "dist/index.d.ts",
   "type": "commonjs",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "dev": "tsc --watch"
   },
   "dependencies": {

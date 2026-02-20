@@ -163,6 +163,130 @@ export interface PingError {
 }
 
 // ---------------------------------------------------------------------------
+// Zero-Shot Site Adaptation (Discover)
+// ---------------------------------------------------------------------------
+
+export type PageType = 'product' | 'search' | 'article' | 'feed' | 'table' | 'form' | 'chat' | 'unknown';
+
+export interface SchemaField {
+  selector: string;
+  attribute?: string;  // e.g. 'href', 'src'; defaults to textContent
+  multiple?: boolean;  // true if the field matches many elements
+}
+
+export interface DiscoveredSchema {
+  name: string;
+  fields: Record<string, SchemaField>;
+}
+
+export interface DiscoverResult {
+  pageType: PageType;
+  confidence: number;
+  title?: string;
+  url?: string;
+  schemas: DiscoveredSchema[];
+  metadata?: Record<string, string>;  // Open Graph / JSON-LD / meta tags
+}
+
+// ---------------------------------------------------------------------------
+// Tab-as-a-Function
+// ---------------------------------------------------------------------------
+
+export interface FunctionParam {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'object';
+  required?: boolean;
+  description?: string;
+}
+
+export interface FunctionDef {
+  name: string;           // e.g. "gmail.send_email"
+  description: string;
+  params: FunctionParam[];
+  returns?: string;       // return type description
+  tab?: string;           // associated device/tab ID
+}
+
+// ---------------------------------------------------------------------------
+// Real-Time Page Subscriptions (Watch)
+// ---------------------------------------------------------------------------
+
+export interface WatchRequest {
+  selector: string;
+  fields?: Record<string, string>;  // field name → sub-selector
+  interval?: number;                 // polling interval ms (default 5000)
+}
+
+export interface WatchEvent {
+  watchId: string;
+  timestamp: number;
+  changes: Array<{ field: string; old: string; new: string }>;
+  snapshot: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-Tab Data Pipes (Pipeline)
+// ---------------------------------------------------------------------------
+
+export interface PipelineStep {
+  id: string;
+  tab?: string;
+  op: string;             // 'extract' | 'type' | 'click' | 'transform' | 'navigate'
+  schema?: Record<string, string>;
+  selector?: string;
+  text?: string;
+  template?: string;
+  input?: string[];       // variable names to read
+  output?: string;        // variable name to write
+  onError?: 'skip' | 'abort' | 'retry';
+}
+
+export interface PipelineDef {
+  name: string;
+  steps: PipelineStep[];
+  parallel?: string[];    // step IDs that can run concurrently
+}
+
+export interface PipelineResult {
+  name: string;
+  steps: Array<{ id: string; status: 'ok' | 'error' | 'skipped'; result?: unknown; error?: string }>;
+  variables: Record<string, unknown>;
+  durationMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Record / Replay / PingApp Generator
+// ---------------------------------------------------------------------------
+
+export interface RecordedAction {
+  type: 'click' | 'input' | 'submit' | 'keydown' | 'navigate' | 'scroll';
+  timestamp: number;
+  selectors: {
+    css?: string;
+    ariaLabel?: string;
+    textContent?: string;
+    xpath?: string;
+    nthChild?: string;
+  };
+  value?: string;        // typed text, key name, URL, etc.
+  coordinates?: { x: number; y: number };
+  tabId?: string;
+}
+
+export interface Recording {
+  id: string;
+  startedAt: number;
+  endedAt?: number;
+  url: string;
+  actions: RecordedAction[];
+}
+
+export interface ReplayOptions {
+  speed?: number;         // multiplier (1.0 = real-time, 0 = instant)
+  timeout?: number;       // per-action timeout ms
+}
+
+// ---------------------------------------------------------------------------
 // Driver Interface (Claude's simplicity + optional streaming)
 // ---------------------------------------------------------------------------
 

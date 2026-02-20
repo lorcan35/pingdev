@@ -33,8 +33,20 @@
 6. [PingApps: Amazon](#6-pingapps-amazon)
 7. [PingApps: AliExpress](#7-pingapps-aliexpress)
 8. [PingApps: Claude](#8-pingapps-claude)
-9. [WebSocket Protocol](#9-websocket-protocol)
-10. [Error Reference](#10-error-reference)
+9. [Novel Features](#9-novel-features)
+   - [POST /v1/dev/:device/query](#post-v1devdevicequery)
+   - [POST /v1/dev/:device/watch](#post-v1devdevicewatch)
+   - [POST /v1/dev/:device/diff](#post-v1devdevicediff)
+   - [GET /v1/dev/:device/discover](#get-v1devdevicediscover)
+   - [POST /v1/apps/generate](#post-v1appsgenerate)
+   - [GET /v1/llm/models](#get-v1llmmodels)
+10. [Tab-as-a-Function](#10-tab-as-a-function)
+    - [GET /v1/functions](#get-v1functions)
+    - [GET /v1/functions/:app](#get-v1functionsapp)
+    - [POST /v1/functions/:app/call](#post-v1functionsappcall)
+    - [POST /v1/functions/:app/batch](#post-v1functionsappbatch)
+11. [WebSocket Protocol](#11-websocket-protocol)
+12. [Error Reference](#12-error-reference)
 
 ---
 
@@ -2217,7 +2229,374 @@ curl -s http://localhost:3500/v1/app/claude/recon | jq .
 
 ---
 
-## 9. WebSocket Protocol
+## 9. Novel Features
+
+### POST /v1/dev/:device/query
+
+Natural language query about a page. Uses an LLM to identify the right CSS selector, then reads the element.
+
+**Request:**
+
+```typescript
+{ question: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "What is the current price?"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "answer": "$49.99",
+  "selector": "span.price-value",
+  "cached": false,
+  "model": "openrouter"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `answer` | `string` | Extracted text from the matched element |
+| `selector` | `string` | CSS selector the LLM chose |
+| `cached` | `boolean` | Whether the selector was served from cache |
+| `model` | `string` | LLM driver used (absent when cached) |
+
+Results are cached by question hash — repeat queries skip the LLM call.
+
+**Errors:**
+
+| Scenario | HTTP | errno |
+|----------|------|-------|
+| Missing `question` | 400 | `ENOSYS` |
+| Device not found | 404 | `ENODEV` |
+| DOM unavailable | 502 | `EIO` |
+| LLM parse error | 502 | `EIO` |
+
+---
+
+### POST /v1/dev/:device/watch
+
+Subscribe to live data changes via Server-Sent Events. Polls the page at a configurable interval and emits events only when data changes.
+
+**Request:**
+
+```typescript
+{ schema: Record<string, string>; interval?: number }
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `schema` | `object` | Yes | — | Map of field names to CSS selectors |
+| `interval` | `number` | No | 5000 | Polling interval in ms (min 1000) |
+
+```bash
+curl -s -N -X POST http://localhost:3500/v1/dev/chrome-123/watch \
+  -H 'Content-Type: application/json' \
+  -d '{"schema": {"price": ".price-tag", "title": "h1"}, "interval": 3000}'
+```
+
+**Response (SSE stream):**
+
+```
+data: {"price":"$49.99","title":"Wireless Headphones","timestamp":1708272000000}
+
+data: {"price":"$39.99","title":"Wireless Headphones","timestamp":1708272003000}
+```
+
+The connection stays open. Only changed data is emitted. Close the connection to stop.
+
+**Errors:**
+
+| Scenario | HTTP | errno |
+|----------|------|-------|
+| Missing `schema` | 400 | `ENOSYS` |
+| Device not found | 404 | `ENODEV` |
+
+---
+
+### POST /v1/dev/:device/diff
+
+Differential extraction — extract data and compare with the previous extraction.
+
+**Request:**
+
+```typescript
+{ schema: Record<string, string> }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123/diff \
+  -H 'Content-Type: application/json' \
+  -d '{"schema": {"price": ".price-tag", "stock": ".availability"}}' | jq .
+```
+
+**Response (200) — first call (baseline):**
+
+```json
+{
+  "changes": [],
+  "unchanged": ["price", "stock"],
+  "snapshot": { "price": "$49.99", "stock": "In Stock" },
+  "previousSnapshot": null,
+  "isFirstExtraction": true
+}
+```
+
+**Response (200) — subsequent call with changes:**
+
+```json
+{
+  "changes": [
+    { "field": "price", "old": "$49.99", "new": "$39.99" }
+  ],
+  "unchanged": ["stock"],
+  "snapshot": { "price": "$39.99", "stock": "In Stock" },
+  "previousSnapshot": { "price": "$49.99", "stock": "In Stock" },
+  "isFirstExtraction": false
+}
+```
+
+State is tracked per device + schema combination.
+
+**Errors:**
+
+| Scenario | HTTP | errno |
+|----------|------|-------|
+| Missing `schema` | 400 | `ENOSYS` |
+| Device not found | 404 | `ENODEV` |
+
+---
+
+### GET /v1/dev/:device/discover
+
+Zero-shot site adaptation. Classifies the page type and generates extraction schemas using heuristics (no LLM needed, <100ms).
+
+```bash
+curl -s http://localhost:3500/v1/dev/chrome-123/discover | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "pageType": "product",
+    "confidence": 0.85,
+    "title": "Wireless Headphones",
+    "url": "https://www.amazon.com/dp/B09XXXYYY",
+    "schemas": [
+      {
+        "name": "product",
+        "fields": {
+          "title": { "selector": "h1.product-title" },
+          "price": { "selector": "span.price-value" },
+          "rating": { "selector": "span.rating" },
+          "image": { "selector": "#main-product-img", "attribute": "src" }
+        }
+      }
+    ],
+    "metadata": {
+      "og:type": "product",
+      "og:title": "Wireless Headphones"
+    }
+  }
+}
+```
+
+Supported page types: `product`, `search`, `article`, `feed`, `table`, `form`, `chat`, `unknown`.
+
+**Errors:**
+
+| Scenario | HTTP | errno |
+|----------|------|-------|
+| Device not found | 404 | `ENODEV` |
+
+---
+
+### POST /v1/apps/generate
+
+Generate a PingApp definition from a URL and description. Uses LLM + optional live DOM.
+
+**Request:**
+
+```typescript
+{ url: string; description: string }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/apps/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://news.ycombinator.com", "description": "Hacker News front page"}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "app": {
+    "name": "hackernews",
+    "url": "https://news.ycombinator.com",
+    "description": "Hacker News front page reader",
+    "selectors": {
+      "title": { "tiers": [".titleline > a", ".storylink"] }
+    },
+    "actions": [...],
+    "schemas": [...]
+  },
+  "model": "openrouter"
+}
+```
+
+If a browser tab is open for the target URL, the live DOM is included for better results.
+
+**Errors:**
+
+| Scenario | HTTP | errno |
+|----------|------|-------|
+| Missing `url` or `description` | 400 | `ENOSYS` |
+| LLM parse error | 502 | `EIO` |
+
+---
+
+### GET /v1/llm/models
+
+List models from all registered LLM drivers.
+
+```bash
+curl -s http://localhost:3500/v1/llm/models | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "drivers": [
+    {
+      "driver": "openrouter",
+      "models": [
+        { "id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "provider": "anthropic" },
+        { "id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google" }
+      ]
+    },
+    {
+      "driver": "lmstudio",
+      "models": [
+        { "id": "llama-3-8b", "name": "llama-3-8b", "provider": "lmstudio" }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## 10. Tab-as-a-Function
+
+The functions namespace exposes connected browser tabs as callable functions with typed parameters.
+
+### GET /v1/functions
+
+List all callable functions across all connected tabs.
+
+```bash
+curl -s http://localhost:3500/v1/functions | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "functions": [
+    {
+      "name": "amazon.extract",
+      "description": "Extract structured data from the page using a CSS-selector schema",
+      "params": [
+        { "name": "schema", "type": "object", "required": true, "description": "Map of field names to CSS selectors" }
+      ],
+      "returns": "object — extracted data matching the schema",
+      "tab": "chrome-123"
+    },
+    {
+      "name": "amazon.click",
+      "description": "Click an element on the page",
+      "params": [
+        { "name": "selector", "type": "string", "required": true }
+      ]
+    }
+  ]
+}
+```
+
+### GET /v1/functions/:app
+
+List functions for a specific app/tab.
+
+```bash
+curl -s http://localhost:3500/v1/functions/amazon | jq .
+```
+
+### POST /v1/functions/:app/call
+
+Call a single function.
+
+**Request:**
+
+```typescript
+{ function: string; params?: Record<string, unknown> }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/functions/amazon/call \
+  -H 'Content-Type: application/json' \
+  -d '{"function": "amazon.extract", "params": {"schema": {"title": "h1", "price": ".price"}}}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "result": { "title": "Wireless Headphones", "price": "$49.99" }
+}
+```
+
+### POST /v1/functions/:app/batch
+
+Execute multiple function calls in sequence.
+
+**Request:**
+
+```typescript
+{ calls: Array<{ function: string; params?: Record<string, unknown> }> }
+```
+
+```bash
+curl -s -X POST http://localhost:3500/v1/functions/amazon/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"calls": [
+    {"function": "amazon.read", "params": {"selector": "h1"}},
+    {"function": "amazon.click", "params": {"selector": ".add-to-cart"}}
+  ]}' | jq .
+```
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "results": ["Wireless Headphones", {"clicked": true}]
+}
+```
+
+---
+
+## 11. WebSocket Protocol
 
 The gateway exposes a WebSocket endpoint at `ws://localhost:3500/ext` for the Chrome extension bridge.
 
@@ -2393,7 +2772,7 @@ By default, **all HTTP/HTTPS tabs are automatically shared** as devices. The ext
 
 ---
 
-## 10. Error Reference
+## 12. Error Reference
 
 All errors follow the `PingError` schema:
 
