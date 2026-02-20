@@ -1543,6 +1543,82 @@ switch (command) {
       try { return { annotations: JSON.parse(jsonStr) }; } catch { return null; }
     }, 'pingdev annotate <device> \'[{"selector":"#foo","label":"Click here"}]\'').catch(cliErr('annotate'));
     break;
+  case 'act':
+    runDeviceOp('act', args.slice(1), (argv) => {
+      const instruction = argv.filter((a) => !a.startsWith('--')).slice(1).join(' ');
+      if (!instruction) return null;
+      return { instruction };
+    }, 'pingdev act <device> <instruction>').catch(cliErr('act'));
+    break;
+  case 'observe':
+    runDeviceOp('observe', args.slice(1), () => {
+      return {};
+    }, 'pingdev observe <device>').catch(cliErr('observe'));
+    break;
+  case 'read':
+    runDeviceOp('read', args.slice(1), (argv) => {
+      const selector = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!selector) return null;
+      return { selector };
+    }, 'pingdev read <device> <selector>').catch(cliErr('read'));
+    break;
+  case 'click':
+    runDeviceOp('click', args.slice(1), (argv) => {
+      const selector = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!selector) return null;
+      return { selector };
+    }, 'pingdev click <device> <selector>').catch(cliErr('click'));
+    break;
+  case 'type':
+    runDeviceOp('type', args.slice(1), (argv) => {
+      const positional = argv.filter((a) => !a.startsWith('--'));
+      const text = positional.slice(1).join(' ');
+      if (!text) return null;
+      const flags = parseFlags(argv);
+      const body: Record<string, unknown> = { text };
+      if (typeof flags['selector'] === 'string') body.selector = flags['selector'];
+      return body;
+    }, 'pingdev type <device> <text> [--selector sel]').catch(cliErr('type'));
+    break;
+  case 'press':
+    runDeviceOp('press', args.slice(1), (argv) => {
+      const key = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!key) return null;
+      return { key };
+    }, 'pingdev press <device> <key>').catch(cliErr('press'));
+    break;
+  case 'scroll':
+    runDeviceOp('scroll', args.slice(1), (argv) => {
+      const flags = parseFlags(argv);
+      const direction = argv.filter((a) => !a.startsWith('--'))[1] || 'down';
+      const body: Record<string, unknown> = { direction };
+      if (typeof flags['amount'] === 'string') body.amount = parseInt(flags['amount'] as string, 10);
+      return body;
+    }, 'pingdev scroll <device> [up|down|left|right] [--amount n]').catch(cliErr('scroll'));
+    break;
+  case 'eval':
+  case 'js':
+    runDeviceOp('eval', args.slice(1), (argv) => {
+      const expression = argv.filter((a) => !a.startsWith('--')).slice(1).join(' ');
+      if (!expression) return null;
+      return { expression };
+    }, 'pingdev eval <device> <expression>').catch(cliErr('eval'));
+    break;
+  case 'screenshot':
+    runDeviceOp('screenshot', args.slice(1), () => {
+      return {};
+    }, 'pingdev screenshot <device>').catch(cliErr('screenshot'));
+    break;
+  case 'upload':
+    runDeviceOp('upload', args.slice(1), (argv) => {
+      const flags = parseFlags(argv);
+      const selector = argv.filter((a) => !a.startsWith('--'))[1];
+      if (!selector) return null;
+      const filePath = typeof flags['file'] === 'string' ? flags['file'] : argv.filter((a) => !a.startsWith('--'))[2];
+      if (!filePath) return null;
+      return { selector, filePath };
+    }, 'pingdev upload <device> <selector> [--file path]').catch(cliErr('upload'));
+    break;
   case 'init':
     console.log('pingdev init — not yet implemented (Phase 2)');
     break;
@@ -1712,6 +1788,18 @@ switch (command) {
     console.log('Smart Extract:');
     console.log('  extract <dev>          Smart extraction (auto, schema, query, visual)');
     console.log('  templates [sub]        Manage extraction templates (list|get|delete|export|import)');
+    console.log('');
+    console.log('Browser Ops:');
+    console.log('  act <dev> <instr>      Execute a natural-language instruction');
+    console.log('  observe <dev>          List possible actions on the page');
+    console.log('  read <dev> <sel>       Read text content of an element');
+    console.log('  click <dev> <sel>      Click an element by CSS selector');
+    console.log('  type <dev> <text>      Type text (--selector for target)');
+    console.log('  press <dev> <key>      Press a keyboard key (Enter, Tab, etc.)');
+    console.log('  scroll <dev> [dir]     Scroll the page (up|down|left|right)');
+    console.log('  eval <dev> <expr>      Evaluate a JavaScript expression');
+    console.log('  screenshot <dev>       Take a screenshot of the tab');
+    console.log('  upload <dev> <sel>     Upload a file to a file input');
     console.log('');
     console.log('Core Ops:');
     console.log('  fill <dev> <json>      Smart form filling');
