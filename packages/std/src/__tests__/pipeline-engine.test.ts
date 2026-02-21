@@ -219,6 +219,46 @@ describe('PipelineEngine', () => {
       expect(result.steps[0].status).toBe('ok');
       expect(result.steps[1].status).toBe('ok');
     });
+
+    it('normalizes read params from nested params object', async () => {
+      bridge._setResult('tab-1', 'read', { data: 'Widget title' });
+
+      const result = await engine.run({
+        name: 'read-params-shape',
+        steps: [
+          { id: 's1', op: 'read', tab: 'tab-1', params: { selector: '.title' } as any, output: 'title' } as any,
+        ],
+      });
+
+      expect(result.steps[0].status).toBe('ok');
+      expect(bridge.callDevice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deviceId: 'tab-1',
+          op: 'read',
+          payload: { selector: '.title' },
+        }),
+      );
+    });
+
+    it('normalizes read params from schema.selector fallback', async () => {
+      bridge._setResult('tab-1', 'read', { data: '$19.99' });
+
+      const result = await engine.run({
+        name: 'read-schema-selector',
+        steps: [
+          { id: 's1', op: 'read', tab: 'tab-1', schema: { selector: '.price' } as any, output: 'price' } as any,
+        ],
+      });
+
+      expect(result.steps[0].status).toBe('ok');
+      expect(bridge.callDevice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deviceId: 'tab-1',
+          op: 'read',
+          payload: { selector: '.price' },
+        }),
+      );
+    });
   });
 
   describe('parsePipeShorthand', () => {

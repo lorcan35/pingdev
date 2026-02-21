@@ -4,25 +4,29 @@
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { ModelRegistry } from './registry.js';
 import { mapErrnoToHttp } from './errors.js';
-import type { DeviceRequest, DeviceResponse, PingError } from './types.js';
+import type { ContentPart, DeviceRequest, DeviceResponse, PingError } from './types.js';
 import { ExtensionBridge } from './ext-bridge.js';
 import { logGateway, serializeError } from './gw-log.js';
 import { loadConfig } from './config.js';
 import { SelectorCache } from './selector-cache.js';
 import { attemptHeal, configureSelfHeal } from './self-heal.js';
 import { registerAppRoutes, PINGAPP_FUNCTION_DEFS } from './app-routes.js';
-import { suggest as llmSuggest, callLLM as directLLM } from './llm.js';
-import { discoverPage } from './discover-engine.js';
+import { suggest as llmSuggest, callLLM as directLLM, extractJSON } from './llm.js';
+import { getLocalConfig, getTimeoutForFeature, isLocalMode, truncateDom } from './local-mode.js';
+import { getDiscoverPrompt, getExtractPrompt, getGeneratePrompt, getQueryPrompt } from './local-prompts.js';
+import { repairLLMJson, stripThinkBlocks } from './json-repair.js';
+import { buildDiscoverSummaryForLLM, discoverPage } from './discover-engine.js';
 import { FunctionRegistry } from './function-registry.js';
 import { WatchManager } from './watch-manager.js';
 import type { WatchEvent, PipelineDef } from './types.js';
 import { PipelineEngine } from './pipeline-engine.js';
 import { ReplayEngine } from './replay-engine.js';
-import { PingAppGenerator } from './pingapp-generator.js';
-import type { Recording } from './types.js';
+import { PingAppGenerator, generatePingAppViaLLM } from './pingapp-generator.js';
+import type { Recording, RecordedAction } from './types.js';
 import { paginateExtract } from './paginate-extract.js';
 import { visualExtract } from './visual-extract.js';
 import {
@@ -49,6 +53,104 @@ interface PromptBody {
 
 interface ChatBody extends PromptBody {
   messages?: DeviceRequest['messages'];
+}
+
+const CONVERSATION_TTL_MS = 30 * 60 * 1000;
+const MAX_CONVERSATION_MESSAGES = 100;
+type ConversationMessages = NonNullable<DeviceRequest['messages']>;
+interface ConversationState {
+  messages: ConversationMessages;
+  updatedAt: number;
+}
+const chatConversations = new Map<string, ConversationState>();
+
+function sanitizeDeviceResponse(result: DeviceResponse): DeviceResponse {
+  const text = typeof result.text === 'string' ? cleanAssistantText(result.text).trim() : result.text;
+  return {
+    ...result,
+    text,
+  };
+}
+
+function cleanAssistantText(text: string): string {
+  const base = stripThinkBlocks(String(text ?? ''))
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .trim();
+  if (!base) return base;
+
+  const isJsonish = base.startsWith('{')
+    || base.startsWith('[')
+    || /```(?:json)?/i.test(base)
+    || /[\[{][\s\S]*[\]}]/.test(base);
+
+  if (!isJsonish) return base;
+
+  const extracted = extractJSON(base);
+  if (!extracted) return base;
+  try {
+    JSON.parse(extracted);
+    return extracted;
+  } catch {
+    try {
+      return JSON.stringify(repairLLMJson(extracted));
+    } catch {
+      return base;
+    }
+  }
+}
+
+function pruneExpiredConversations(now = Date.now()): void {
+  for (const [id, state] of chatConversations.entries()) {
+    if ((now - state.updatedAt) > CONVERSATION_TTL_MS) {
+      chatConversations.delete(id);
+    }
+  }
+}
+
+function ensureConversationId(conversationId?: string): string {
+  const trimmed = conversationId?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : randomUUID();
+}
+
+function getConversationMessages(conversationId: string): ConversationMessages {
+  pruneExpiredConversations();
+  const existing = chatConversations.get(conversationId);
+  if (!existing) return [];
+  chatConversations.set(conversationId, { ...existing, updatedAt: Date.now() });
+  return [...existing.messages];
+}
+
+function appendConversationMessages(
+  conversationId: string,
+  incoming: DeviceRequest['messages'],
+): ConversationMessages {
+  const existing = getConversationMessages(conversationId);
+  const next = [...existing, ...(incoming ?? [])];
+  const trimmed = next.length > MAX_CONVERSATION_MESSAGES
+    ? next.slice(next.length - MAX_CONVERSATION_MESSAGES)
+    : next;
+  chatConversations.set(conversationId, { messages: trimmed, updatedAt: Date.now() });
+  return trimmed;
+}
+
+function contentToText(content: string | ContentPart[]): string {
+  if (typeof content === 'string') return content;
+  return content.map((part) => {
+    if (part.type === 'text') return part.text;
+    if (part.type === 'image_url') return `[image: ${part.url}]`;
+    if (part.type === 'tool_call') return `[tool_call:${part.name}]`;
+    if (part.type === 'tool_result') return '[tool_result]';
+    return '';
+  }).join(' ').trim();
+}
+
+function buildPromptWithConversationContext(prompt: string, conversationId: string): string {
+  const history = getConversationMessages(conversationId);
+  if (!history.length) return prompt;
+  const context = history
+    .map((msg) => `${msg.role}: ${contentToText(msg.content)}`)
+    .join('\n');
+  return `Conversation context:\n${context}\n\nCurrent user request:\n${prompt}`;
 }
 
 const CRASH_LOG_PATH = '/tmp/pingos-crash.log';
@@ -116,6 +218,8 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
   };
 
   const app = Fastify({ logger: false });
+  const funcRegistry = new FunctionRegistry(extBridge);
+  funcRegistry.registerPingApps(PINGAPP_FUNCTION_DEFS);
 
   // Accept empty JSON bodies as {} instead of Fastify's FST_ERR_CTP_EMPTY_JSON_BODY
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -123,7 +227,11 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       const str = (body as string).trim();
       done(null, str ? JSON.parse(str) : {});
     } catch (err) {
-      done(err as Error, undefined);
+      const parseError = new Error('Malformed JSON body') as Error & { statusCode?: number; code?: string };
+      parseError.statusCode = 400;
+      parseError.code = 'FST_ERR_CTP_INVALID_JSON_BODY';
+      (parseError as any).cause = err;
+      done(parseError, undefined);
     }
   });
 
@@ -155,6 +263,36 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       method: request.method,
       url: request.url,
       error: serializeError(error),
+    });
+  });
+
+  app.setErrorHandler((error, _request, reply) => {
+    const err = error as Error & { statusCode?: number; code?: string };
+    const parseErr = err.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || /malformed json/i.test(err.message);
+    if (parseErr) {
+      return reply.status(400).send({
+        errno: 'ENOSYS',
+        code: 'ping.gateway.bad_request',
+        message: 'Malformed JSON body',
+        retryable: false,
+      });
+    }
+
+    const statusCode = typeof err.statusCode === 'number' ? err.statusCode : 500;
+    if (statusCode >= 400 && statusCode < 500) {
+      return reply.status(statusCode).send({
+        errno: 'ENOSYS',
+        code: 'ping.gateway.bad_request',
+        message: err.message || 'Bad request',
+        retryable: false,
+      });
+    }
+
+    return reply.status(500).send({
+      errno: 'EIO',
+      code: 'ping.gateway.internal_error',
+      message: err.message || 'Internal server error',
+      retryable: false,
     });
   });
 
@@ -331,13 +469,18 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       });
     }
 
+    const conversationId = ensureConversationId(body.conversation_id);
+    const promptWithContext = body.conversation_id
+      ? buildPromptWithConversationContext(body.prompt, conversationId)
+      : body.prompt;
+
     const deviceReq: DeviceRequest = {
-      prompt: body.prompt,
+      prompt: promptWithContext,
       driver: body.driver,
       require: body.require,
       strategy: body.strategy,
       timeout_ms: body.timeout_ms,
-      conversation_id: body.conversation_id,
+      conversation_id: conversationId,
       tool: body.tool,
       model: body.model,
     };
@@ -345,7 +488,15 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     try {
       const driver = registry.resolve(deviceReq);
       const result: DeviceResponse = await driver.execute(deviceReq);
-      return result;
+      const sanitized = sanitizeDeviceResponse(result);
+      appendConversationMessages(conversationId, [
+        { role: 'user', content: body.prompt },
+        { role: 'assistant', content: sanitized.text ?? '' },
+      ]);
+      return {
+        ...sanitized,
+        conversation_id: conversationId,
+      };
     } catch (err) {
       return sendPingError(reply, err);
     }
@@ -363,14 +514,19 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       });
     }
 
+    const conversationId = ensureConversationId(body.conversation_id);
+    const incomingMessages = body.messages
+      ?? (body.prompt ? [{ role: 'user', content: body.prompt }] : []);
+    const messages = [...getConversationMessages(conversationId), ...incomingMessages];
+
     const deviceReq: DeviceRequest = {
       prompt: body.prompt ?? '',
-      messages: body.messages,
+      messages,
       driver: body.driver,
       require: body.require,
       strategy: body.strategy,
       timeout_ms: body.timeout_ms,
-      conversation_id: body.conversation_id,
+      conversation_id: conversationId,
       tool: body.tool,
       model: body.model,
     };
@@ -378,7 +534,15 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     try {
       const driver = registry.resolve(deviceReq);
       const result: DeviceResponse = await driver.execute(deviceReq);
-      return result;
+      const sanitized = sanitizeDeviceResponse(result);
+      appendConversationMessages(conversationId, [
+        ...incomingMessages,
+        { role: 'assistant', content: sanitized.text ?? '' },
+      ]);
+      return {
+        ...sanitized,
+        conversation_id: conversationId,
+      };
     } catch (err) {
       return sendPingError(reply, err);
     }
@@ -420,6 +584,9 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
   }
 
   async function getDeviceDom(deviceId: string, maxChars = 15_000): Promise<string> {
+    const local = isLocalMode();
+    const localCfg = getLocalConfig();
+    const cap = local ? localCfg.domLimit : maxChars;
     try {
       const result = await extBridge.callDevice({
         deviceId,
@@ -430,17 +597,17 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
             if (!r) return '';
             const c = r.cloneNode(true);
             if (c.querySelectorAll) c.querySelectorAll('script,style,noscript,svg,link').forEach(n => n.remove());
-            return (c.innerHTML || '').substring(0, ${maxChars});
+            return (c.innerHTML || '').substring(0, ${cap});
           })()`,
         },
         timeoutMs: 5_000,
       });
-      if (typeof result === 'string') return result.slice(0, maxChars);
+      if (typeof result === 'string') return truncateDom(result, cap);
       if (result && typeof result === 'object') {
         const html = (result as any).html ?? (result as any).data ?? result;
-        return String(html).slice(0, maxChars);
+        return truncateDom(String(html), cap);
       }
-      return String(result ?? '').slice(0, maxChars);
+      return truncateDom(String(result ?? ''), cap);
     } catch {
       return '';
     }
@@ -486,34 +653,98 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     return String(result ?? '');
   }
 
-  async function callFeatureLLM(prompt: string): Promise<{ text: string; model: string }> {
+  function extractExplicitCountFromQuery(query: string | undefined): number | null {
+    const q = (query ?? '').trim();
+    if (!q) return null;
+
+    const patterns = [
+      /\b(?:top|first|last)\s+(\d{1,3})\b/i,
+      /\b(?:show|list|give|return|find|get)\s+(?:me\s+)?(?:the\s+)?(?:top\s+|first\s+|last\s+)?(\d{1,3})\b/i,
+      /\b(\d{1,3})\s+(?:items?|results?|stories|posts?|articles?|products?|records?|entries)\b/i,
+    ];
+    for (const pattern of patterns) {
+      const m = q.match(pattern);
+      if (m) {
+        const count = Number.parseInt(m[1], 10);
+        if (Number.isFinite(count) && count > 0) return count;
+      }
+    }
+    return null;
+  }
+
+  function applyExplicitQueryCountLimit(
+    data: Record<string, unknown>,
+    query: string | undefined,
+  ): Record<string, unknown> {
+    const count = extractExplicitCountFromQuery(query);
+    if (!count) return data;
+
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data)) {
+      out[key] = Array.isArray(value) ? value.slice(0, count) : value;
+    }
+    return out;
+  }
+
+  function envInt(name: string, fallback: number): number {
+    const raw = Number.parseInt(process.env[name] || '', 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  }
+
+  function envStr(name: string): string | undefined {
+    const value = (process.env[name] || '').trim();
+    return value || undefined;
+  }
+
+  interface FeatureLLMOptions {
+    feature?: string;
+    modelEnv?: string;
+    timeoutEnv?: string;
+    timeoutMs?: number;
+    responseFormatJson?: boolean;
+    systemPrompt?: string;
+    maxTokens?: number;
+    temperature?: number;
+  }
+
+  async function callFeatureLLM(prompt: string, opts?: FeatureLLMOptions): Promise<{ text: string; model: string }> {
+    const local = isLocalMode();
+    const modelOverride = opts?.modelEnv ? envStr(opts.modelEnv) : undefined;
+    const timeoutMs = local
+      ? getTimeoutForFeature(opts?.feature ?? 'default')
+      : (opts?.timeoutEnv
+      ? envInt(opts.timeoutEnv, opts?.timeoutMs ?? 30_000)
+      : (opts?.timeoutMs ?? 30_000));
+
+    if (modelOverride || opts?.responseFormatJson || opts?.systemPrompt || opts?.maxTokens || opts?.temperature) {
+      const text = await directLLM(prompt, {
+        model: modelOverride,
+        feature: opts?.feature,
+        timeoutMs,
+        responseFormatJson: opts?.responseFormatJson,
+        systemPrompt: opts?.systemPrompt,
+        maxTokens: opts?.maxTokens,
+        temperature: opts?.temperature,
+      });
+      return { text, model: modelOverride ?? 'direct' };
+    }
+
     try {
       const driver = registry.resolve({ prompt, require: { llm: true } });
-      const res = await driver.execute({ prompt, timeout_ms: 30_000 });
+      const res = await driver.execute({ prompt, timeout_ms: timeoutMs });
       return { text: res.text, model: res.model ?? driver.registration.id };
     } catch {
-      const text = await directLLM(prompt);
+      const text = await directLLM(prompt, { timeoutMs, feature: opts?.feature });
       return { text, model: 'direct' };
     }
   }
 
   function featureParseJson(text: string): any {
-    const t = (text ?? '').trim();
-    if (!t) return null;
-    const fenced = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    const candidate = fenced ? fenced[1].trim() : t;
-    try { return JSON.parse(candidate); } catch { /* continue */ }
-    const fb = candidate.indexOf('{');
-    const lb = candidate.lastIndexOf('}');
-    if (fb >= 0 && lb > fb) {
-      try { return JSON.parse(candidate.slice(fb, lb + 1)); } catch { /* continue */ }
+    try {
+      return repairLLMJson(text);
+    } catch {
+      return null;
     }
-    const fa = candidate.indexOf('[');
-    const la = candidate.lastIndexOf(']');
-    if (fa >= 0 && la > fa) {
-      try { return JSON.parse(candidate.slice(fa, la + 1)); } catch { /* continue */ }
-    }
-    return null;
   }
 
   // ---- POST /v1/dev/:device/query — Natural language query ----
@@ -540,6 +771,8 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
       }
 
       try {
+        const local = isLocalMode();
+        const localCfg = getLocalConfig();
         const qHash = featureHash(body.question.toLowerCase().trim());
         const cached = queryCache.get(qHash);
 
@@ -563,16 +796,26 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
           });
         }
 
-        const prompt = `You are a CSS selector expert. Given a web page DOM and a user question, provide the best CSS selector to extract the answer.
+        const domMaxChars = local ? localCfg.domLimit : envInt('PINGOS_LLM_SELECTOR_DOM_MAX_CHARS', 5_000);
+        const baseTruncatedDom = truncateDom(dom, domMaxChars);
+        const maxDomChars = parseInt(process.env.PINGOS_DOM_LIMIT ?? '5000', 10);
+        const truncatedDom = baseTruncatedDom.length > maxDomChars
+          ? baseTruncatedDom.slice(0, maxDomChars) + '\n<!-- truncated -->'
+          : baseTruncatedDom;
+        const qPrompt = getQueryPrompt(local);
+        const prompt = qPrompt.userTemplate
+          .replace('{{question}}', body.question)
+          .replace('{{dom}}', truncatedDom);
 
-Question: ${body.question}
-
-DOM excerpt:
-${dom.slice(0, 12_000)}
-
-Respond ONLY with JSON: {"selector": "css-selector-here", "reasoning": "brief explanation"}`;
-
-        const llmRes = await callFeatureLLM(prompt);
+        const llmRes = await callFeatureLLM(prompt, {
+          feature: 'query',
+          modelEnv: 'PINGOS_LLM_SELECTOR_MODEL',
+          timeoutEnv: 'PINGOS_LLM_SELECTOR_TIMEOUT_MS',
+          responseFormatJson: true,
+          systemPrompt: qPrompt.system,
+          maxTokens: 300,
+          temperature: 0.1,
+        });
         const parsed = featureParseJson(llmRes.text);
         if (!parsed || typeof parsed.selector !== 'string') {
           return reply.status(502).send({
@@ -599,7 +842,7 @@ Respond ONLY with JSON: {"selector": "css-selector-here", "reasoning": "brief ex
     },
   );
 
-  // ---- POST /v1/dev/:device/watch — Live data stream (SSE) ----
+  // ---- POST /v1/dev/:device/watch — Schema-based live data stream (SSE), requires schema ----
   app.post<{ Params: { device: string }; Body: { schema: Record<string, string>; interval?: number } }>(
     '/v1/dev/:device/watch',
     async (request, reply) => {
@@ -727,6 +970,8 @@ Respond ONLY with JSON: {"selector": "css-selector-here", "reasoning": "brief ex
       }
 
       try {
+        const local = isLocalMode();
+        const localCfg = getLocalConfig();
         let dom = '';
         const targetHost = body.url.replace(/^https?:\/\//, '').split('/')[0].toLowerCase();
         for (const { tabs } of extBridge.listSharedTabs()) {
@@ -739,22 +984,52 @@ Respond ONLY with JSON: {"selector": "css-selector-here", "reasoning": "brief ex
           if (dom) break;
         }
 
-        const prompt = `You are a PingApp generator for PingOS, a browser automation platform. Create a complete PingApp definition.
+        const domMaxChars = local ? localCfg.domLimit : envInt('PINGOS_LLM_APPGEN_DOM_MAX_CHARS', 5_000);
+        const baseTruncatedDom = truncateDom(dom, domMaxChars);
+        const maxDomChars = parseInt(process.env.PINGOS_DOM_LIMIT ?? '5000', 10);
+        const truncatedDom = baseTruncatedDom.length > maxDomChars
+          ? baseTruncatedDom.slice(0, maxDomChars) + '\n<!-- truncated -->'
+          : baseTruncatedDom;
+        const domContext = dom ? `DOM:\n${truncatedDom}` : 'DOM: none';
 
-URL: ${body.url}
-Description: ${body.description}${dom ? `\n\nDOM excerpt:\n${dom.slice(0, 10_000)}` : '\n\nNo live DOM available — generate based on common patterns for this type of site.'}
+        if (local) {
+          const app = await generatePingAppViaLLM({
+            url: body.url,
+            description: body.description,
+            domContext,
+          });
+          if (!app || typeof app !== 'object' || typeof (app as Record<string, unknown>).name !== 'string') {
+            return reply.status(502).send({
+              errno: 'EIO',
+              code: 'ping.gateway.llm_parse_error',
+              message: 'LLM did not return a valid PingApp definition',
+              retryable: true,
+            });
+          }
+          funcRegistry.registerGeneratedApp(app as Record<string, unknown>, body.url);
+          const appName = String((app as Record<string, unknown>).name || '').trim();
+          return {
+            app,
+            model: getLocalConfig().llmModel || 'local',
+            functions: appName ? (funcRegistry.listForApp(appName) ?? []) : [],
+          };
+        }
 
-Create a PingApp definition with:
-- name: short kebab-case name derived from the URL
-- url: the target URL
-- description: what this app does
-- selectors: CSS selectors as {"selectorName": {"tiers": ["primary", "fallback"]}}
-- actions: [{"name": "actionName", "description": "...", "inputSelector": "css", "submitTrigger": "css", "outputSelector": "css"}]
-- schemas: [{"name": "schemaName", "fields": {"fieldName": "css-selector"}}]
+        const gPrompt = getGeneratePrompt(false);
+        const prompt = gPrompt.userTemplate
+          .replace('{{url}}', body.url)
+          .replace('{{description}}', body.description)
+          .replace('{{domContext}}', domContext);
 
-Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "selectors": {...}, "actions": [...], "schemas": [...]}`;
-
-        const llmRes = await callFeatureLLM(prompt);
+        const llmRes = await callFeatureLLM(prompt, {
+          feature: 'generate',
+          modelEnv: 'PINGOS_LLM_APPGEN_MODEL',
+          timeoutEnv: 'PINGOS_LLM_APPGEN_TIMEOUT_MS',
+          responseFormatJson: true,
+          systemPrompt: gPrompt.system,
+          maxTokens: isLocalMode() ? 4096 : 1200,
+          temperature: 0.1,
+        });
         const parsed = featureParseJson(llmRes.text);
         if (!parsed || !parsed.name) {
           return reply.status(502).send({
@@ -765,7 +1040,13 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
           });
         }
 
-        return { app: parsed, model: llmRes.model };
+        funcRegistry.registerGeneratedApp(parsed as Record<string, unknown>, body.url);
+        const appName = String((parsed as Record<string, unknown>).name || '').trim();
+        return {
+          app: parsed,
+          model: llmRes.model,
+          functions: appName ? (funcRegistry.listForApp(appName) ?? []) : [],
+        };
       } catch (err) {
         return sendPingError(reply, err);
       }
@@ -776,17 +1057,35 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
   // Tab-as-a-Function — /v1/functions namespace
   // ---------------------------------------------------------------------------
 
-  const funcRegistry = new FunctionRegistry(extBridge);
-  funcRegistry.registerPingApps(PINGAPP_FUNCTION_DEFS);
-
   // GET /v1/functions — list all callable functions
   app.get('/v1/functions', async () => {
     const functions = funcRegistry.listAll();
     return { ok: true, functions };
   });
 
+  // Legacy/dev alias: GET /v1/dev/functions
+  app.get('/v1/dev/functions', async () => {
+    const functions = funcRegistry.listAll();
+    return { ok: true, functions };
+  });
+
   // GET /v1/functions/:app — describe functions for a specific app
   app.get<{ Params: { app: string } }>('/v1/functions/:app', async (request, reply) => {
+    const { app: appName } = request.params;
+    const functions = funcRegistry.listForApp(appName);
+    if (!functions) {
+      return reply.status(404).send({
+        errno: 'ENOENT',
+        code: 'ping.functions.app_not_found',
+        message: `App "${appName}" not found`,
+        retryable: false,
+      });
+    }
+    return { ok: true, app: appName, functions };
+  });
+
+  // Legacy/dev alias: GET /v1/dev/functions/:app
+  app.get<{ Params: { app: string } }>('/v1/dev/functions/:app', async (request, reply) => {
     const { app: appName } = request.params;
     const functions = funcRegistry.listForApp(appName);
     if (!functions) {
@@ -815,13 +1114,50 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
         });
       }
 
-      // Support both "app.op" and just "op" format
-      const qualifiedName = body.function.includes('.')
-        ? body.function
-        : `${appName}.${body.function}`;
+      const resolution = funcRegistry.resolveFunction(appName, body.function);
+      if (!resolution.matched || !resolution.qualifiedName) {
+        return reply.status(404).send({
+          error: 'Function not found',
+          available: resolution.available,
+          suggestion: resolution.suggestion,
+        });
+      }
 
       try {
-        const result = await funcRegistry.call(qualifiedName, body.params ?? {});
+        const result = await funcRegistry.call(resolution.qualifiedName, body.params ?? {});
+        return { ok: true, result };
+      } catch (err) {
+        return sendPingError(reply, err);
+      }
+    },
+  );
+
+  // Legacy/dev alias: POST /v1/dev/functions/call
+  app.post<{ Body: { app: string; function: string; params?: Record<string, unknown> } }>(
+    '/v1/dev/functions/call',
+    async (request, reply) => {
+      const body = request.body as { app?: string; function?: string; params?: Record<string, unknown> } | null;
+      if (!body || !body.app || !body.function) {
+        return reply.status(400).send({
+          errno: 'ENOSYS',
+          code: 'ping.functions.bad_request',
+          message: 'Missing required fields: app, function',
+          retryable: false,
+        });
+      }
+
+      const appName = String(body.app).trim();
+      const resolution = funcRegistry.resolveFunction(appName, body.function);
+      if (!resolution.matched || !resolution.qualifiedName) {
+        return reply.status(404).send({
+          error: 'Function not found',
+          available: resolution.available,
+          suggestion: resolution.suggestion,
+        });
+      }
+
+      try {
+        const result = await funcRegistry.call(resolution.qualifiedName, body.params ?? {});
         return { ok: true, result };
       } catch (err) {
         return sendPingError(reply, err);
@@ -867,7 +1203,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
 
   const watchManager = new WatchManager(extBridge);
 
-  // POST /v1/dev/:device/watch — start watching, returns watchId + SSE stream URL
+  // POST /v1/dev/:device/watch/start — Selector-based watch, requires selector, returns watchId + SSE stream URL
   app.post<{ Params: { device: string }; Body: { selector: string; fields?: Record<string, string>; interval?: number } }>(
     '/v1/dev/:device/watch/start',
     async (request, reply) => {
@@ -1083,6 +1419,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
 
       // 1. Check if extension owns this device
       if (extBridge.ownsDevice(device)) {
+        const _opStartMs = Date.now();
         const payloadObj =
           payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined;
         const selector = typeof payloadObj?.selector === 'string' ? String(payloadObj.selector) : '';
@@ -1098,11 +1435,16 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
               if (schemaIsEmpty) {
                 try {
                   const tmplResult = await applyTemplate(extBridge, device, template);
-                  if (Object.keys(tmplResult.data).length > 0) {
+                  const limitedTemplateData = applyExplicitQueryCountLimit(
+                    tmplResult.data,
+                    payloadObj?.query as string | undefined,
+                  );
+                  if (Object.keys(limitedTemplateData).length > 0) {
+                    logRecordedAction(device, op, payloadObj, limitedTemplateData, Date.now() - _opStartMs);
                     return {
                       ok: true,
                       result: {
-                        data: tmplResult.data,
+                        data: limitedTemplateData,
                         _meta: {
                           strategy: 'template',
                           template_hit: true,
@@ -1129,6 +1471,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
               maxPages: (payloadObj.maxPages as number) ?? 10,
               delay: (payloadObj.delay as number) ?? 1000,
             });
+            logRecordedAction(device, op, payloadObj, result, Date.now() - _opStartMs);
             return { ok: true, result };
           } catch (err) {
             return sendPingError(reply, err);
@@ -1144,6 +1487,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
               query: payloadObj.query as string | undefined,
               strategy: 'visual',
             });
+            logRecordedAction(device, op, payloadObj, result, Date.now() - _opStartMs);
             return { ok: true, result };
           } catch (err) {
             return sendPingError(reply, err);
@@ -1174,16 +1518,15 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
               result = await Promise.race([callPromise, serverTimeout]);
             } catch (raceErr) {
               const dur = 15_000;
-              return {
-                ok: true,
-                result: {
-                  waited: true,
-                  duration_ms: dur,
-                  condition_met: false,
-                  error: raceErr instanceof Error ? raceErr.message : 'Wait timeout',
-                  _note: 'Server-side timeout safety net triggered',
-                },
+              const waitResult = {
+                waited: true,
+                duration_ms: dur,
+                condition_met: false,
+                error: raceErr instanceof Error ? raceErr.message : 'Wait timeout',
+                _note: 'Server-side timeout safety net triggered',
               };
+              logRecordedAction(device, op, payloadObj, waitResult, Date.now() - _opStartMs);
+              return { ok: true, result: waitResult };
             }
           } else {
             result = await callPromise;
@@ -1203,10 +1546,12 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
                 query: payloadObj.query as string | undefined,
                 strategy: 'visual',
               });
+              logRecordedAction(device, op, payloadObj, visualResult, Date.now() - _opStartMs);
               return { ok: true, result: visualResult, _fallback: 'visual' };
             }
           }
 
+          logRecordedAction(device, op, payloadObj, result, Date.now() - _opStartMs);
           return { ok: true, result };
         } catch (err) {
           // Paginate next causes full-page navigation which destroys the content
@@ -1216,7 +1561,9 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
             if (errMsg.includes('back/forward cache') || errMsg.includes('message channel closed') ||
                 errMsg.includes('io_error') || errMsg.includes('I/O error') || errMsg.includes('EIO') ||
                 errMsg.includes('disconnected') || errMsg.includes('destroyed')) {
-              return { ok: true, result: { action: 'next', navigated: true, _note: 'page navigation destroyed content script port (expected)' } };
+              const paginateResult = { action: 'next', navigated: true, _note: 'page navigation destroyed content script port (expected)' };
+              logRecordedAction(device, op, payloadObj, paginateResult, Date.now() - _opStartMs);
+              return { ok: true, result: paginateResult };
             }
           }
 
@@ -1233,6 +1580,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
             const deviceUrl = getDeviceUrlFromShares(extBridge, device);
             const cdpResult = await cdpFallback(deviceUrl, op, payloadObj);
             if (cdpResult) {
+              logRecordedAction(device, op, payloadObj, cdpResult, Date.now() - _opStartMs);
               return cdpResult;
             }
           }
@@ -1261,6 +1609,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
                 });
                 healStats.successes++;
                 healStats.cacheHitSuccesses++;
+                logRecordedAction(device, op, payloadObj, retryResult, Date.now() - _opStartMs);
                 return { ok: true, result: retryResult, _healed: { from: selector, to: cached, cached: true } };
               } catch {
                 // continue to LLM path
@@ -1295,6 +1644,7 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
                   deviceUrl ?? '',
                   healResult.confidence,
                 );
+                logRecordedAction(device, op, payloadObj, retryResult, Date.now() - _opStartMs);
                 return {
                   ok: true,
                   result: retryResult,
@@ -1328,21 +1678,41 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
           });
         }
 
+        const conversationId = ensureConversationId(body.conversation_id);
+        const chatBody = body as ChatBody;
+        const incomingMessages = chatBody.messages
+          ?? (body.prompt ? [{ role: 'user', content: body.prompt }] : []);
+        const isChat = op === 'chat';
+        const messages = isChat
+          ? [...getConversationMessages(conversationId), ...incomingMessages]
+          : undefined;
+        const promptText = isChat
+          ? (body.prompt ?? '')
+          : (body.conversation_id ? buildPromptWithConversationContext(body.prompt ?? '', conversationId) : (body.prompt ?? ''));
+
         const deviceReq: DeviceRequest = {
-          prompt: body.prompt ?? '',
-          messages: (body as ChatBody).messages,
+          prompt: promptText,
+          ...(messages ? { messages } : {}),
           driver: body.driver,
           require: body.require,
           strategy: body.strategy,
           timeout_ms: body.timeout_ms,
-          conversation_id: body.conversation_id,
+          conversation_id: conversationId,
           tool: body.tool,
         };
 
         try {
           const driver = registry.resolve(deviceReq);
           const result: DeviceResponse = await driver.execute(deviceReq);
-          return result;
+          const sanitized = sanitizeDeviceResponse(result);
+          appendConversationMessages(conversationId, [
+            ...incomingMessages,
+            { role: 'assistant', content: sanitized.text ?? '' },
+          ]);
+          return {
+            ...sanitized,
+            conversation_id: conversationId,
+          };
         } catch (err) {
           return sendPingError(reply, err);
         }
@@ -1385,6 +1755,8 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
       }
 
       try {
+        const local = isLocalMode();
+        const localCfg = getLocalConfig();
         const deviceUrl = getDeviceUrlFromShares(extBridge, device) ?? '';
         const domain = deviceUrl ? new URL(deviceUrl).hostname : '';
         const cacheKey = `${domain}::${body.query}`;
@@ -1411,35 +1783,37 @@ Respond ONLY with JSON: {"name": "...", "url": "...", "description": "...", "sel
 
         // Build a summary for the LLM
         const snapshotObj = snapshot as Record<string, unknown>;
-        const elements = (snapshotObj.elements as Array<Record<string, unknown>> || []).slice(0, 50);
-        const elemSummary = elements.map(e =>
-          `<${e.tag}${e.id ? ` id="${e.id}"` : ''}${e.ariaLabel ? ` aria-label="${e.ariaLabel}"` : ''}${e.selector ? ` selector="${e.selector}"` : ''}>${(e.text as string || '').slice(0, 60)}</${e.tag}>`,
-        ).join('\n');
+        const elemSummary = buildDiscoverSummaryForLLM(
+          snapshotObj,
+          envInt('PINGOS_LLM_EXTRACT_ELEMENT_LIMIT', 30),
+          local ? localCfg.domLimit : envInt('PINGOS_LLM_EXTRACT_DOM_MAX_CHARS', 5_000),
+        );
 
-        const prompt = `Given this web page DOM summary, generate CSS selectors to extract: "${body.query}"
-
-Page URL: ${snapshotObj.url || ''}
-Page Title: ${snapshotObj.title || ''}
-
-DOM Elements:
-${elemSummary}
-
-Return ONLY a JSON object mapping field names to CSS selectors. Example:
-{"titles": "h2.post-title", "prices": ".product-price span"}
-
-JSON:`;
+        const extractPrompt = getExtractPrompt(local);
+        const discoverPrompt = getDiscoverPrompt(local);
+        const prompt = extractPrompt.userTemplate
+          .replace('{{query}}', body.query)
+          .replace('{{url}}', String(snapshotObj.url || ''))
+          .replace('{{title}}', String(snapshotObj.title || ''))
+          .replace('{{elements}}', elemSummary);
 
         const llmResponse = await directLLM(prompt, {
+          feature: 'extract',
+          model: envStr('PINGOS_LLM_EXTRACT_MODEL'),
+          timeoutMs: local ? getTimeoutForFeature('extract') : envInt('PINGOS_LLM_EXTRACT_TIMEOUT_MS', 20_000),
           maxTokens: 300,
           temperature: 0.1,
-          systemPrompt: 'You are a CSS selector expert. Return only valid JSON with field names mapped to CSS selectors. No explanation.',
+          responseFormatJson: true,
+          systemPrompt: local ? discoverPrompt.system : 'Return JSON only: {field: cssSelector}. RESPOND WITH ONLY VALID JSON. No explanation, no markdown, no code fences.',
         });
 
         // Parse LLM response
         let selectors: Record<string, string> = {};
         try {
-          const jsonMatch = llmResponse.match(/\{[\s\S]*\}/);
-          if (jsonMatch) selectors = JSON.parse(jsonMatch[0]);
+          const parsed = repairLLMJson(llmResponse) as Record<string, unknown>;
+          selectors = Object.fromEntries(
+            Object.entries(parsed || {}).filter(([, v]) => typeof v === 'string'),
+          ) as Record<string, string>;
         } catch {
           return reply.status(500).send({
             errno: 'EIO',
@@ -1624,6 +1998,13 @@ JSON:`;
         payload: {},
         timeoutMs: 5_000,
       });
+      // Also start gateway-level recording for API-driven actions
+      const deviceUrl = getDeviceUrlFromShares(extBridge, body.device) ?? '';
+      gatewayRecordings.set(body.device, {
+        startedAt: Date.now(),
+        url: deviceUrl,
+        actions: [],
+      });
       return { ok: true, result };
     } catch (err) {
       return sendPingError(reply, err);
@@ -1655,6 +2036,7 @@ JSON:`;
         payload: {},
         timeoutMs: 5_000,
       });
+      // Gateway recording stays in map until export — stop is just a marker
       return { ok: true, result };
     } catch (err) {
       return sendPingError(reply, err);
@@ -1680,13 +2062,57 @@ JSON:`;
       });
     }
     try {
-      const result = await extBridge.callDevice({
+      const extResult = await extBridge.callDevice({
         deviceId: body.device,
         op: 'record_export',
         payload: { name: body.name || 'recording' },
         timeoutMs: 5_000,
       });
-      return { ok: true, result };
+
+      // Merge gateway-captured API actions into the export
+      const gwRec = gatewayRecordings.get(body.device);
+      const extExport = extResult as Record<string, unknown> ?? {};
+      const extSteps = (extExport.steps ?? extExport.actions ?? []) as RecordedAction[];
+      const gwActions = gwRec?.actions ?? [];
+
+      // Combine: extension browser events + gateway API actions, sorted by timestamp
+      const allActions = [...extSteps, ...gwActions].sort((a, b) => a.timestamp - b.timestamp);
+
+      const recordingName = body.name || 'recording';
+      const recordingId = `${recordingName}-${Date.now()}`;
+      const exportedRecording: Recording = {
+        id: recordingId,
+        startedAt: gwRec?.startedAt ?? Date.now(),
+        endedAt: Date.now(),
+        url: gwRec?.url ?? (extExport.url as string) ?? '',
+        actions: allActions,
+      };
+
+      // Clean up gateway recording state
+      gatewayRecordings.delete(body.device);
+
+      const exportResult = {
+        ...extExport,
+        ...exportedRecording,
+        actionCount: allActions.length,
+        gatewayActions: gwActions.length,
+        browserActions: extSteps.length,
+      };
+
+      const response: Record<string, unknown> = {
+        ok: true,
+        result: exportResult,
+      };
+
+      // Bug #2: Warn when no actions were captured
+      if (allActions.length === 0) {
+        response.warning = 'No actions captured during recording. API-driven actions (navigate, extract, etc.) are captured automatically. For browser interactions, perform them directly in Chrome while recording is active.';
+      }
+
+      // Bug #3: Auto-save export so GET /v1/recordings and replay by ID can find it.
+      savedRecordings.set(recordingId, exportedRecording);
+
+      return response;
     } catch (err) {
       return sendPingError(reply, err);
     }
@@ -1731,6 +2157,36 @@ JSON:`;
   const pingAppGenerator = new PingAppGenerator();
   const savedRecordings = new Map<string, Recording>();
 
+  // ---------------------------------------------------------------------------
+  // Gateway-level recording: captures API-driven actions (navigate, extract, etc.)
+  // The extension recorder only captures user browser events. This fills the gap.
+  // ---------------------------------------------------------------------------
+  interface GatewayRecording {
+    startedAt: number;
+    url: string;
+    actions: RecordedAction[];
+  }
+  const gatewayRecordings = new Map<string, GatewayRecording>();
+
+  function logRecordedAction(deviceId: string, op: string, payload: unknown, result: unknown, durationMs: number): void {
+    const rec = gatewayRecordings.get(deviceId);
+    if (!rec) return;
+    // Don't record internal recording ops
+    if (op.startsWith('record_')) return;
+    const payloadObj = payload && typeof payload === 'object' ? payload as Record<string, unknown> : undefined;
+    const action: RecordedAction = {
+      type: op,
+      timestamp: Date.now(),
+      selector: payloadObj?.selector as string | undefined,
+      value: payloadObj?.to as string ?? payloadObj?.text as string ?? payloadObj?.query as string ?? payloadObj?.url as string ?? undefined,
+    };
+    // Attach input/output as extra fields on the action for rich export
+    (action as any).input = payload ?? {};
+    (action as any).output = result ?? {};
+    (action as any).durationMs = durationMs;
+    rec.actions.push(action);
+  }
+
   // POST /v1/record/replay — alias for /v1/recordings/replay (short-form)
   app.post<{ Body: { device: string; recording?: Recording; recordingId?: string; speed?: number; timeout?: number } }>(
     '/v1/record/replay',
@@ -1752,7 +2208,7 @@ JSON:`;
         });
       }
 
-      // Support both inline recording and saved recording ID
+      // Support inline recording, saved recording ID, or export result object
       let recording = body.recording;
       if (!recording && body.recordingId) {
         recording = savedRecordings.get(body.recordingId);
@@ -1760,16 +2216,20 @@ JSON:`;
           return reply.status(404).send({
             errno: 'ENOENT',
             code: 'ping.recordings.not_found',
-            message: `Recording "${body.recordingId}" not found`,
+            message: `Recording "${body.recordingId}" not found. Use GET /v1/recordings to list available recordings.`,
             retryable: false,
           });
         }
+      }
+      // Handle export result object: if recording has no .actions but has .result.actions
+      if (recording && !(recording as Recording).actions && (recording as any).result?.actions) {
+        recording = { ...(recording as any).result, id: (recording as any).result?.id ?? 'inline' } as Recording;
       }
       if (!recording || !(recording as Recording).actions) {
         return reply.status(400).send({
           errno: 'ENOSYS',
           code: 'ping.recordings.bad_request',
-          message: 'Missing recording or recordingId',
+          message: 'Missing recording or recordingId. Provide either { recording: { actions: [...] } } or { recordingId: "..." }',
           retryable: false,
         });
       }
@@ -1796,7 +2256,7 @@ JSON:`;
   );
 
   // POST /v1/recordings/replay — replay a recording on a device
-  app.post<{ Body: { device: string; recording: Recording; speed?: number; timeout?: number } }>(
+  app.post<{ Body: { device: string; recording?: Recording; recordingId?: string; speed?: number; timeout?: number } }>(
     '/v1/recordings/replay',
     async (request, reply) => {
       const body = request.body as {
@@ -1816,7 +2276,7 @@ JSON:`;
         });
       }
 
-      // Support both inline recording and saved recording ID
+      // Support inline recording, saved recording ID, or export result object
       let recording = body.recording;
       if (!recording && body.recordingId) {
         recording = savedRecordings.get(body.recordingId);
@@ -1824,16 +2284,20 @@ JSON:`;
           return reply.status(404).send({
             errno: 'ENOENT',
             code: 'ping.recordings.not_found',
-            message: `Recording "${body.recordingId}" not found`,
+            message: `Recording "${body.recordingId}" not found. Use GET /v1/recordings to list available recordings.`,
             retryable: false,
           });
         }
+      }
+      // Handle export result object: if recording has no .actions but has .result.actions
+      if (recording && !(recording as Recording).actions && (recording as any).result?.actions) {
+        recording = { ...(recording as any).result, id: (recording as any).result?.id ?? 'inline' } as Recording;
       }
       if (!recording || !recording.actions) {
         return reply.status(400).send({
           errno: 'ENOSYS',
           code: 'ping.recordings.bad_request',
-          message: 'Missing recording or recordingId',
+          message: 'Missing recording or recordingId. Provide either { recording: { actions: [...] } } or { recordingId: "..." }',
           retryable: false,
         });
       }
@@ -2058,11 +2522,39 @@ function getDeviceUrlFromShares(extBridge: ExtensionBridge, deviceId: string): s
   return undefined;
 }
 
+function isTimeoutLikeMessage(text: string): boolean {
+  const t = text.toLowerCase();
+  return t.includes('timeout')
+    || t.includes('timed out')
+    || t.includes('deadline exceeded')
+    || t.includes('abort');
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function sendPingError(reply: any, err: unknown) {
   if (isPingError(err)) {
+    if (err.errno === 'EIO') {
+      const details = typeof (err as any).details === 'string' ? (err as any).details : JSON.stringify((err as any).details ?? '');
+      const timeoutLike = isTimeoutLikeMessage(err.message ?? '') || isTimeoutLikeMessage(details);
+      if (timeoutLike) {
+        return reply.status(504).send({
+          ...err,
+          code: 'ping.gateway.upstream_timeout',
+          message: err.message || 'Upstream request timed out',
+          retryable: true,
+        });
+      }
+    }
     const httpStatus = mapErrnoToHttp(err.errno);
     return reply.status(httpStatus).send(err);
+  }
+  if (err instanceof Error && isTimeoutLikeMessage(err.message || '')) {
+    return reply.status(504).send({
+      errno: 'ETIMEDOUT',
+      code: 'ping.gateway.timeout',
+      message: err.message || 'Request timed out',
+      retryable: true,
+    });
   }
   return reply.status(500).send({
     errno: 'EIO',

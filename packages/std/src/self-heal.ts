@@ -4,6 +4,9 @@
 import type { ExtensionBridge } from './ext-bridge.js';
 import type { ModelRegistry } from './registry.js';
 import { logGateway, serializeError } from './gw-log.js';
+import { getLocalConfig, getModelForFeature, getTimeoutForFeature, isLocalMode, truncateDom } from './local-mode.js';
+import { getHealPrompt } from './local-prompts.js';
+import { repairLLMJson } from './json-repair.js';
 
 export interface HealRequest {
   deviceId: string;
@@ -43,7 +46,7 @@ export interface SelfHealConfig {
 export const DEFAULT_SELF_HEAL_CONFIG: SelfHealConfig = {
   enabled: true,
   maxAttempts: 2,
-  domSnapshotMaxChars: 15_000,
+  domSnapshotMaxChars: 5_000,
   minConfidence: 0.5,
   llm: {
     provider: 'openai-compat',
@@ -237,61 +240,38 @@ async function getDomExcerpt(
 }
 
 function buildPrompt(req: HealRequest, domExcerpt: string, url?: string): string {
-  return `You are a CSS selector repair assistant. A web automation script tried to use a CSS selector that doesn't exist on the page.
-
-FAILED SELECTOR: ${req.selector}
-OPERATION: ${req.op} (what the script was trying to do with this element)
-ERROR: ${req.error}
-WEBSITE: ${url || req.url || ''}
-
-Your task: analyze the DOM excerpt below and find the correct CSS selector that matches what the original selector was TRYING to target.
-
-Think step by step:
-1. What kind of element was the original selector trying to find? (e.g., search box, button, product list, input field)
-2. Look for elements in the DOM that serve that purpose
-3. Prefer selectors using: id > data-testid > aria-label > role > unique class > tag+attribute combo
-4. NEVER use hash-like generated classes (e.g., .css-1a2b3c, .sc-xyz123)
-
-DOM EXCERPT:
-${domExcerpt}
-
-Return ONLY a JSON object: {"selector": "css-selector", "confidence": 0.0-1.0, "reasoning": "one line explanation"}`;
+  const local = isLocalMode();
+  const tpl = getHealPrompt(local);
+  const prompt = tpl.userTemplate
+    .replace('{{selector}}', req.selector)
+    .replace('{{operation}}', req.op)
+    .replace('{{error}}', req.error)
+    .replace('{{url}}', url || req.url || '')
+    .replace('{{dom}}', domExcerpt);
+  return prompt;
 }
 
-function tryParseJsonObject(text: string): { selector?: unknown; confidence?: unknown; reasoning?: unknown } | null {
-  const t = (text ?? '').trim();
-  if (!t) return null;
-
-  // Common LLM formatting: ```json ... ```
-  const fenced = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  const candidate = fenced ? fenced[1].trim() : t;
-
-  // Try direct parse first.
-  try {
-    const obj = JSON.parse(candidate);
-    if (obj && typeof obj === 'object') return obj as any;
-  } catch {
-    // continue
-  }
-
-  // Fallback: try to extract the first {...} block.
-  const firstBrace = candidate.indexOf('{');
-  const lastBrace = candidate.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    try {
-      const obj = JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
-      if (obj && typeof obj === 'object') return obj as any;
-    } catch {
-      // ignore
-    }
-  }
-
-  return null;
+function stripThinkBlocks(text: string): string {
+  let cleaned = String(text ?? '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  cleaned = cleaned
+    .replace(/^\s*<think>[\s\S]*$/gi, '')
+    .replace(/^\s*<thinking>[\s\S]*$/gi, '')
+    .replace(/<\/?think>/gi, '')
+    .replace(/<\/?thinking>/gi, '')
+    .trim();
+  return cleaned;
 }
 
 async function callLLM(prompt: string, config: LLMConfig): Promise<string | null> {
-  const url = `${config.baseUrl}/chat/completions`;
-  const timeoutMs = config.timeoutMs ?? 15_000;
+  const local = isLocalMode();
+  const localCfg = getLocalConfig();
+  const baseUrl = local ? localCfg.llmBaseUrl : config.baseUrl;
+  const url = `${baseUrl}/chat/completions`;
+  const timeoutMs = local
+    ? getTimeoutForFeature('heal')
+    : (config.timeoutMs ?? 15_000);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -305,11 +285,19 @@ async function callLLM(prompt: string, config: LLMConfig): Promise<string | null
       headers['Authorization'] = `Bearer ${config.apiKey}`;
     }
 
+    const promptDef = getHealPrompt(local);
     const body = {
-      model: config.model,
-      messages: [{ role: 'user', content: prompt }],
+      model: local
+        ? (getModelForFeature('heal') || config.model)
+        : config.model,
+      messages: [
+        ...(promptDef.system ? [{ role: 'system', content: promptDef.system }] : []),
+        { role: 'user', content: prompt },
+      ],
       temperature: config.temperature ?? 0.2,
-      max_tokens: config.maxTokens ?? 500,
+      max_tokens: local ? 4096 : (config.maxTokens ?? 500),
+      // Local models (LM Studio) may reject response_format: json_object
+      ...(local ? {} : { response_format: { type: 'json_object' as const } }),
     };
 
     const res = await fetch(url, {
@@ -325,9 +313,9 @@ async function callLLM(prompt: string, config: LLMConfig): Promise<string | null
     }
 
     const data: any = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
-
+    let content = data?.choices?.[0]?.message?.content;
     if (typeof content === 'string') {
+      content = stripThinkBlocks(content);
       return content;
     }
 
@@ -351,7 +339,13 @@ export async function attemptHeal(req: HealRequest): Promise<HealResult | null> 
   const selector = (req.selector ?? '').trim();
   if (!selector) return null;
 
-  const maxChars = Math.max(1000, Math.min(_config.domSnapshotMaxChars, 50_000));
+  const local = isLocalMode();
+  const localCfg = getLocalConfig();
+  const domMaxFromEnv = Number.parseInt(process.env.PINGOS_LLM_HEAL_DOM_MAX_CHARS || '', 10);
+  const domMaxChars = Number.isFinite(domMaxFromEnv) && domMaxFromEnv > 0
+    ? domMaxFromEnv
+    : (local ? localCfg.domLimit : _config.domSnapshotMaxChars);
+  const maxChars = Math.max(1000, Math.min(domMaxChars, 50_000));
 
   let domExcerpt = (req.pageContext ?? '').toString();
   let detectedUrl: string | undefined = req.url;
@@ -362,8 +356,14 @@ export async function attemptHeal(req: HealRequest): Promise<HealResult | null> 
   } else {
     domExcerpt = extractSmartDOM(domExcerpt, selector, maxChars);
   }
+  if (local) {
+    domExcerpt = truncateDom(domExcerpt, localCfg.domLimit);
+  }
 
-  const prompt = buildPrompt(req, domExcerpt, detectedUrl);
+  const maxDomChars = parseInt(process.env.PINGOS_DOM_LIMIT ?? '5000', 10);
+  const truncatedDom = domExcerpt.length > maxDomChars ? domExcerpt.slice(0, maxDomChars) + '\n<!-- truncated -->' : domExcerpt;
+
+  const prompt = buildPrompt(req, truncatedDom, detectedUrl);
 
   logGateway('[heal] calling LLM', {
     provider: _config.llm.provider,
@@ -394,7 +394,15 @@ export async function attemptHeal(req: HealRequest): Promise<HealResult | null> 
     return null;
   }
 
-  const parsed = tryParseJsonObject(text);
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const repaired = repairLLMJson(text);
+    parsed = repaired && typeof repaired === 'object'
+      ? (repaired as Record<string, unknown>)
+      : null;
+  } catch {
+    parsed = null;
+  }
   if (!parsed) {
     logGateway('[heal] failed to parse LLM response', { text: text.slice(0, 200) });
     return null;

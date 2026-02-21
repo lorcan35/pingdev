@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ExtensionBridge } from './ext-bridge.js';
 import { logGateway } from './gw-log.js';
+import { repairLLMJson } from './json-repair.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,7 +55,7 @@ export function loadTemplate(domain: string): ExtractionTemplate | null {
   const path = templatePath(domain);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, 'utf-8'));
+    return repairLLMJson(readFileSync(path, 'utf-8')) as ExtractionTemplate;
   } catch {
     return null;
   }
@@ -82,7 +83,7 @@ export function listTemplates(): Array<{ domain: string; urlPattern: string; hit
 
   for (const file of files) {
     try {
-      const template: ExtractionTemplate = JSON.parse(readFileSync(join(TEMPLATE_DIR, file), 'utf-8'));
+      const template: ExtractionTemplate = repairLLMJson(readFileSync(join(TEMPLATE_DIR, file), 'utf-8')) as ExtractionTemplate;
       const total = template.successCount + template.failCount;
       results.push({
         domain: template.domain,

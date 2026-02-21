@@ -5,6 +5,9 @@
 import type { ExtensionBridge } from './ext-bridge.js';
 import { callLLMVision } from './llm.js';
 import { logGateway } from './gw-log.js';
+import { getLocalConfig, getTimeoutForFeature, isLocalMode, truncateDom } from './local-mode.js';
+import { getVisualPrompt } from './local-prompts.js';
+import { repairLLMJson } from './json-repair.js';
 
 export interface VisualExtractOptions {
   deviceId: string;
@@ -22,6 +25,7 @@ export interface VisualExtractResult {
     model?: string;
     retries?: number;
     cached?: boolean;
+    warning?: string;
   };
 }
 
@@ -34,6 +38,16 @@ interface CachedScreenshot {
 }
 const screenshotCache = new Map<string, CachedScreenshot>();
 const SCREENSHOT_CACHE_TTL_MS = 5000;
+
+function envInt(name: string, fallback: number): number {
+  const raw = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+function envStr(name: string): string | undefined {
+  const value = (process.env[name] || '').trim();
+  return value || undefined;
+}
 
 function getCachedScreenshot(deviceId: string): string | null {
   const entry = screenshotCache.get(deviceId);
@@ -58,13 +72,15 @@ async function callVisionWithRetry(
   opts: Parameters<typeof callLLMVision>[1],
   maxRetries: number = 2,
 ): Promise<string> {
+  const local = isLocalMode();
+  const timeoutMs = local ? getTimeoutForFeature('visual') : envInt('PINGOS_LLM_VISUAL_TIMEOUT_MS', 15_000);
   let lastError: Error | undefined;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const result = await Promise.race([
         callLLMVision(prompt, opts),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Vision API timeout (15s)')), 15_000),
+          setTimeout(() => reject(new Error(`Vision API timeout (${timeoutMs}ms)`)), timeoutMs),
         ),
       ]);
       return result;
@@ -96,9 +112,13 @@ export async function visualExtract(
   opts: VisualExtractOptions,
 ): Promise<VisualExtractResult> {
   const { deviceId, schema, query } = opts;
+  const local = isLocalMode();
+  const localCfg = getLocalConfig();
+  const localVisualModel = localCfg.visionModel || localCfg.models.vision || '';
   const startMs = Date.now();
   let retries = 0;
   let usedCache = false;
+  let warning: string | undefined;
 
   // 1. Take a screenshot (check cache first)
   let screenshotData: string | null = getCachedScreenshot(deviceId);
@@ -149,34 +169,34 @@ export async function visualExtract(
     fieldDescription = 'Extract all visible structured data (titles, prices, descriptions, dates, etc.)';
   }
 
-  const prompt = `Look at this webpage screenshot and extract the following data as JSON:
-
-${fieldDescription}
-
-Return ONLY a valid JSON object with the requested fields. If a field is not visible, use null.
-Do not include explanations.
-
-JSON:`;
+  const promptDef = getVisualPrompt(local);
+  const prompt = promptDef.userTemplate.replace('{{fields}}', fieldDescription);
 
   // 3. Call the LLM with retry logic (vision when screenshot available, text fallback otherwise)
   let llmResponse: string;
   try {
-    if (screenshotData) {
+    if (screenshotData && (!local || !!localVisualModel)) {
       llmResponse = await callVisionWithRetry(prompt, {
         images: [screenshotData],
-        model: 'anthropic/claude-sonnet-4',
-        maxTokens: 2000,
+        model: local ? localVisualModel : envStr('PINGOS_LLM_VISUAL_MODEL'),
+        maxTokens: local ? 4096 : envInt('PINGOS_LLM_VISUAL_MAX_TOKENS', 1500),
         temperature: 0.1,
-        systemPrompt: 'You are a data extraction expert. Extract structured data from webpage screenshots. Return only valid JSON.',
+        timeoutMs: local ? getTimeoutForFeature('visual') : envInt('PINGOS_LLM_VISUAL_TIMEOUT_MS', 15_000),
+        responseFormatJson: true,
+        systemPrompt: promptDef.system,
+        feature: 'visual',
       });
     } else {
+      if (local && screenshotData && !localVisualModel) {
+        warning = 'No local vision model configured; used text fallback extraction.';
+      }
       // No screenshot — fall back to text extraction
       let pageText = '';
       try {
         const evalResult = await extBridge.callDevice({
           deviceId,
           op: 'eval',
-          payload: { expression: 'document.body.innerText.substring(0, 4000)' },
+          payload: { expression: `document.body.innerText.substring(0, ${envInt('PINGOS_LLM_VISUAL_TEXT_MAX_CHARS', 5000)})` },
           timeoutMs: 5_000,
         });
         const evalObj = evalResult as Record<string, unknown>;
@@ -186,12 +206,16 @@ JSON:`;
         }
       } catch { /* ignore */ }
 
-      const contextPrompt = `Given this visible text from a webpage, ${prompt}\n\nVisible text:\n${pageText}`;
+      const contextPrompt = `${promptDef.userTemplate.replace('{{fields}}', fieldDescription)}\ntext:\n${truncateDom(pageText, local ? localCfg.domLimit : 5000)}`;
 
       llmResponse = await callVisionWithRetry(contextPrompt, {
-        maxTokens: 1000,
+        model: local ? (localCfg.llmModel || 'default') : envStr('PINGOS_LLM_VISUAL_MODEL'),
+        maxTokens: local ? 4096 : envInt('PINGOS_LLM_VISUAL_TEXT_MAX_TOKENS', 1000),
         temperature: 0.1,
-        systemPrompt: 'You are a data extraction expert. Extract structured data from webpage content. Return only valid JSON.',
+        timeoutMs: local ? getTimeoutForFeature('visual') : envInt('PINGOS_LLM_VISUAL_TIMEOUT_MS', 15_000),
+        responseFormatJson: true,
+        systemPrompt: promptDef.system,
+        feature: 'visual',
       }, 1); // fewer retries for text fallback
     }
   } catch (err) {
@@ -209,9 +233,9 @@ JSON:`;
   // 4. Parse the LLM response into JSON
   let extractedData: Record<string, unknown> = {};
   try {
-    const jsonMatch = llmResponse.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      extractedData = JSON.parse(jsonMatch[0]);
+    const parsed = repairLLMJson(llmResponse);
+    if (parsed && typeof parsed === 'object') {
+      extractedData = parsed as Record<string, unknown>;
     }
   } catch {
     logGateway('[visual-extract] JSON parse failed', { response: llmResponse.slice(0, 200) });
@@ -228,9 +252,10 @@ JSON:`;
       strategy: 'visual',
       confidence,
       duration_ms: Date.now() - startMs,
-      model: screenshotData ? 'anthropic/claude-sonnet-4' : undefined,
+      model: screenshotData ? (local ? (localVisualModel || localCfg.llmModel || 'default') : (envStr('PINGOS_LLM_VISUAL_MODEL') ?? 'default')) : undefined,
       retries,
       cached: usedCache,
+      warning,
     },
   };
 }

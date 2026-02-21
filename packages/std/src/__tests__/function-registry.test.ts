@@ -147,4 +147,33 @@ describe('FunctionRegistry', () => {
       expect(registry.getTabId('unknown')).toBeNull();
     });
   });
+
+  describe('generated apps', () => {
+    it('registers generated app functions and lists them', () => {
+      registry.registerGeneratedApp({
+        name: 'github-app',
+        url: 'https://github.com',
+        actions: [{ name: 'search', op: 'type', selector: "input[name='q']", value: '{{query}}' }],
+      }, 'https://github.com');
+
+      const fns = registry.listForApp('github-app');
+      expect(fns).not.toBeNull();
+      const names = (fns ?? []).map((f) => f.name);
+      expect(names).toContain('github-app.navigate');
+      expect(names).toContain('github-app.extract');
+      expect(names).toContain('github-app.screenshot');
+      expect(names).toContain('github-app.search');
+    });
+
+    it('calls generated app function against a matched tab domain', async () => {
+      registry.registerGeneratedApp({ name: 'amazon-app', url: 'https://www.amazon.com' }, 'https://www.amazon.com');
+      await registry.call('amazon-app.extract', { schema: { title: 'h1' } });
+      expect(bridge.callDevice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deviceId: 'tab-2',
+          op: 'extract',
+        }),
+      );
+    });
+  });
 });

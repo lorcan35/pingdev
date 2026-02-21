@@ -1,5 +1,5 @@
 // @pingdev/mcp-server — Unit tests for MCP tool registration and gateway helper
-// Tests: registerTools registers all 15 tools, gw() makes correct fetch calls, tool handlers
+// Tests: registerTools registers all tools, gw() makes correct fetch calls, tool handlers
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { registerTools } from '../tools.js';
@@ -47,7 +47,7 @@ function mockFetch(responseBody: unknown = { ok: true }) {
 }
 
 // ---------------------------------------------------------------------------
-// Expected tool names (all 15)
+// Expected tool names
 // ---------------------------------------------------------------------------
 
 const EXPECTED_TOOL_NAMES = [
@@ -66,6 +66,10 @@ const EXPECTED_TOOL_NAMES = [
   'pingos_query',
   'pingos_apps',
   'pingos_app_run',
+  'pingos_extract_semantic',
+  'pingos_watch_start',
+  'pingos_templates',
+  'pingos_api',
 ] as const;
 
 // ============================================================================
@@ -82,15 +86,15 @@ describe('registerTools', () => {
     tools = mock.tools;
   });
 
-  it('registers exactly 15 tools', () => {
-    expect(tools).toHaveLength(15);
+  it('registers all expected tools', () => {
+    expect(tools).toHaveLength(EXPECTED_TOOL_NAMES.length);
   });
 
-  it('calls server.tool() 15 times', () => {
+  it('calls server.tool() once per expected tool', () => {
     const mock = createMockServer();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     registerTools(mock.server as any);
-    expect(mock.server.tool).toHaveBeenCalledTimes(15);
+    expect(mock.server.tool).toHaveBeenCalledTimes(EXPECTED_TOOL_NAMES.length);
   });
 
   it('registers all expected tool names', () => {
@@ -300,14 +304,14 @@ describe('gw() helper via tool handlers', () => {
     expect(JSON.parse(opts.body as string)).toEqual({ expression: 'document.title' });
   });
 
-  it('pingos_query calls POST /v1/dev/{device}/suggest with question', async () => {
+  it('pingos_query calls POST /v1/dev/{device}/query with question', async () => {
     await findTool('pingos_query').handler({
       device: 'tab-1',
       question: 'What is on this page?',
     });
 
     const [url, opts] = fetchMock.mock.calls[0];
-    expect(url).toBe('http://localhost:3500/v1/dev/tab-1/suggest');
+    expect(url).toBe('http://localhost:3500/v1/dev/tab-1/query');
     expect(opts.method).toBe('POST');
     expect(JSON.parse(opts.body as string)).toEqual({ question: 'What is on this page?' });
   });

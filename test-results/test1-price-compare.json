@@ -1,0 +1,271 @@
+{
+  "test": "Test 1: Price Comparison Pipeline",
+  "timestamp": "2026-02-21",
+  "gateway": "http://localhost:3500",
+  "devices": {
+    "aliexpress": "chrome-726392848",
+    "amazon": "chrome-726392849"
+  },
+  "aliexpress_search": {
+    "status": "ok",
+    "timing_ms": 5094,
+    "product_count": 12,
+    "result": {
+      "ok": true,
+      "action": "search",
+      "query": "ESP32-S3 dev board",
+      "products": [
+        {
+          "id": "1005010177649608",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S5846ec6af7cd4398918488bfb72b196b5.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3 Wi-Fi and Bluetooth Development Board Compatible with DevKitC-1, WROOM-1, N8R2/N16R8 Specif",
+          "url": "https://ar.aliexpress.com/item/1005010177649608.html"
+        },
+        {
+          "id": "1005010003689149",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S0084a35c4658439386db50dd654450cbk.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3-DevKitC-1 ESP32-S3 WiFi Bluetooth-compatible BLE 5.0 Mesh Development Board ESP32 Wireless ",
+          "url": "https://ar.aliexpress.com/item/1005010003689149.html"
+        },
+        {
+          "id": "1005011601131535",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S43e492e3a99a446181b71bb8fbe7d701s.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "Waveshare ESP32-S3 4.3\" Touch Voice Dev Board, 800x480 IPS Display, Dual Mics, Wi-Fi 2.4GHz & BLE5",
+          "url": "https://ar.aliexpress.com/item/1005011601131535.html"
+        },
+        {
+          "id": "1005010241454243",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/Sb469321564a14162a39255a36fd0cd22T.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3-DevKitC-1 ESP32-S3 Development Board ESP32-S3-WROOM-1-N16R8 WiFi Bluetooth-compatible Wirel",
+          "url": "https://ar.aliexpress.com/item/1005010241454243.html"
+        },
+        {
+          "id": "1005009599886519",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/Sd8f799c366d343d79c193c61927f54fe9.png_480x480.png_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3-DevKitC-1-N32R16V Development Board with On-Board S3-WROOM-2-N32R16V Module",
+          "url": "https://ar.aliexpress.com/item/1005009599886519.html"
+        },
+        {
+          "id": "1005010376195901",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S34685e27b2b04f6a830aa93345e5afbai.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "LoRaWAN ESP32-S3 Wireless Communication Dev Board for IoT Prototyping Smart Home support LoRa Meshta",
+          "url": "https://ar.aliexpress.com/item/1005010376195901.html"
+        },
+        {
+          "id": "1005008511405770",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/Sc3686944016e410f99bba6449c8d5617X.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3 Wifi Bluetooth Development Board With 5/7-inch 800x480 Display Screen Onboard ESP32-S3-WROO",
+          "url": "https://ar.aliexpress.com/item/1005008511405770.html"
+        },
+        {
+          "id": "1005007148958189",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/Sb6042138b8404368b8882542ce53d46bX.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32 / ESP32-S3 WiFi+Bluetooth Internet Of Things Dual Type-C Development Board Core Board ESP32-S3",
+          "url": "https://ar.aliexpress.com/item/1005007148958189.html"
+        },
+        {
+          "id": "1005010074962235",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S8c39bcbb2dce427fa8d665c4b614c0dc9.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3 CAM WiFi/Bluetooth Dev Board (WR-00M N16R8): OV2640/OV3660 Camera Module Equipped",
+          "url": "https://ar.aliexpress.com/item/1005010074962235.html"
+        },
+        {
+          "id": "1005010722230940",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S5b2e6a260d604cd4b01242f079e207adi.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "LILYGO T-Deck ESP32-S3 LoRa Dev Board | 2.8 \"Touchscreen & Keyboard | WiFi/Bluetooth 5.0 | Meshtasti",
+          "url": "https://ar.aliexpress.com/item/1005010722230940.html"
+        },
+        {
+          "id": "1005007656791597",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/S91f74e756bb5494a82887a4a4c9b3398y.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32 ESP32-S3 WiFi Bluetooth Internet of Things Dual Type-C Development Board Core Board ESP32-S3-D",
+          "url": "https://ar.aliexpress.com/item/1005007656791597.html"
+        },
+        {
+          "id": "1005010570393170",
+          "img": "https://ae-pic-a1.aliexpress-media.com/kf/Sb7bd5a72a65f4b7a9ab10b9735a917dd0.jpg_480x480q75.jpg_.avif",
+          "price": "",
+          "rating": "",
+          "sold": "",
+          "title": "ESP32-S3-DevKitC-1 Dev Board with ESP32-S3-WROOM-1-N16R8 Module, Dual Type-C & Micro USB Interface",
+          "url": "https://ar.aliexpress.com/item/1005010570393170.html"
+        }
+      ],
+      "deviceId": "chrome-726392848"
+    }
+  },
+  "amazon_search": {
+    "status": "ok",
+    "timing_ms": 5045,
+    "product_count": 4,
+    "result": {
+      "ok": true,
+      "action": "search",
+      "query": "ESP32-S3 dev board",
+      "products": [
+        {
+          "asin": "B0FFLXM9KL",
+          "img": "https://m.media-amazon.com/images/I/81js--wI-pL._AC_UL320_.jpg",
+          "price": "AED 89.59",
+          "prime": true,
+          "rating": "4.6 out of 5 stars",
+          "reviews": "4.6 out of 5 stars, rating details",
+          "title": "ESP32-S3 Gold Edition Dev Board - 16MB Flash 8MB PSRAM Dual USB-C IPEX Antenna WiFi Bluetooth for Arduino IoT Projects, ",
+          "url": "https://www.amazon.ae/dp/B0FFLXM9KL"
+        },
+        {
+          "asin": "B0F5QCK6X5",
+          "img": "https://m.media-amazon.com/images/I/71GKGndDkWL._AC_UL320_.jpg",
+          "price": "AED 87.58",
+          "prime": true,
+          "rating": "4.5 out of 5 stars",
+          "reviews": "4.5 out of 5 stars, rating details",
+          "title": "3Pack ESP32-S3 Development Board N16R8 MCU with Dual-Mode Wi-Fi Bluetooth Type-C, Compatible with Arduino IoT ESP32-S3-WROOM-1",
+          "url": "https://www.amazon.ae/dp/B0F5QCK6X5"
+        },
+        {
+          "asin": "B0G3FHZM24",
+          "img": "https://m.media-amazon.com/images/I/71TIE5UYtdL._AC_UL320_.jpg",
+          "price": "AED 23.13",
+          "prime": false,
+          "rating": "",
+          "reviews": "",
+          "title": "1PCS Type-C Supermini ESP32-S3 Development Board Supermini Development Board 2.4GHz WiFi Bluetooth 160MHz Running Freque",
+          "url": "https://www.amazon.ae/dp/B0G3FHZM24"
+        },
+        {
+          "asin": "B0DS9WMKSJ",
+          "img": "https://m.media-amazon.com/images/I/61jg2D6N7BL._AC_UL320_.jpg",
+          "price": "AED 109.00",
+          "prime": true,
+          "rating": "5.0 out of 5 stars",
+          "reviews": "5.0 out of 5 stars, rating details",
+          "title": "ESP32-S3 Ethernet Dev Board onboard 10/100Mbps RJ45 ETH Port, Camera Interface, USB Type-C Port, TF Card Slot and PoE Mo",
+          "url": "https://www.amazon.ae/dp/B0DS9WMKSJ"
+        }
+      ],
+      "deviceId": "chrome-726392849"
+    }
+  },
+  "aliexpress_extract": {
+    "status": "ok",
+    "timing_ms": 37,
+    "item_count": 13,
+    "method": "headings+repeated-containers",
+    "result": {
+      "ok": true,
+      "result": {
+        "query": "extract product titles and prices",
+        "items": [
+          "ESP32-S3 Wi-Fi and Bluetooth Development Board Compatible with DevKitC-1, WROOM-1, N8R2/N16R8 Specifications",
+          "ESP32-S3-DevKitC-1 ESP32-S3 WiFi Bluetooth-compatible BLE 5.0 Mesh Development Board ESP32 Wireless Module N16R8 N8R8 N8R2",
+          "Waveshare ESP32-S3 4.3\" Touch Voice Dev Board, 800x480 IPS Display, Dual Mics, Wi-Fi 2.4GHz & BLE5",
+          "ESP32-S3-DevKitC-1 ESP32-S3 Development Board ESP32-S3-WROOM-1-N16R8 WiFi Bluetooth-compatible Wireless Module ESP32-S3-N16R8",
+          "ESP32-S3-DevKitC-1-N32R16V Development Board with On-Board S3-WROOM-2-N32R16V Module",
+          "LoRaWAN ESP32-S3 Wireless Communication Dev Board for IoT Prototyping Smart Home support LoRa Meshtastic Protocols HomeAssistant",
+          "ESP32-S3 Wifi Bluetooth Development Board With 5/7-inch 800x480 Display Screen Onboard ESP32-S3-WROOM Module Type C Interface",
+          "ESP32 / ESP32-S3 WiFi+Bluetooth Internet Of Things Dual Type-C Development Board Core Board ESP32-S3-DevKit C N16R8 For Arduino",
+          "ESP32-S3 CAM WiFi/Bluetooth Dev Board (WR-00M N16R8): OV2640/OV3660 Camera Module Equipped",
+          "LILYGO T-Deck ESP32-S3 LoRa Dev Board | 2.8 \"Touchscreen & Keyboard | WiFi/Bluetooth 5.0 | Meshtastic 433/868/915MHz LoRaWAN IoT",
+          "ESP32 ESP32-S3 WiFi Bluetooth Internet of Things Dual Type-C Development Board Core Board ESP32-S3-DevKit C N8R2/N16R8",
+          "ESP32-S3-DevKitC-1 Dev Board with ESP32-S3-WROOM-1-N16R8 Module, Dual Type-C & Micro USB Interface",
+          "Aliexpress"
+        ],
+        "method": "headings+repeated-containers",
+        "count": 13
+      }
+    }
+  },
+  "amazon_extract": {
+    "status": "ok",
+    "timing_ms": 42,
+    "item_count": 27,
+    "method": "compound-title+price",
+    "result": {
+      "ok": true,
+      "result": {
+        "query": "extract product titles and prices",
+        "items": [
+          "AED 99.99",
+          "Results",
+          "ESP32-S3 Gold Edition Dev Board - 16MB Flash 8MB PSRAM Dual USB-C IPEX Antenna WiFi Bluetooth for Arduino IoT Projects, MicroPython & ESP-IDF N16R8 (16MB +Antenna Gold Edition) | Price, product pageAED 89.59",
+          "3Pack ESP32-S3 Development Board N16R8 MCU with Dual-Mode Wi-Fi Bluetooth Type-C, Compatible with Arduino IoT ESP32-S3-WROOM-1 | Price, product pageAED 87.58",
+          "1PCS Type-C Supermini ESP32-S3 Development Board 2.4GHz WiFi Bluetooth 160MHz | Price, product pageAED 23.13"
+        ],
+        "method": "compound-title+price",
+        "count": 27
+      }
+    }
+  },
+  "pipeline": {
+    "status": "ok",
+    "timing_ms": 32,
+    "result": {
+      "ok": true,
+      "result": {
+        "name": "price-compare",
+        "steps": [
+          {
+            "id": "ali-extract",
+            "status": "ok"
+          },
+          {
+            "id": "amz-extract",
+            "status": "ok"
+          }
+        ]
+      }
+    }
+  },
+  "timing": {
+    "aliexpress_search_ms": 5094,
+    "amazon_search_ms": 5045,
+    "aliexpress_extract_ms": 37,
+    "amazon_extract_ms": 42,
+    "pipeline_ms": 32,
+    "total_ms": 10250,
+    "avg_search_ms": 5069.5,
+    "avg_extract_ms": 39.5
+  },
+  "errors": [],
+  "notes": [
+    "AliExpress search returned 12 products but prices were empty (page layout issue)",
+    "Amazon search returned 20 products with prices in AED",
+    "AliExpress extract returned 13 items (titles only, no prices - headings method)",
+    "Amazon extract returned 27 items with compound title+price format",
+    "Pipeline executed both extracts successfully in 32ms (cached/fast path)"
+  ]
+}

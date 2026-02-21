@@ -1,0 +1,1 @@
+{"ok":true,"result":{"pageType":"table","confidence":0.55,"title":"Hacker News","url":"https://news.ycombinator.com/","schemas":[{"name":"table_data","fields":{"table":{"selector":"#hnmain"}}}],"metadata":{"referrer":"origin","viewport":"width=device-width, initial-scale=1.0"}}}

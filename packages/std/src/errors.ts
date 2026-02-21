@@ -12,7 +12,7 @@ const ERRNO_HTTP_MAP: Record<PingErrno, number> = {
   ENODEV:    404,
   EACCES:    403,
   EBUSY:     409,
-  ETIMEDOUT: 503,
+  ETIMEDOUT: 504,
   EAGAIN:    429,
   ENOSYS:    422,
   EOPNOTSUPP: 422,

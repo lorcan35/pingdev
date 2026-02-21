@@ -34,9 +34,11 @@ interface StepOutcome {
 
 export class PipelineEngine {
   private extBridge: ExtensionBridge;
+  private gatewayBaseUrl: string;
 
-  constructor(extBridge: ExtensionBridge) {
+  constructor(extBridge: ExtensionBridge, opts?: { gatewayBaseUrl?: string }) {
     this.extBridge = extBridge;
+    this.gatewayBaseUrl = opts?.gatewayBaseUrl ?? process.env.PING_GATEWAY_URL ?? 'http://localhost:3500';
   }
 
   /**
@@ -68,6 +70,14 @@ export class PipelineEngine {
       // Tab-based ops require a tab
       if (['extract', 'click', 'type', 'read', 'navigate'].includes(step.op) && !step.tab) {
         errors.push(`Step "${step.id}": op "${step.op}" requires a "tab" field`);
+      }
+
+      if (step.op === 'llm-prompt' && !step.text && !step.template) {
+        const stepWithAliases = step as PipelineStep & { value?: string; params?: Record<string, unknown> };
+        const params = stepWithAliases.params ?? {};
+        if (!stepWithAliases.value && !params.text && !params.template && !params.value) {
+          errors.push(`Step "${step.id}": llm-prompt requires a prompt in "text", "template", or "value"`);
+        }
       }
 
       // Transform requires template
@@ -265,6 +275,42 @@ export class PipelineEngine {
       return { id: step.id, status: 'ok', result };
     }
 
+    if (op === 'llm-prompt') {
+      const stepWithAliases = step as PipelineStep & {
+        value?: string;
+        params?: Record<string, unknown>;
+      };
+      const params = (stepWithAliases.params ?? {}) as Record<string, unknown>;
+      const prompt =
+        (step.text ? resolveTemplate(step.text, variables) : undefined)
+        ?? (step.template ? resolveTemplate(step.template, variables) : undefined)
+        ?? (typeof stepWithAliases.value === 'string' ? resolveTemplate(stepWithAliases.value, variables) : undefined)
+        ?? (typeof params.text === 'string' ? resolveTemplate(params.text as string, variables) : undefined)
+        ?? (typeof params.template === 'string' ? resolveTemplate(params.template as string, variables) : undefined)
+        ?? (typeof params.value === 'string' ? resolveTemplate(params.value as string, variables) : undefined)
+        ?? '';
+
+      if (!prompt.trim()) {
+        return { id: step.id, status: 'error', error: `Step "${step.id}": llm-prompt prompt is empty` };
+      }
+
+      const payload: Record<string, unknown> = {
+        prompt,
+        ...(typeof params.driver === 'string' ? { driver: params.driver } : {}),
+        ...(typeof params.model === 'string' ? { model: params.model } : {}),
+        ...(typeof params.conversation_id === 'string' ? { conversation_id: params.conversation_id } : {}),
+        ...(typeof params.timeout_ms === 'number' ? { timeout_ms: params.timeout_ms } : {}),
+      };
+
+      try {
+        const result = await this.callLlmPrompt(payload);
+        return { id: step.id, status: 'ok', result };
+      } catch (err) {
+        if (err instanceof Error) throw err;
+        throw new Error(this.serializeError(err));
+      }
+    }
+
     // Tab-based operations
     if (!step.tab) {
       return { id: step.id, status: 'error', error: `Step "${step.id}": no tab specified for op "${op}"` };
@@ -283,6 +329,7 @@ export class PipelineEngine {
     const resolvedText = step.text
       ? resolveTemplate(step.text, variables)
       : undefined;
+    const readParams = this.resolveReadParams(step, variables, resolvedSelector, resolvedText);
 
     try {
       let result: unknown;
@@ -334,12 +381,7 @@ export class PipelineEngine {
           break;
 
         case 'read':
-          result = await this.extBridge.callDevice({
-            deviceId,
-            op: 'read',
-            payload: { selector: resolvedSelector },
-            timeoutMs: 10_000,
-          });
+          result = await this.readWithFallback(deviceId, readParams, step);
           break;
 
         case 'navigate':
@@ -367,12 +409,13 @@ export class PipelineEngine {
 
       return { id: step.id, status: 'ok', result };
     } catch (err) {
-      throw err; // Let the caller handle with onError
+      if (err instanceof Error) throw err;
+      throw new Error(this.serializeError(err));
     }
   }
 
   private handleStepError(step: PipelineStep, err: unknown): StepOutcome {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    const errorMsg = this.serializeError(err);
     const onError = step.onError ?? 'abort';
 
     if (onError === 'skip') {
@@ -380,6 +423,17 @@ export class PipelineEngine {
     }
 
     return { id: step.id, status: 'error', error: errorMsg };
+  }
+
+  private serializeError(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    try {
+      const json = JSON.stringify(err);
+      if (typeof json === 'string') return json;
+    } catch {
+      // Ignore stringify failures and fall back to String(err).
+    }
+    return String(err);
   }
 
   private resolveTabDevice(tabRef: string): string | null {
@@ -400,5 +454,176 @@ export class PipelineEngine {
 
     // If nothing matched, return the ref as-is (might be a device ID)
     return tabRef;
+  }
+
+  private resolveReadParams(
+    step: PipelineStep,
+    variables: Record<string, unknown>,
+    resolvedSelector?: string,
+    resolvedText?: string,
+  ): { selector: string; limit?: number } {
+    const stepWithAliases = step as PipelineStep & {
+      params?: Record<string, unknown>;
+      value?: string;
+      limit?: number;
+    };
+
+    const rawParamSelector =
+      typeof stepWithAliases.params?.selector === 'string' ? String(stepWithAliases.params.selector) : undefined;
+    const rawSchemaSelector =
+      step.schema && typeof (step.schema as Record<string, unknown>).selector === 'string'
+        ? String((step.schema as Record<string, unknown>).selector)
+        : undefined;
+    const rawValue = typeof stepWithAliases.value === 'string' ? stepWithAliases.value : undefined;
+
+    const selector =
+      resolvedSelector
+      ?? (rawParamSelector ? resolveTemplate(rawParamSelector, variables) : undefined)
+      ?? (rawSchemaSelector ? resolveTemplate(rawSchemaSelector, variables) : undefined)
+      ?? resolvedText
+      ?? (rawValue ? resolveTemplate(rawValue, variables) : undefined)
+      ?? '';
+
+    const rawLimit =
+      typeof stepWithAliases.limit === 'number'
+        ? stepWithAliases.limit
+        : typeof stepWithAliases.params?.limit === 'number'
+          ? stepWithAliases.params.limit
+          : undefined;
+
+    if (typeof rawLimit === 'number' && Number.isFinite(rawLimit) && rawLimit > 0) {
+      return { selector, limit: rawLimit };
+    }
+
+    return { selector };
+  }
+
+  private async readWithFallback(
+    deviceId: string,
+    readParams: { selector: string; limit?: number },
+    step: PipelineStep,
+  ): Promise<unknown> {
+    try {
+      const result = await this.extBridge.callDevice({
+        deviceId,
+        op: 'read',
+        payload: readParams,
+        timeoutMs: 10_000,
+      });
+
+      if (this.isReadErrorResult(result)) {
+        throw new Error(this.serializeError(result));
+      }
+
+      return result;
+    } catch (err) {
+      if (!this.isCssSelectorRead(step, readParams.selector)) {
+        throw err;
+      }
+      return this.readViaGateway(deviceId, readParams);
+    }
+  }
+
+  private async readViaGateway(
+    deviceId: string,
+    readParams: { selector: string; limit?: number },
+  ): Promise<unknown> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const endpoint = `${this.gatewayBaseUrl.replace(/\/+$/, '')}/v1/dev/${encodeURIComponent(deviceId)}/read`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(readParams),
+        signal: controller.signal,
+      });
+
+      const data = await response.json().catch(() => undefined);
+      if (!response.ok) {
+        const detail =
+          data && typeof data === 'object'
+            ? this.serializeError((data as Record<string, unknown>).message ?? data)
+            : `${response.status} ${response.statusText}`.trim();
+        throw new Error(`Gateway read fallback failed: ${detail}`);
+      }
+
+      if (data && typeof data === 'object' && 'result' in (data as Record<string, unknown>)) {
+        return (data as Record<string, unknown>).result;
+      }
+      return data;
+    } catch (err) {
+      if (err instanceof Error) throw err;
+      throw new Error(this.serializeError(err));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async callLlmPrompt(payload: Record<string, unknown>): Promise<unknown> {
+    const timeoutMs = typeof payload.timeout_ms === 'number' && payload.timeout_ms > 0
+      ? payload.timeout_ms
+      : Number.parseInt(process.env.PINGOS_LLM_TIMEOUT_MS || '', 10) || 120_000;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const endpoint = `${this.gatewayBaseUrl.replace(/\/+$/, '')}/v1/dev/llm/prompt`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      const data = await response.json().catch(() => undefined);
+      if (!response.ok) {
+        const detail =
+          data && typeof data === 'object'
+            ? this.serializeError((data as Record<string, unknown>).message ?? data)
+            : `${response.status} ${response.statusText}`.trim();
+        throw new Error(`Gateway llm-prompt failed: ${detail}`);
+      }
+
+      return data;
+    } catch (err) {
+      if (err instanceof Error) throw err;
+      throw new Error(this.serializeError(err));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private isCssSelectorRead(step: PipelineStep, resolvedSelector: string): boolean {
+    if (!resolvedSelector.trim()) return false;
+    const rawSelector = this.getRawReadSelector(step);
+    if (!rawSelector) return true;
+    return !this.isVariableReference(rawSelector);
+  }
+
+  private getRawReadSelector(step: PipelineStep): string | undefined {
+    const stepWithAliases = step as PipelineStep & {
+      params?: Record<string, unknown>;
+      value?: string;
+      limit?: number;
+    };
+    if (typeof step.selector === 'string') return step.selector;
+    if (typeof stepWithAliases.params?.selector === 'string') return String(stepWithAliases.params.selector);
+    if (step.schema && typeof (step.schema as Record<string, unknown>).selector === 'string') {
+      return String((step.schema as Record<string, unknown>).selector);
+    }
+    if (typeof stepWithAliases.value === 'string') return stepWithAliases.value;
+    if (typeof step.text === 'string') return step.text;
+    return undefined;
+  }
+
+  private isVariableReference(value: string): boolean {
+    return /^\s*\{\{.+\}\}\s*$/.test(value);
+  }
+
+  private isReadErrorResult(result: unknown): boolean {
+    if (!result || typeof result !== 'object') return false;
+    const asRecord = result as Record<string, unknown>;
+    if (asRecord.ok === false || asRecord.success === false) return true;
+    return false;
   }
 }

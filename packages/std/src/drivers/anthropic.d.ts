@@ -1,4 +1,4 @@
-import type { Driver, DriverRegistration, DriverHealth, DriverCapabilities, DeviceRequest, DeviceResponse, StreamChunk } from '../types.js';
+import type { Driver, DriverRegistration, DriverHealth, DriverCapabilities, DeviceRequest, DeviceResponse, StreamChunk, ModelInfo } from '../types.js';
 export interface AnthropicAdapterOptions {
     id: string;
     name: string;
@@ -17,6 +17,7 @@ export declare class AnthropicAdapter implements Driver {
     health(): Promise<DriverHealth>;
     execute(request: DeviceRequest): Promise<DeviceResponse>;
     stream(request: DeviceRequest): AsyncIterable<StreamChunk>;
+    listModels(): Promise<ModelInfo[]>;
     private buildHeaders;
     private buildPayload;
 }

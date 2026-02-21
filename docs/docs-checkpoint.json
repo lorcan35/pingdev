@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-02-21T15:51:00+04:00",
+  "phase": "complete",
+  "completed": [
+    "Audited gateway.ts and app-routes.ts full route surface",
+    "Audited pipeline-engine.ts, self-heal.ts, template-learner.ts, pingapp-generator.ts",
+    "Audited llm.ts, local-mode.ts, discover-engine.ts, visual-extract.ts, paginate-extract.ts, watch-manager.ts",
+    "Audited openai-compat driver behavior",
+    "Audited CLI command surface and core/extension type/ops maps",
+    "Wrote docs/API-REFERENCE.md",
+    "Wrote docs/LOCAL-MODEL-GUIDE.md",
+    "Wrote docs/ARCHITECTURE.md",
+    "Updated README quickstart examples",
+    "Verified 8 curl commands against localhost:3500"
+  ],
+  "curl_verified": [
+    "GET /v1/health -> 200",
+    "GET /v1/registry -> 200",
+    "GET /v1/functions -> 200",
+    "POST /v1/pipelines/validate -> 200",
+    "GET /v1/templates -> 200",
+    "GET /v1/apps -> 200",
+    "GET /v1/llm/models -> 200",
+    "POST /v1/templates/import and GET /v1/templates/:domain/export -> 200"
+  ],
+  "notes": [
+    "Template import requires domain",
+    "Functions invocation route is /v1/functions/:app/call",
+    "Self-heal cache/stats are runtime-populated, not via POST",
+    "Local model endpoint should be set as http://localhost:1234"
+  ]
+}

@@ -72,7 +72,12 @@ async function startSSE(port: number): Promise<void> {
         res.end(JSON.stringify({ error: 'No SSE connection established. GET /sse first.' }));
         return;
       }
-      await transport.handlePostMessage(req, res);
+      try {
+        await transport.handlePostMessage(req, res);
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `MCP message handling failed: ${String(err)}` }));
+      }
       return;
     }
 

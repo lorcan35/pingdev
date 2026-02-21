@@ -253,6 +253,42 @@ export class ReplayEngine {
         // Read-only action — no-op during replay (data already captured)
         return { ok: true, skipped: true };
 
+      // Gateway API op types: replay by forwarding the original input payload
+      case 'smartNavigate':
+        return this.extBridge.callDevice({
+          deviceId,
+          op: 'smartNavigate',
+          payload: (action as any).input ?? { to: action.value ?? '' },
+          timeoutMs: timeout,
+        });
+
+      case 'fill':
+      case 'wait':
+      case 'table':
+      case 'dialog':
+      case 'paginate':
+      case 'selectOption':
+      case 'hover':
+      case 'assert':
+      case 'network':
+      case 'storage':
+      case 'capture':
+      case 'download':
+      case 'annotate':
+      case 'observe':
+      case 'read':
+      case 'discover':
+      case 'eval':
+      case 'screenshot':
+      case 'upload':
+        // Generic gateway op replay: forward the original input payload
+        return this.extBridge.callDevice({
+          deviceId,
+          op: action.type,
+          payload: (action as any).input ?? {},
+          timeoutMs: timeout,
+        });
+
       default:
         throw new Error(`Unknown action type: ${action.type}`);
     }

@@ -164,13 +164,13 @@ export function registerTools(server: McpServer): void {
   // 13. pingos_query — Natural language query
   server.tool(
     'pingos_query',
-    'Ask a natural language question about a device page (uses LLM to answer based on page content)',
+    'Ask a natural-language question about the current page and get an answer + selector metadata',
     {
       device: z.string().describe('Device ID'),
       question: z.string().describe('Natural language question about the page'),
     },
     async ({ device, question }) =>
-      textResult(await gw(`/v1/dev/${device}/suggest`, 'POST', { question })),
+      textResult(await gw(`/v1/dev/${device}/query`, 'POST', { question })),
   );
 
   // 14. pingos_apps — List PingApps
@@ -195,5 +195,53 @@ export function registerTools(server: McpServer): void {
       const method = body ? 'POST' : 'GET';
       return textResult(await gw(path, method, body));
     },
+  );
+
+  // 16. pingos_extract_semantic — LLM selector synthesis + extraction in one call
+  server.tool(
+    'pingos_extract_semantic',
+    'Extract data using semantic query (LLM builds selectors, then extraction runs)',
+    {
+      device: z.string().describe('Device ID'),
+      query: z.string().describe('What to extract in natural language'),
+      limit: z.number().optional().describe('Optional result item limit'),
+    },
+    async ({ device, query, limit }) =>
+      textResult(await gw(`/v1/dev/${device}/extract/semantic`, 'POST', { query, limit })),
+  );
+
+  // 17. pingos_watch_start — Start server-side watch stream descriptor
+  server.tool(
+    'pingos_watch_start',
+    'Start change watching for a schema and return watch metadata (watchId, stream URL)',
+    {
+      device: z.string().describe('Device ID'),
+      schema: z.record(z.string(), z.string()).describe('Field-to-selector schema'),
+      interval_ms: z.number().optional().describe('Polling interval in milliseconds'),
+      threshold: z.number().optional().describe('Optional diff threshold'),
+      max_events: z.number().optional().describe('Optional max event count'),
+    },
+    async ({ device, schema, interval_ms, threshold, max_events }) =>
+      textResult(await gw(`/v1/dev/${device}/watch/start`, 'POST', { schema, interval_ms, threshold, max_events })),
+  );
+
+  // 18. pingos_templates — List learned extraction templates
+  server.tool(
+    'pingos_templates',
+    'List learned extraction templates currently stored by PingOS',
+    {},
+    async () => textResult(await gw('/v1/templates')),
+  );
+
+  // 19. pingos_api — Generic gateway call for full surface coverage
+  server.tool(
+    'pingos_api',
+    'Call any PingOS gateway endpoint directly. Use when a specialized tool is not available.',
+    {
+      path: z.string().describe('Gateway path, e.g. /v1/recordings or /v1/functions'),
+      method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).optional().describe('HTTP method (default GET)'),
+      body: z.record(z.string(), z.unknown()).optional().describe('Optional JSON body for non-GET requests'),
+    },
+    async ({ path, method, body }) => textResult(await gw(path, method || 'GET', body)),
   );
 }
