@@ -16,6 +16,36 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForAliExpressPrices(gateway: string, deviceId: string, timeoutMs = 12_000): Promise<void> {
+  try {
+    // Price nodes are often injected after initial DOM load.
+    await deviceOp(gateway, deviceId, 'waitFor', {
+      selector: '[class*="price"], [class*="Price"], [data-pl*="price"], [data-testid*="price"]',
+      timeoutMs,
+    });
+  } catch {
+    // Fallback: bounded delay keeps extraction deterministic even if selector matching fails.
+    await delay(1500);
+  }
+}
+
+async function extractWithRetries<T>(
+  gateway: string,
+  deviceId: string,
+  expression: string,
+  hasData: (value: T) => boolean,
+  retries = 2,
+  retryDelayMs = 1500,
+): Promise<any> {
+  let result = await deviceOp(gateway, deviceId, 'eval', { expression });
+  for (let i = 0; i < retries; i++) {
+    if (hasData(result?.result as T)) return result;
+    await delay(retryDelayMs);
+    result = await deviceOp(gateway, deviceId, 'eval', { expression });
+  }
+  return result;
+}
+
 async function fetchJsonWithTimeout(url: string, init?: RequestInit, timeoutMs = ROUTE_TIMEOUT_MS): Promise<any> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -319,8 +349,20 @@ export const PINGAPP_FUNCTION_DEFS: Array<{
 
 export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
   app.setErrorHandler((error, _request, reply) => {
-    const message = error instanceof Error ? error.message : 'App route failed';
-    reply.code(500).send({ ok: false, error: message });
+    const err = error as Error & { statusCode?: number; code?: string };
+    const message = err.message || 'App route failed';
+    const parseErr = err.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || /malformed json/i.test(message);
+
+    if (parseErr) {
+      return reply.code(400).send({ ok: false, error: 'Malformed JSON body' });
+    }
+
+    const statusCode = typeof err.statusCode === 'number' ? err.statusCode : 500;
+    if (statusCode >= 400 && statusCode < 500) {
+      return reply.code(statusCode).send({ ok: false, error: message });
+    }
+
+    return reply.code(500).send({ ok: false, error: message });
   });
 
   // POST /v1/app/aliexpress/search { query }
@@ -335,13 +377,19 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     await setAliExpressLocale(gatewayUrl, deviceId);
     const encoded = encodeURIComponent(query).replace(/%20/g, '-');
     await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = \"https://www.aliexpress.com/w/wholesale-${encoded}.html\"` });
-    await delay(5000);
+    await delay(1500);
+    await waitForAliExpressPrices(gatewayUrl, deviceId);
     
     // Clean ads
     await deviceOp(gatewayUrl, deviceId, 'clean', { mode: 'full' });
     
-    // Extract products
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.searchResults });
+    // Extract products; retry in case dynamic cards/prices are still hydrating.
+    const result = await extractWithRetries<any[]>(
+      gatewayUrl,
+      deviceId,
+      EXTRACTORS.searchResults,
+      (products) => Array.isArray(products) && products.some((p: any) => typeof p?.price === 'string' && p.price.trim().length > 0),
+    );
     return { ok: true, action: 'search', query, products: result?.result || [], deviceId };
   });
 
@@ -355,10 +403,16 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     
     await setAliExpressLocale(gatewayUrl, deviceId);
     await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = \"https://www.aliexpress.com/item/${id}.html\"` });
-    await delay(5000);
+    await delay(1500);
+    await waitForAliExpressPrices(gatewayUrl, deviceId);
     await deviceOp(gatewayUrl, deviceId, 'clean', { mode: 'full' });
     
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.productDetails });
+    const result = await extractWithRetries<Record<string, unknown>>(
+      gatewayUrl,
+      deviceId,
+      EXTRACTORS.productDetails,
+      (product) => Boolean(product && typeof product.price === 'string' && product.price.trim().length > 0),
+    );
     return { ok: true, action: 'product', product: result?.result || {}, deviceId };
   });
 

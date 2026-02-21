@@ -1,0 +1,320 @@
+// Multi-Page Extract — orchestrates extraction across paginated content
+// Runs on the gateway side, coordinating extension calls for pagination + extraction.
+import { callLLM } from './llm.js';
+import { getLocalConfig, getTimeoutForFeature, isLocalMode, truncateDom } from './local-mode.js';
+import { getPaginatePrompt } from './local-prompts.js';
+import { repairLLMJson } from './json-repair.js';
+/**
+ * Wait for the content script to reconnect after page navigation by polling
+ * with a lightweight domStable check. Returns true if content script is alive.
+ */
+async function waitForContentScript(extBridge, deviceId, maxWaitMs = 10_000) {
+    const start = Date.now();
+    const pollInterval = 1000;
+    while (Date.now() - start < maxWaitMs) {
+        try {
+            await extBridge.callDevice({
+                deviceId,
+                op: 'wait',
+                payload: { condition: 'domStable', timeoutMs: 3000 },
+                timeoutMs: 5_000,
+            });
+            return true; // content script is alive
+        }
+        catch {
+            await sleep(pollInterval);
+        }
+    }
+    return false;
+}
+/**
+ * Extract data across multiple pages by combining extract + paginate operations.
+ *
+ * Flow:
+ * 1. Extract from current page
+ * 2. Detect pagination
+ * 3. If hasNext: navigate to next page, wait, extract again
+ * 4. Accumulate and deduplicate results
+ * 5. Repeat until maxPages or no more pages
+ */
+export async function paginateExtract(extBridge, opts) {
+    const { deviceId, schema, query, maxPages = 10, delay = 1000, } = opts;
+    const local = isLocalMode();
+    const localCfg = getLocalConfig();
+    const startMs = Date.now();
+    const allData = [];
+    const seenHashes = new Set();
+    let pageCount = 0;
+    let hasMore = false;
+    let effectiveSchema = schema;
+    // Local-mode schema synthesis for query-only paginate extraction.
+    if (local && !effectiveSchema && query) {
+        try {
+            const domResult = await extBridge.callDevice({
+                deviceId,
+                op: 'eval',
+                payload: {
+                    expression: `(() => {
+            const r = document.querySelector('main') || document.body || document.documentElement;
+            return (r && r.innerHTML) ? String(r.innerHTML).substring(0, ${localCfg.domLimit}) : '';
+          })()`,
+                },
+                timeoutMs: 6_000,
+            });
+            const dom = typeof domResult === 'string'
+                ? domResult
+                : String(domResult?.data ?? domResult ?? '');
+            const promptDef = getPaginatePrompt(true);
+            const prompt = promptDef.userTemplate
+                .replace('{{query}}', query)
+                .replace('{{dom}}', truncateDom(dom, localCfg.domLimit));
+            const raw = await callLLM(prompt, {
+                feature: 'paginate',
+                timeoutMs: getTimeoutForFeature('extract'),
+                systemPrompt: promptDef.system,
+                responseFormatJson: true,
+                maxTokens: local ? 4096 : 400,
+                temperature: 0.1,
+            });
+            const parsed = repairLLMJson(raw);
+            const inferred = Object.fromEntries(Object.entries(parsed || {}).filter(([, v]) => typeof v === 'string'));
+            if (Object.keys(inferred).length > 0) {
+                effectiveSchema = inferred;
+            }
+        }
+        catch {
+            // Continue without inferred schema.
+        }
+    }
+    for (let page = 0; page < maxPages; page++) {
+        // 1. Extract from current page (with retry for bfcache recovery after navigation)
+        const extractPayload = {};
+        if (effectiveSchema)
+            extractPayload.schema = effectiveSchema;
+        if (query)
+            extractPayload.query = query;
+        let extractResult;
+        const maxRetries = page === 0 ? 1 : 4; // more retries after navigation
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                extractResult = await extBridge.callDevice({
+                    deviceId,
+                    op: 'extract',
+                    payload: extractPayload,
+                    timeoutMs: local ? getTimeoutForFeature('extract') : 20_000,
+                });
+                break; // success
+            }
+            catch (err) {
+                if (attempt < maxRetries - 1) {
+                    // Exponential backoff: 2s, 4s, 8s
+                    await sleep(2000 * Math.pow(2, attempt));
+                }
+                else {
+                    throw err; // all retries exhausted
+                }
+            }
+        }
+        // Parse extraction results
+        const items = parseExtractItems(extractResult);
+        let newItemCount = 0;
+        for (const item of items) {
+            const hash = hashItem(item);
+            if (!seenHashes.has(hash)) {
+                seenHashes.add(hash);
+                allData.push(item);
+                newItemCount++;
+            }
+        }
+        pageCount++;
+        // If no new items on this page, we may have looped
+        if (newItemCount === 0 && page > 0) {
+            break;
+        }
+        // 2. Check if there's a next page
+        if (page < maxPages - 1) {
+            const paginateResult = await extBridge.callDevice({
+                deviceId,
+                op: 'paginate',
+                payload: { action: 'detect' },
+                timeoutMs: 10_000,
+            });
+            const paginateData = paginateResult;
+            const innerData = (paginateData?.data ?? paginateData);
+            const found = innerData?.found ?? paginateData?.found;
+            const paginationHasNext = innerData?.hasNext ?? paginateData?.hasNext;
+            if (!found || !paginationHasNext) {
+                break;
+            }
+            // 3. Navigate to next page.
+            // Prefer using `navigate` via the next URL (goes through background.ts,
+            // properly handles page load) over `paginate next` (clicks the link in
+            // the content script, which destroys the port on full-page navigation).
+            const nextUrl = (innerData?.nextUrl ?? paginateData?.nextUrl);
+            let navigationSucceeded = false;
+            let usedClickNav = false; // click-based nav is less predictable
+            if (nextUrl) {
+                // Use navigate — this goes through background.ts which handles
+                // chrome.tabs.update and waits for page load completion.
+                try {
+                    await extBridge.callDevice({
+                        deviceId,
+                        op: 'navigate',
+                        payload: { url: nextUrl },
+                        timeoutMs: 20_000,
+                    });
+                    navigationSucceeded = true;
+                }
+                catch {
+                    // navigate failure — stop pagination
+                }
+            }
+            else {
+                // Fallback: use paginate next (click). For link-based pagination,
+                // clicking triggers a full page navigation which destroys the content
+                // script. The bfcache/IO error is expected — it means navigation
+                // succeeded.
+                usedClickNav = true;
+                try {
+                    const nextResult = await extBridge.callDevice({
+                        deviceId,
+                        op: 'paginate',
+                        payload: { action: 'next' },
+                        timeoutMs: 15_000,
+                    });
+                    const nextData = nextResult;
+                    if (nextData?.success || nextData?.data?.action) {
+                        navigationSucceeded = true;
+                    }
+                }
+                catch (err) {
+                    const errMsg = err instanceof Error ? err.message : String(err);
+                    if (errMsg.includes('back/forward cache') || errMsg.includes('message channel closed') ||
+                        errMsg.includes('io_error') || errMsg.includes('I/O error') || errMsg.includes('EIO')) {
+                        navigationSucceeded = true; // navigation happened, port closed as expected
+                    }
+                }
+            }
+            if (!navigationSucceeded)
+                break;
+            // 4. Wait for content script to reconnect after full-page navigation.
+            // Navigation destroys the old content script; the new page's content
+            // script needs time to load and reconnect to the extension background.
+            // Optimized: start with a shorter wait, extend only if DOM isn't stable.
+            const shortWait = usedClickNav ? Math.max(delay, 2000) : Math.max(delay, 1500);
+            await sleep(shortWait);
+            // Quick stability check — if DOM is already stable, skip the long wait
+            let reconnected = false;
+            try {
+                await extBridge.callDevice({
+                    deviceId,
+                    op: 'wait',
+                    payload: { condition: 'domStable', timeoutMs: 2000 },
+                    timeoutMs: 3000,
+                });
+                reconnected = true;
+            }
+            catch {
+                // DOM not stable yet — wait the remaining time then poll
+                const extraWait = usedClickNav ? 2000 : 1500;
+                await sleep(extraWait);
+                reconnected = await waitForContentScript(extBridge, deviceId, 8_000);
+            }
+            if (!reconnected) {
+                // Content script didn't reconnect in time — stop pagination.
+                // Data collected so far is still returned.
+                break;
+            }
+        }
+        else {
+            // Check if there are more pages beyond our limit
+            try {
+                const paginateResult = await extBridge.callDevice({
+                    deviceId,
+                    op: 'paginate',
+                    payload: { action: 'detect' },
+                    timeoutMs: 10_000,
+                });
+                const paginateData = paginateResult;
+                const innerPData = (paginateData?.data ?? paginateData);
+                hasMore = !!(innerPData?.hasNext ?? paginateData?.hasNext);
+            }
+            catch {
+                // ignore — we've hit our limit anyway
+            }
+        }
+    }
+    return {
+        pages: pageCount,
+        totalItems: allData.length,
+        data: allData,
+        hasMore,
+        duration_ms: Date.now() - startMs,
+    };
+}
+/**
+ * Parse extraction results into an array of items for deduplication.
+ */
+function parseExtractItems(result) {
+    if (!result)
+        return [];
+    const obj = result;
+    // If result has a `data` wrapper
+    const data = obj.data ?? obj.result ?? obj;
+    if (!data || typeof data !== 'object')
+        return [data];
+    const dataObj = data;
+    // If data has `result` (schema extraction), inspect it
+    if (dataObj.result && typeof dataObj.result === 'object') {
+        const resultObj = dataObj.result;
+        // Check if any field is an array — that's our items
+        for (const [, value] of Object.entries(resultObj)) {
+            if (Array.isArray(value) && value.length > 0) {
+                // If it's an array of strings, each string is an item
+                if (typeof value[0] === 'string') {
+                    return value.map((v, i) => {
+                        // Build an item from all array fields at this index
+                        const item = {};
+                        for (const [k, arr] of Object.entries(resultObj)) {
+                            if (Array.isArray(arr)) {
+                                item[k] = arr[i] ?? '';
+                            }
+                            else {
+                                item[k] = arr;
+                            }
+                        }
+                        return item;
+                    });
+                }
+                return value;
+            }
+        }
+        // No arrays — single result item
+        return [resultObj];
+    }
+    // If data has items/query response
+    if (dataObj.items && Array.isArray(dataObj.items)) {
+        return dataObj.items;
+    }
+    // If data itself is an object with extracted fields
+    return [dataObj];
+}
+/**
+ * Hash an extracted item for deduplication.
+ */
+function hashItem(item) {
+    if (typeof item === 'string')
+        return item;
+    if (typeof item !== 'object' || item === null)
+        return String(item);
+    // Create a stable string representation
+    const entries = Object.entries(item)
+        .filter(([k]) => !k.startsWith('_'))
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k}:${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
+    return entries.join('|');
+}
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+//# sourceMappingURL=paginate-extract.js.map

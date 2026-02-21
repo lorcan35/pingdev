@@ -7,3 +7,15 @@ dist/
 artifacts/
 .DS_Store
 *.tsbuildinfo
+CODEX-*.md
+TASK-*.md
+TEST-*.md
+demo_command.ts
+device_op.ts
+init_command.ts
+modify_cli.js
+file-docs.md
+docs/audit-checkpoint.json
+docs/LOCAL-MODE-FIXES.md
+docs/LOCAL-MODEL-AUDIT.md
+docs/PROMPT-OPTIMIZATION-CHANGELOG.md

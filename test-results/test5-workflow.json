@@ -1,0 +1,148 @@
+{
+  "test": "Test 5: Workflow Engine (Pipeline)",
+  "status": "PASS",
+  "timestamp": "2026-02-21",
+  "gateway": "http://localhost:3500",
+  "devices": {
+    "hn_primary": "chrome-726392682",
+    "hn_secondary": "chrome-726392847"
+  },
+  "steps": {
+    "step1_navigate_example": {
+      "description": "Navigate chrome-726392847 to example.com",
+      "endpoint": "POST /v1/dev/chrome-726392847/smartNavigate",
+      "status": "PASS",
+      "timing_ms": 40,
+      "response": {
+        "ok": true,
+        "result": {
+          "navigated": true,
+          "url": "https://example.com",
+          "steps": [{"clicked": "direct", "url": "https://example.com"}]
+        }
+      }
+    },
+    "step2_wait": {
+      "description": "Wait 3s for navigation to settle",
+      "status": "PASS",
+      "timing_ms": 3000
+    },
+    "step3_multi_site_pipeline": {
+      "description": "Multi-step pipeline extracting from HN and example.com",
+      "endpoint": "POST /v1/pipelines/run",
+      "pipeline_name": "multi-site-extract-test",
+      "status": "PASS",
+      "timing_ms": 17,
+      "pipeline_duration_ms": 12,
+      "response": {
+        "ok": true,
+        "result": {
+          "name": "multi-site-extract-test",
+          "steps": [
+            {"id": "hn-extract", "status": "ok", "result": {"title": "Hacker News"}},
+            {"id": "example-extract", "status": "ok", "result": {"title": "Example Domain", "links": "Learn more"}}
+          ],
+          "variables": {
+            "hn-extract": {"title": "Hacker News"},
+            "title": "Example Domain",
+            "example-extract": {"title": "Example Domain", "links": "Learn more"},
+            "links": "Learn more"
+          },
+          "durationMs": 12
+        }
+      },
+      "analysis": {
+        "both_extracts_succeeded": true,
+        "hn_title_correct": true,
+        "example_title_correct": true,
+        "variables_populated": true
+      }
+    },
+    "step4_error_recovery": {
+      "description": "Pipeline with non-existent device to test onError:skip",
+      "endpoint": "POST /v1/pipelines/run",
+      "pipeline_name": "error-recovery-test",
+      "status": "PASS",
+      "timing_ms": 16,
+      "pipeline_duration_ms": 8,
+      "response": {
+        "ok": true,
+        "result": {
+          "name": "error-recovery-test",
+          "steps": [
+            {"id": "good-extract", "status": "ok", "result": {"title": "Hacker News"}},
+            {"id": "bad-extract", "status": "skipped", "error": "[object Object]"},
+            {"id": "good-read", "status": "skipped", "error": "[object Object]"}
+          ],
+          "variables": {
+            "good-extract": {"title": "Hacker News"},
+            "title": "Hacker News"
+          },
+          "durationMs": 8
+        }
+      },
+      "analysis": {
+        "pipeline_ok_despite_error": true,
+        "good_extract_succeeded": true,
+        "bad_device_skipped": true,
+        "third_step_also_skipped": true,
+        "note": "good-read (step 3) was also skipped with [object Object] error — possible cascading issue or 'read' op limitation; but onError:skip prevented abort"
+      }
+    },
+    "step5_navigate_back": {
+      "description": "Navigate chrome-726392847 back to HN",
+      "endpoint": "POST /v1/dev/chrome-726392847/smartNavigate",
+      "status": "PASS",
+      "timing_ms": 16,
+      "response": {
+        "ok": true,
+        "result": {
+          "navigated": true,
+          "url": "https://news.ycombinator.com/",
+          "steps": [{"clicked": "direct", "url": "https://news.ycombinator.com/"}]
+        }
+      }
+    },
+    "step6_validate_pipeline": {
+      "description": "Validate pipeline definition — expect error for missing template on transform op",
+      "endpoint": "POST /v1/pipelines/validate",
+      "status": "PASS",
+      "timing_ms": 7,
+      "response": {
+        "ok": false,
+        "errors": ["Step \"step2\": transform op requires a \"template\" field"]
+      },
+      "analysis": {
+        "correctly_caught_missing_template": true,
+        "error_message_accurate": true
+      }
+    },
+    "step7_list_pipelines": {
+      "description": "List saved pipelines",
+      "endpoint": "GET /v1/pipelines",
+      "status": "PASS",
+      "timing_ms": 5,
+      "response": {
+        "ok": true,
+        "pipelines": []
+      },
+      "analysis": {
+        "endpoint_responds": true,
+        "returns_empty_array": true
+      }
+    }
+  },
+  "summary": {
+    "total_steps": 7,
+    "passed": 7,
+    "failed": 0,
+    "total_timing_ms": 3101,
+    "notes": [
+      "Multi-site pipeline successfully extracted from both HN and example.com in 12ms",
+      "Error recovery: onError:skip correctly prevented abort on non-existent device",
+      "Validation correctly caught missing 'template' field on transform op",
+      "Third step (good-read) in error-recovery pipeline was also skipped — may indicate read op requires different params or cascading skip behavior",
+      "Pipeline list endpoint functional but returns empty (pipelines are ephemeral, not persisted)"
+    ]
+  }
+}

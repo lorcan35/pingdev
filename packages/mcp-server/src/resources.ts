@@ -59,4 +59,32 @@ export function registerResources(server: McpServer): void {
       }],
     }),
   );
+
+  // 4. pingos://templates — Learned extraction templates
+  server.resource(
+    'templates',
+    'pingos://templates',
+    { description: 'Learned extraction templates by domain', mimeType: 'application/json' },
+    async () => ({
+      contents: [{
+        uri: 'pingos://templates',
+        mimeType: 'application/json',
+        text: JSON.stringify(await gw('/v1/templates'), null, 2),
+      }],
+    }),
+  );
+
+  // 5. pingos://llm/models — LLM models exposed by the gateway registry
+  server.resource(
+    'llm-models',
+    'pingos://llm/models',
+    { description: 'Available LLM models from registered drivers', mimeType: 'application/json' },
+    async () => ({
+      contents: [{
+        uri: 'pingos://llm/models',
+        mimeType: 'application/json',
+        text: JSON.stringify(await gw('/v1/llm/models'), null, 2),
+      }],
+    }),
+  );
 }

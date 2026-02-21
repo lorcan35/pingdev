@@ -2,6 +2,10 @@
 // Runs on the gateway side, coordinating extension calls for pagination + extraction.
 
 import type { ExtensionBridge } from './ext-bridge.js';
+import { callLLM } from './llm.js';
+import { getLocalConfig, getTimeoutForFeature, isLocalMode, truncateDom } from './local-mode.js';
+import { getPaginatePrompt } from './local-prompts.js';
+import { repairLLMJson } from './json-repair.js';
 
 export interface PaginateExtractOptions {
   deviceId: string;
@@ -69,16 +73,58 @@ export async function paginateExtract(
     delay = 1000,
   } = opts;
 
+  const local = isLocalMode();
+  const localCfg = getLocalConfig();
   const startMs = Date.now();
   const allData: unknown[] = [];
   const seenHashes = new Set<string>();
   let pageCount = 0;
   let hasMore = false;
+  let effectiveSchema = schema;
+
+  // Local-mode schema synthesis for query-only paginate extraction.
+  if (local && !effectiveSchema && query) {
+    try {
+      const domResult = await extBridge.callDevice({
+        deviceId,
+        op: 'eval',
+        payload: {
+          expression: `(() => {
+            const r = document.querySelector('main') || document.body || document.documentElement;
+            return (r && r.innerHTML) ? String(r.innerHTML).substring(0, ${localCfg.domLimit}) : '';
+          })()`,
+        },
+        timeoutMs: 6_000,
+      });
+      const dom = typeof domResult === 'string'
+        ? domResult
+        : String((domResult as Record<string, unknown>)?.data ?? domResult ?? '');
+      const promptDef = getPaginatePrompt(true);
+      const prompt = promptDef.userTemplate
+        .replace('{{query}}', query)
+        .replace('{{dom}}', truncateDom(dom, localCfg.domLimit));
+      const raw = await callLLM(prompt, {
+        feature: 'paginate',
+        timeoutMs: getTimeoutForFeature('extract'),
+        systemPrompt: promptDef.system,
+        responseFormatJson: true,
+        maxTokens: local ? 4096 : 400,
+        temperature: 0.1,
+      });
+      const parsed = repairLLMJson(raw) as Record<string, unknown>;
+      const inferred = Object.fromEntries(Object.entries(parsed || {}).filter(([, v]) => typeof v === 'string'));
+      if (Object.keys(inferred).length > 0) {
+        effectiveSchema = inferred as Record<string, string>;
+      }
+    } catch {
+      // Continue without inferred schema.
+    }
+  }
 
   for (let page = 0; page < maxPages; page++) {
     // 1. Extract from current page (with retry for bfcache recovery after navigation)
     const extractPayload: Record<string, unknown> = {};
-    if (schema) extractPayload.schema = schema;
+    if (effectiveSchema) extractPayload.schema = effectiveSchema;
     if (query) extractPayload.query = query;
 
     let extractResult: unknown;
@@ -89,7 +135,7 @@ export async function paginateExtract(
           deviceId,
           op: 'extract',
           payload: extractPayload,
-          timeoutMs: 20_000,
+          timeoutMs: local ? getTimeoutForFeature('extract') : 20_000,
         });
         break; // success
       } catch (err) {

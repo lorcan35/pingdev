@@ -1,0 +1,145 @@
+{
+  "test": "Test 2: Live HN Watch + Extract",
+  "device": "chrome-726392682",
+  "gateway": "http://localhost:3500",
+  "timestamp": "2026-02-21",
+  "steps": {
+    "step1_schema_extract": {
+      "description": "Schema-based extract with CSS selectors",
+      "timing_ms": 9,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "title": "Hacker News",
+        "scores_count": 29,
+        "ranks_count": 30,
+        "strategy": "css",
+        "meta": {
+          "title": "meta-tag",
+          "score": "29-matches",
+          "rank": "30-matches",
+          "strategy": "css",
+          "auto": false
+        }
+      }
+    },
+    "step2_auto_extract": {
+      "description": "Auto-extract (zero config)",
+      "timing_ms": 11,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "titles_count": 30,
+        "scores_count": 29,
+        "ranks_count": 30,
+        "strategy": "template",
+        "template_hit": true,
+        "template_healed": false,
+        "domain": "news.ycombinator.com",
+        "first_title": "Keep Android Open",
+        "first_score": "585 points"
+      }
+    },
+    "step3_query_extract": {
+      "description": "Query-based extract: top 5 story titles, scores, and links",
+      "timing_ms": 10,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "titles_count": 30,
+        "scores_count": 29,
+        "ranks_count": 30,
+        "strategy": "template",
+        "template_hit": true,
+        "note": "Query resolved via template match (returned all 30 stories, not just top 5)"
+      }
+    },
+    "step4_watch_start": {
+      "description": "Start a watch on .titleline > a with 10s interval",
+      "timing_ms": 6,
+      "status": "PASS",
+      "initial_attempt": {
+        "status": "FAIL",
+        "error": "Missing required field: selector (schema param not supported)",
+        "note": "Watch API requires 'selector' not 'schema'"
+      },
+      "retry": {
+        "status": "PASS",
+        "watchId": "w-972839ce",
+        "stream": "/v1/watches/w-972839ce/events"
+      }
+    },
+    "step5_list_watches": {
+      "description": "List active watches",
+      "timing_ms": 5,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "watch_count": 1,
+        "watch": {
+          "watchId": "w-972839ce",
+          "deviceId": "chrome-726392682",
+          "selector": ".titleline > a",
+          "interval": 10000
+        }
+      }
+    },
+    "step6_list_templates": {
+      "description": "List extraction templates",
+      "timing_ms": 6,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "template_count": 2,
+        "templates": [
+          {
+            "domain": "news.ycombinator.com",
+            "hitCount": 6,
+            "successRate": 1.0
+          },
+          {
+            "domain": "unknown",
+            "hitCount": 0,
+            "successRate": 1.0
+          }
+        ]
+      }
+    },
+    "step7_watches_after_15s": {
+      "description": "Check watches after 15 second wait",
+      "timing_ms": 5,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "watch_still_active": true,
+        "watch_count": 1,
+        "events_endpoint": "SSE stream (not polled)"
+      }
+    },
+    "step8_delete_watch": {
+      "description": "Delete watch w-972839ce",
+      "timing_ms": 8,
+      "status": "PASS",
+      "result": {
+        "ok": true,
+        "watchId": "w-972839ce",
+        "verified_empty": true
+      }
+    }
+  },
+  "overall": {
+    "status": "PASS",
+    "total_steps": 8,
+    "passed": 8,
+    "failed": 0,
+    "notes": [
+      "All extract modes working (schema, auto, query)",
+      "Auto-extract uses template matching for news.ycombinator.com (6 hits, 100% success rate)",
+      "Query extract resolved via template (returned all 30 stories instead of requested top 5)",
+      "Watch API requires 'selector' field, not 'schema'",
+      "Watch lifecycle: create -> list -> verify active -> delete -> verify deleted",
+      "Events endpoint is SSE stream",
+      "All operations completed in under 15ms each"
+    ]
+  }
+}

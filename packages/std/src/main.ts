@@ -11,6 +11,7 @@ import { OpenAICompatAdapter } from './drivers/openai-compat.js';
 import { AnthropicAdapter } from './drivers/anthropic.js';
 import { OpenAIAdapter } from './drivers/openai.js';
 import { LMStudioAdapter } from './drivers/lmstudio.js';
+import { getLocalConfig, isLocalMode } from './local-mode.js';
 
 // ---------------------------------------------------------------------------
 // Crash / rejection logging
@@ -44,6 +45,26 @@ logGateway('[main] starting', { host, port, pid: process.pid });
 // ---------------------------------------------------------------------------
 
 const config = await loadConfig();
+const localMode = isLocalMode();
+const localCfg = getLocalConfig();
+
+async function detectModelFromEndpoint(baseUrl: string, apiKey?: string): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const headers: Record<string, string> = {};
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const res = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
+    if (!res.ok) return undefined;
+    const body = await res.json() as { data?: Array<{ id?: string }> };
+    const first = body.data?.find((m) => typeof m.id === 'string' && m.id.trim().length > 0);
+    return first?.id;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // OpenRouter — from config or OPENROUTER_API_KEY env
 const orApiKey = config.llm?.openrouter?.apiKey ?? process.env.OPENROUTER_API_KEY;
@@ -125,8 +146,43 @@ if (openaiApiKey) {
   logGateway('[main] registered lmstudio driver');
 }
 
+// Dedicated local-mode OpenAI-compatible route (highest priority, local only)
+if (localMode) {
+  const detectedModel = localCfg.llmModel || await detectModelFromEndpoint(localCfg.llmBaseUrl, localCfg.llmApiKey);
+  if (!process.env.PINGOS_LLM_MODEL && detectedModel) {
+    process.env.PINGOS_LLM_MODEL = detectedModel;
+  }
+  registry.register(
+    new OpenAICompatAdapter({
+      id: 'openai-compat-local',
+      name: 'OpenAI-Compat (local mode)',
+      endpoint: localCfg.llmBaseUrl.replace(/\/v1$/, ''),
+      apiKey: localCfg.llmApiKey,
+      model: detectedModel ?? 'default',
+      capabilities: {
+        llm: true, streaming: true, vision: true, toolCalling: true,
+        imageGen: false, search: false, deepResearch: false, thinking: false,
+      },
+      priority: -100,
+    }),
+  );
+  logGateway('[main] local mode enabled', {
+    localMode: true,
+    llmBaseUrl: localCfg.llmBaseUrl,
+    llmModel: detectedModel ?? localCfg.llmModel ?? 'default',
+    visionBaseUrl: localCfg.visionBaseUrl,
+    visionModel: localCfg.visionModel || localCfg.models.vision || detectedModel || 'default',
+    domLimit: localCfg.domLimit,
+    jsonMode: localCfg.responseFormat,
+    timeouts: localCfg.timeouts,
+  });
+}
+
 // Generic OpenAI-compat fallback — from PINGOS_LLM_BASE_URL env
-if (process.env.PINGOS_LLM_BASE_URL && process.env.PINGOS_LLM_API_KEY) {
+if (process.env.PINGOS_LLM_BASE_URL) {
+  const envPriority = process.env.PINGOS_LLM_PRIORITY
+    ? Number.parseInt(process.env.PINGOS_LLM_PRIORITY, 10)
+    : NaN;
   registry.register(
     new OpenAICompatAdapter({
       id: 'openai-compat-env',
@@ -138,7 +194,7 @@ if (process.env.PINGOS_LLM_BASE_URL && process.env.PINGOS_LLM_API_KEY) {
         llm: true, streaming: true, vision: false, toolCalling: true,
         imageGen: false, search: false, deepResearch: false, thinking: false,
       },
-      priority: 15,
+      priority: Number.isFinite(envPriority) ? envPriority : 1,
     }),
   );
   logGateway('[main] registered openai-compat-env driver');

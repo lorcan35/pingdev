@@ -1250,7 +1250,8 @@ async function runDemoCommand(argv: string[]) {
   const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
   const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
 
-  console.log(bold('PingOS Demo'));
+  console.log(bold('PingOS Zero-Config Demo'));
+  console.log(dim('==================================='));
   console.log('');
 
   // Check if gateway is running
@@ -1259,20 +1260,37 @@ async function runDemoCommand(argv: string[]) {
     const healthRes = await fetch('http://localhost:3500/v1/health');
     if (healthRes.ok) {
       gatewayUp = true;
-      console.log(`  Gateway:  ${green('running')}`);
     }
-  } catch {
-    // gateway not reachable
-  }
+  } catch {}
 
   if (!gatewayUp) {
-    console.log(`  Gateway:  ${red('not running')}`);
+    console.log(`Gateway is ${red('not running')}. Starting gateway automatically for the demo...`);
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [__filename, 'up', '--daemon'], { stdio: 'ignore', detached: true });
+    child.unref();
+    
+    process.stdout.write('Waiting for gateway to start');
+    for (let i = 0; i < 15; i++) {
+      process.stdout.write('.');
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        if ((await fetch('http://localhost:3500/v1/health')).ok) {
+          gatewayUp = true;
+          break;
+        }
+      } catch {}
+    }
     console.log('');
-    console.log(`Start PingOS first: ${cyan('pingos up')}`);
-    return;
+    if (!gatewayUp) {
+      console.log(red('Failed to start gateway. Please run `pingos up` manually.'));
+      return;
+    }
+    console.log(green('✓ Gateway started!'));
+  } else {
+    console.log(green('✓ Gateway is running.'));
   }
 
-  // List devices
+  // Get devices
   let devices: any[] = [];
   try {
     const devRes = await fetch('http://localhost:3500/v1/devices');
@@ -1280,54 +1298,77 @@ async function runDemoCommand(argv: string[]) {
       const devData = await devRes.json() as any;
       devices = devData.devices || devData.extension?.devices || [];
     }
-  } catch {
-    // devices endpoint failed
-  }
+  } catch {}
 
   if (devices.length === 0) {
-    console.log(`  Devices:  ${red('none connected')}`);
     console.log('');
-    console.log(`Start PingOS first: ${cyan('pingos up')}`);
-    console.log('Open a browser tab and the extension will register it as a device.');
-    return;
+    console.log(cyan('ℹ No tabs connected yet.'));
+    console.log('To run the demo, we need a browser tab.');
+    console.log('Please open Chrome, go to \x1b[4mhttps://news.ycombinator.com\x1b[0m, and share the tab using the PingOS extension.');
+    console.log('Waiting for a tab to be shared...');
+    
+    // Wait up to 60 seconds for a device
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const devRes = await fetch('http://localhost:3500/v1/devices');
+        if (devRes.ok) {
+          const devData = await devRes.json() as any;
+          devices = devData.devices || devData.extension?.devices || [];
+          if (devices.length > 0) break;
+        }
+      } catch {}
+    }
+    
+    if (devices.length === 0) {
+      console.log(red('Timed out waiting for a tab.'));
+      return;
+    }
   }
 
-  console.log(`  Devices:  ${green(String(devices.length) + ' connected')}`);
-  console.log('');
-
-  // Pick the first device and run an extract
   const device = devices[0];
   const deviceId = device.deviceId || device.id;
   const title = (device.title || 'Untitled').slice(0, 60);
-  const url = (device.url || '').slice(0, 80);
-  console.log(`  Target:   ${bold(deviceId)}`);
-  console.log(`            ${title}`);
-  console.log(`            ${dim(url)}`);
+  
+  console.log(green(`✓ Found tab: ${title} (${deviceId})`));
   console.log('');
-  console.log('  Running extract...');
+  console.log(bold('Step 1: Running Zero-Shot Discovery'));
+  console.log(dim('PingOS will now analyze the page to find extractable data...'));
 
   try {
+    const discoverRes = await fetch(`http://localhost:3500/v1/dev/${encodeURIComponent(deviceId)}/discover`);
+    if (!discoverRes.ok) throw new Error('Discovery failed');
+    const discoverData = await discoverRes.json() as any;
+    console.log(green('✓ Discovery complete!'));
+    console.log(`  Page Type: ${cyan(discoverData.result.pageType)}`);
+    
+    console.log('');
+    console.log(bold('Step 2: Extracting Data'));
+    process.stdout.write(dim('Extracting using discovered schema...'));
+    
     const extractRes = await fetch(`http://localhost:3500/v1/dev/${encodeURIComponent(deviceId)}/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
     const extractData = await extractRes.json() as any;
+    console.log('\\n');
+    
     if (!extractRes.ok) {
-      console.log(`  ${red('Extract failed:')} ${extractData.message || extractRes.statusText}`);
+      console.log(red('Extract failed: ') + (extractData.message || 'Unknown error'));
       return;
     }
 
     const result = extractData.result ?? extractData;
+    console.log(bold('🎉 Extraction Successful! Here is the data:'));
+    console.log(cyan(JSON.stringify(result, null, 2).split('\\n').map(l => '  ' + l).join('\\n')));
+    
     console.log('');
-    console.log(bold('  Extract Result:'));
-    console.log(cyan(JSON.stringify(result, null, 2).split('\n').map(l => '    ' + l).join('\n')));
+    console.log(bold("What's next?"));
+    console.log(`  Run ${cyan('pingos init')} to build an app for this site.`);
   } catch (err: any) {
-    console.log(`  ${red('Extract failed:')} ${err.message || err}`);
+    console.log(red('\\nError during demo: ') + err.message);
   }
-
-  console.log('');
-  console.log(dim('  This was a demo extract. Use `pingdev extract <device>` for full options.'));
 }
 
 // =============================================
@@ -1395,82 +1436,131 @@ async function runInitCommand(argv: string[]) {
   const url = argv.find((a) => !a.startsWith('--'));
   const flags = parseFlags(argv);
 
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+  const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+  const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+  const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+  const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+
   if (url) {
-    // Non-interactive: run recon on the URL
     console.log(`[init] Generating PingApp for ${url}...`);
     const outputDir = typeof flags['output'] === 'string' ? flags['output'] : './pingapp';
     return runReconCommand([url, '--output', outputDir]);
   }
 
-  // Interactive mode: prompt user
   const readline = await import('node:readline');
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q: string): Promise<string> => new Promise((r) => rl.question(q, r));
 
-  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-  const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
-  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-
   console.log('');
-  console.log(bold('Welcome to PingOS! Let\'s set up your first automation.'));
+  console.log(bold('🚀 Welcome to the PingOS Smart App Wizard!'));
+  console.log(dim('We will help you generate a robust API for any website in seconds.'));
   console.log('');
 
-  const targetUrl = await ask(cyan('? ') + 'What URL do you want to automate? ');
+  // Ask for URL
+  let targetUrl = await ask(cyan('? ') + bold('What URL do you want to automate? '));
   if (!targetUrl.trim()) {
-    console.error('URL is required.');
+    console.error(red('URL is required to continue.'));
+    rl.close();
+    process.exit(1);
+  }
+  
+  if (!targetUrl.startsWith('http')) {
+    targetUrl = 'https://' + targetUrl;
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(targetUrl);
+  } catch {
+    console.error(red(`[init] Invalid URL: ${targetUrl}`));
     rl.close();
     process.exit(1);
   }
 
-  console.log('');
-  console.log('  What do you want to do?');
-  console.log(`    ${bold('1)')} Extract data ${dim('(scrape content, prices, text)')}`);
-  console.log(`    ${bold('2)')} Fill forms ${dim('(automate form inputs)')}`);
-  console.log(`    ${bold('3)')} Monitor changes ${dim('(watch for updates)')}`);
-  console.log(`    ${bold('4)')} Full automation ${dim('(all of the above)')}`);
-  console.log('');
-  const purposeChoice = await ask(cyan('? ') + 'Choose (1-4): ');
-  rl.close();
-
-  const purposes: Record<string, string> = {
-    '1': 'extract',
-    '2': 'fill',
-    '3': 'monitor',
-    '4': 'automation',
-  };
-  const purpose = purposes[purposeChoice.trim()] || 'automation';
-
-  let parsedUrl: URL;
+  // Check if gateway is running
+  let gatewayUp = false;
   try {
-    parsedUrl = new URL(targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`);
-  } catch {
-    console.error(`[init] Invalid URL: ${targetUrl}`);
-    process.exit(1);
+    gatewayUp = (await fetch('http://localhost:3500/v1/health')).ok;
+  } catch {}
+
+  if (!gatewayUp) {
+    console.log('');
+    const startGw = await ask(cyan('? ') + bold('Gateway is not running. Start it automatically? (Y/n) '));
+    if (startGw.trim().toLowerCase() !== 'n') {
+      const { spawn } = await import('node:child_process');
+      const child = spawn(process.execPath, [__filename, 'up', '--daemon'], { stdio: 'ignore', detached: true });
+      child.unref();
+      process.stdout.write(dim('Starting gateway...'));
+      for (let i = 0; i < 15; i++) {
+        process.stdout.write(dim('.'));
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          if ((await fetch('http://localhost:3500/v1/health')).ok) {
+            gatewayUp = true;
+            break;
+          }
+        } catch {}
+      }
+      console.log('');
+      if (gatewayUp) console.log(green('✓ Gateway started!'));
+      else console.log(red('✗ Failed to start gateway. Proceeding in offline mode.'));
+    }
   }
 
-  const name = parsedUrl.hostname.split('.').filter((p) => p !== 'www')[0] || 'myapp';
+  rl.close();
+  console.log('');
 
+  if (gatewayUp) {
+    console.log(bold('✨ Smart Discovery'));
+    console.log(dim('PingOS can automatically analyze the site and generate actions.'));
+    console.log(`To proceed, open Chrome, navigate to ${cyan(targetUrl)}, and share the tab.`);
+    
+    let deviceId = '';
+    process.stdout.write('Waiting for tab connection... ');
+    for (let i = 0; i < 60; i++) { // Wait up to 60s
+      try {
+        const devRes = await fetch('http://localhost:3500/v1/devices');
+        if (devRes.ok) {
+          const devData = await devRes.json() as any;
+          const devices = devData.devices || devData.extension?.devices || [];
+          const matchingDevice = devices.find((d: any) => d.url && d.url.includes(parsedUrl.hostname));
+          if (matchingDevice) {
+            deviceId = matchingDevice.deviceId || matchingDevice.id;
+            break;
+          }
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (deviceId) {
+      console.log(green('\\n✓ Found tab! Generating PingApp via Recon...\\n'));
+      const outputDir = typeof flags['output'] === 'string' ? flags['output'] : './pingapp';
+      try {
+        await runReconCommand([targetUrl, '--output', outputDir]);
+        console.log('\\n' + green('🎉 PingApp successfully generated!'));
+        console.log(`Run ${bold('pingos serve ' + outputDir)} to start your new API.`);
+        return;
+      } catch (err: any) {
+        console.log(red('\\n✗ Recon failed: ') + err.message);
+        console.log(dim('Falling back to basic skeleton generation...'));
+      }
+    } else {
+      console.log(yellow('\\n⚠ Timed out waiting for tab. Generating basic skeleton instead.'));
+    }
+  }
+
+  // Basic generation (fallback or offline)
+  const name = parsedUrl.hostname.split('.').filter((p) => p !== 'www')[0] || 'myapp';
   const config = {
     name,
     url: parsedUrl.href,
-    purpose,
-    category: purpose,
+    purpose: 'automation',
+    category: 'automation',
     selectors: {},
     actions: [],
-    states: [
-      { name: 'idle', detectionMethod: 'page loaded', transitions: ['loading'] },
-      { name: 'loading', detectionMethod: 'network activity', transitions: ['done', 'error'] },
-      { name: 'done', detectionMethod: 'content rendered', transitions: ['idle'] },
-      { name: 'error', detectionMethod: 'error indicator', transitions: ['idle'] },
-    ],
-    features: [],
-    completion: { method: 'hash_stability', pollMs: 1000, stableCount: 3, maxWaitMs: 30000 },
-    stateTransitions: {
-      idle: ['loading'],
-      loading: ['done', 'error'],
-      done: ['idle'],
-      error: ['idle'],
-    },
   };
 
   const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
@@ -1483,13 +1573,12 @@ async function runInitCommand(argv: string[]) {
   writeFileSync(outputPath, JSON.stringify(config, null, 2));
 
   console.log('');
-  console.log(bold('PingApp config created!'));
+  console.log(bold('PingApp config skeleton created!'));
   console.log(`  ${dim('File:')} ${outputPath}`);
   console.log('');
   console.log('Next steps:');
-  console.log(`  ${cyan('1.')} Run ${bold(`pingos init ${parsedUrl.href}`)} to auto-generate full selectors via recon`);
-  console.log(`  ${cyan('2.')} Or edit ${dim('pingapp.json')} manually to add selectors and actions`);
-  console.log(`  ${cyan('3.')} Then: ${bold('pingos serve .')} to start your PingApp`);
+  console.log(`  ${cyan('1.')} Edit ${dim('pingapp.json')} manually to add selectors and actions`);
+  console.log(`  ${cyan('2.')} Then: ${bold('pingos serve .')} to start your PingApp`);
   console.log('');
 }
 
@@ -1605,26 +1694,40 @@ async function runDeviceOp(
 ) {
   const device = argv.filter((a) => !a.startsWith('--'))[0];
   if (!device) {
-    console.error(`Usage: ${usage}`);
+    console.error(`\x1b[31mUsage Error:\x1b[0m ${usage}`);
     process.exit(1);
   }
   const body = parseBody(argv);
   if (body === null) {
-    console.error(`Usage: ${usage}`);
+    console.error(`\x1b[31mUsage Error:\x1b[0m ${usage}`);
     process.exit(1);
   }
   const flags = parseFlags(argv);
   const host = typeof flags['host'] === 'string' ? flags['host'] : 'localhost';
   const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
   const url = `http://${host}:${port}/v1/dev/${encodeURIComponent(device)}/${op}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err: any) {
+    console.error(`\x1b[31m[\x1b[1m${op}\x1b[0m\x1b[31m] Connection Error:\x1b[0m Could not connect to gateway at ${host}:${port}`);
+    console.error(`\x1b[2mFix: Ensure PingOS is running using \x1b[0m\x1b[32mpingos up\x1b[0m`);
+    process.exit(1);
+  }
+
   const data = await res.json() as any;
   if (!res.ok) {
-    console.error(`[${op}] Error: ${data.message || res.statusText}`);
+    console.error(`\x1b[31m[\x1b[1m${op}\x1b[0m\x1b[31m] Operation Failed:\x1b[0m ${data.message || res.statusText}`);
+    if (res.status === 404) {
+      console.error(`\x1b[2mFix: Make sure the device '${device}' is connected. Run \x1b[0m\x1b[32mpingos status\x1b[0m\x1b[2m to see connected devices.\x1b[0m`);
+    } else if (res.status === 400) {
+      console.error(`\x1b[2mFix: Check your input parameters. Usage: ${usage}\x1b[0m`);
+    }
     process.exit(1);
   }
   console.log(JSON.stringify(data.result ?? data, null, 2));
@@ -1637,6 +1740,46 @@ function cliErr(cmd: string) {
     process.exit(1);
   };
 }
+
+
+// First-run experience check
+(async () => {
+  if (!command) return;
+  const { homedir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { existsSync } = await import('node:fs');
+  const pingosDir = join(homedir(), '.pingos');
+  const configPath = join(pingosDir, 'config.json');
+  
+  if (!existsSync(configPath) && !['init', 'demo', 'up', 'down', 'status', 'doctor', 'help'].includes(command)) {
+    console.log('\n\x1b[1m\x1b[36m🚀 Welcome to PingOS!\x1b[0m\x1b[0m');
+    console.log('PingOS turns any website into an API.\n');
+    console.log('It looks like this is your first time. Let\'s get you started:');
+    console.log('  1. Run \x1b[32mpingos demo\x1b[0m for a zero-config test drive.');
+    console.log('  2. Run \x1b[32mpingos init\x1b[0m to automate your first site.');
+    console.log('  3. Read the \x1b[36mdocs/QUICKSTART.md\x1b[0m for a 5-minute guide.\n');
+  }
+})();
+
+
+// First-run experience check
+(async () => {
+  if (!command) return;
+  const { homedir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { existsSync } = await import('node:fs');
+  const pingosDir = join(homedir(), '.pingos');
+  const configPath = join(pingosDir, 'config.json');
+  
+  if (!existsSync(configPath) && !['init', 'demo', 'up', 'down', 'status', 'doctor', 'help'].includes(command)) {
+    console.log('\n\x1b[1m\x1b[36m🚀 Welcome to PingOS!\x1b[0m\x1b[0m');
+    console.log('PingOS turns any website into an API.\n');
+    console.log('It looks like this is your first time. Let\'s get you started:');
+    console.log('  1. Run \x1b[32mpingos demo\x1b[0m for a zero-config test drive.');
+    console.log('  2. Run \x1b[32mpingos init\x1b[0m to automate your first site.');
+    console.log('  3. Read the \x1b[36mdocs/QUICKSTART.md\x1b[0m for a 5-minute guide.\n');
+  }
+})();
 
 switch (command) {
   case 'recon':
@@ -2218,5 +2361,25 @@ switch (command) {
     console.log('  status                 Show gateway, extension, and tab status');
     console.log('  doctor                 Check system health and diagnose issues');
     console.log('  demo                   Run a demo extract against a connected tab');
-    process.exit(command ? 1 : 0);
+    if (command && command !== 'help' && !['--help', '-h'].includes(command)) {
+      const validCommands = ['recon', 'validate', 'heal', 'serve', 'suggest', 'record', 'query', 'watch', 'diff', 'discover', 'call', 'functions', 'pipe', 'mcp', 'init', 'app', 'health', 'extract', 'templates', 'act', 'observe', 'read', 'click', 'type', 'press', 'scroll', 'eval', 'screenshot', 'upload', 'fill', 'wait', 'table', 'dialog', 'paginate', 'select-option', 'navigate', 'hover', 'assert', 'network', 'storage', 'capture', 'download', 'annotate', 'up', 'down', 'status', 'doctor', 'demo'];
+      let closest = '';
+      let minDistance = 3;
+      for (const cmd of validCommands) {
+        let distance = 0;
+        for (let i = 0; i < Math.min(cmd.length, command.length); i++) {
+          if (cmd[i] !== command[i]) distance++;
+        }
+        distance += Math.abs(cmd.length - command.length);
+        if (distance < minDistance) {
+          minDistance = distance;
+          closest = cmd;
+        }
+      }
+      console.log(`\n\x1b[31mUnknown command:\x1b[0m ${command}`);
+      if (closest) {
+        console.log(`Did you mean \x1b[32m${closest}\x1b[0m?`);
+      }
+    }
+    process.exit(command && command !== 'help' && !['--help', '-h'].includes(command) ? 1 : 0);
 }

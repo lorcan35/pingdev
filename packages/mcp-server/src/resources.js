@@ -1,0 +1,60 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.registerResources = registerResources;
+const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
+const GATEWAY_URL = process.env.PINGOS_GATEWAY_URL || 'http://localhost:3500';
+async function gw(path) {
+    const res = await fetch(`${GATEWAY_URL}${path}`);
+    return res.json();
+}
+function registerResources(server) {
+    // 1. pingos://devices — Live tab list
+    server.resource('devices', 'pingos://devices', { description: 'List of connected browser tabs (devices) managed by PingOS', mimeType: 'application/json' }, async () => ({
+        contents: [{
+                uri: 'pingos://devices',
+                mimeType: 'application/json',
+                text: JSON.stringify(await gw('/v1/devices'), null, 2),
+            }],
+    }));
+    // 2. pingos://tab/{id}/dom — Page DOM snapshot (via recon)
+    server.resource('tab-dom', new mcp_js_1.ResourceTemplate('pingos://tab/{id}/dom', { list: undefined }), { description: 'Page DOM snapshot for a specific device/tab', mimeType: 'application/json' }, async (uri, variables) => {
+        const id = variables.id;
+        const data = await fetch(`${GATEWAY_URL}/v1/dev/${id}/recon`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        }).then((r) => r.json());
+        return {
+            contents: [{
+                    uri: uri.href,
+                    mimeType: 'application/json',
+                    text: JSON.stringify(data, null, 2),
+                }],
+        };
+    });
+    // 3. pingos://apps — Available PingApps
+    server.resource('apps', 'pingos://apps', { description: 'List of available PingApps (high-level website drivers)', mimeType: 'application/json' }, async () => ({
+        contents: [{
+                uri: 'pingos://apps',
+                mimeType: 'application/json',
+                text: JSON.stringify(await gw('/v1/apps'), null, 2),
+            }],
+    }));
+    // 4. pingos://templates — Learned extraction templates
+    server.resource('templates', 'pingos://templates', { description: 'Learned extraction templates by domain', mimeType: 'application/json' }, async () => ({
+        contents: [{
+                uri: 'pingos://templates',
+                mimeType: 'application/json',
+                text: JSON.stringify(await gw('/v1/templates'), null, 2),
+            }],
+    }));
+    // 5. pingos://llm/models — LLM models exposed by the gateway registry
+    server.resource('llm-models', 'pingos://llm/models', { description: 'Available LLM models from registered drivers', mimeType: 'application/json' }, async () => ({
+        contents: [{
+                uri: 'pingos://llm/models',
+                mimeType: 'application/json',
+                text: JSON.stringify(await gw('/v1/llm/models'), null, 2),
+            }],
+    }));
+}
+//# sourceMappingURL=resources.js.map

@@ -9,6 +9,10 @@
  */
 
 import type { Recording, RecordedAction } from './types.js';
+import { callLLM } from './llm.js';
+import { getTimeoutForFeature, isLocalMode } from './local-mode.js';
+import { getGeneratePrompt } from './local-prompts.js';
+import { repairLLMJson } from './json-repair.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,6 +56,158 @@ interface SelectorEntry {
 interface PingAppTest {
   name: string;
   steps: Array<{ op: string; selector?: string; value?: string; expect?: string }>;
+}
+
+export interface GeneratePingAppViaLLMInput {
+  url: string;
+  description: string;
+  domContext: string;
+}
+
+function deriveDomainAppName(url: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '');
+    const base = host.split('.').filter(Boolean)[0] || 'site';
+    const clean = base.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return `${clean || 'site'}-app`;
+  } catch {
+    return 'site-app';
+  }
+}
+
+function buildFewShotPrompt(input: GeneratePingAppViaLLMInput, expectedName: string): string {
+  return `You are generating a production-quality PingApp JSON spec.
+
+Target URL: ${input.url}
+Target app name: ${expectedName}
+User description: ${input.description}
+
+Rules:
+- Use the target domain in app name. REQUIRED name: ${expectedName}
+- DO NOT use generic names like site-app, app, website-app, unknown-app.
+- selectors must include REAL CSS selectors from the page context.
+- actions must be concrete and executable (op + selector/value).
+- schemas must include at least one extraction schema with non-empty fields.
+- Return JSON only with keys: name,url,description,selectors,actions,schemas
+
+Good example:
+{
+  "name": "github-app",
+  "url": "https://github.com",
+  "description": "Search repositories and open repo details",
+  "selectors": {
+    "search_input": "input[name='q']",
+    "repo_cards": "ul.repo-list li",
+    "repo_title": "h3 a",
+    "repo_description": "p.mb-1",
+    "repo_link": "h3 a"
+  },
+  "actions": [
+    { "name": "search", "op": "type", "selector": "input[name='q']", "value": "{{query}}" },
+    { "name": "submit_search", "op": "press", "value": "Enter" },
+    { "name": "open_first_repo", "op": "click", "selector": "ul.repo-list li h3 a" }
+  ],
+  "schemas": [
+    {
+      "name": "search_results",
+      "fields": {
+        "title": "ul.repo-list li h3 a",
+        "description": "ul.repo-list li p.mb-1",
+        "url": "ul.repo-list li h3 a[href]"
+      }
+    }
+  ]
+}
+
+Now generate for this target.
+${input.domContext}`;
+}
+
+function isEmptyObject(value: unknown): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length === 0;
+}
+
+function isDegenerateAppSpec(app: Record<string, unknown>): boolean {
+  const name = String(app.name ?? '').trim().toLowerCase();
+  const genericName = !name || ['site-app', 'unknown-app', 'app', 'website-app'].includes(name);
+
+  const selectors = app.selectors;
+  const actions = app.actions;
+
+  const selectorsEmpty = !selectors || isEmptyObject(selectors);
+  const actionsEmpty = !Array.isArray(actions) || actions.length === 0;
+
+  return genericName || (selectorsEmpty && actionsEmpty);
+}
+
+function enforceAppName(app: Record<string, unknown>, expectedName: string): Record<string, unknown> {
+  const current = String(app.name ?? '').trim().toLowerCase();
+  if (!current || ['site-app', 'unknown-app', 'app', 'website-app'].includes(current)) {
+    return { ...app, name: expectedName };
+  }
+  return app;
+}
+
+function normalizeAppSpec(
+  raw: Record<string, unknown>,
+  input: GeneratePingAppViaLLMInput,
+  expectedName: string,
+): Record<string, unknown> {
+  const app = { ...raw } as Record<string, unknown>;
+  app.name = typeof app.name === 'string' && app.name.trim() ? app.name : expectedName;
+  app.url = typeof app.url === 'string' && app.url.trim() ? app.url : input.url;
+  app.description = typeof app.description === 'string' && app.description.trim() ? app.description : input.description;
+
+  // Recover actions from numeric object keys if model emitted malformed shape.
+  if (!Array.isArray(app.actions)) {
+    const recoveredActions: Array<Record<string, unknown>> = [];
+    for (const [k, v] of Object.entries(app)) {
+      if (!/^\d+$/.test(k)) continue;
+      if (v && typeof v === 'object') {
+        const action = v as Record<string, unknown>;
+        if (typeof action.op === 'string') recoveredActions.push(action);
+      }
+    }
+    if (recoveredActions.length > 0) app.actions = recoveredActions;
+  }
+
+  // Build selectors map from actions when missing.
+  if (!app.selectors || isEmptyObject(app.selectors)) {
+    const selectors: Record<string, string> = {};
+    const actions = Array.isArray(app.actions) ? app.actions : [];
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i] as Record<string, unknown>;
+      const sel = typeof action.selector === 'string' ? action.selector : '';
+      if (!sel) continue;
+      const key = typeof action.name === 'string' && action.name.trim()
+        ? action.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')
+        : `selector_${i + 1}`;
+      if (!selectors[key]) selectors[key] = sel;
+    }
+    app.selectors = selectors;
+  }
+
+  // Build a minimal schema from selectors when absent.
+  if (!Array.isArray(app.schemas) || app.schemas.length === 0) {
+    const selectors = (app.selectors && typeof app.selectors === 'object')
+      ? app.selectors as Record<string, unknown>
+      : {};
+    const fields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(selectors)) {
+      if (typeof v === 'string' && v.trim()) fields[k] = v;
+      if (Object.keys(fields).length >= 5) break;
+    }
+    if (Object.keys(fields).length > 0) {
+      app.schemas = [{ name: 'main', fields }];
+    } else {
+      app.schemas = [];
+    }
+  }
+
+  if (!Array.isArray(app.actions)) app.actions = [];
+  if (!app.selectors || typeof app.selectors !== 'object') app.selectors = {};
+
+  return app;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,4 +404,72 @@ export class PingAppGenerator {
       steps,
     };
   }
+}
+
+export async function generatePingAppViaLLM(input: GeneratePingAppViaLLMInput): Promise<Record<string, unknown>> {
+  const local = isLocalMode();
+  const promptDef = getGeneratePrompt(local);
+  const expectedName = deriveDomainAppName(input.url);
+  const basePrompt = promptDef.userTemplate
+    .replace('{{url}}', input.url)
+    .replace('{{description}}', input.description)
+    .replace('{{domContext}}', input.domContext);
+  const prompt = local
+    ? `${basePrompt}
+
+${buildFewShotPrompt(input, expectedName)}`
+    : basePrompt;
+
+  const raw = await callLLM(prompt, {
+    feature: 'generate',
+    systemPrompt: promptDef.system,
+    timeoutMs: getTimeoutForFeature('generate'),
+    responseFormatJson: true,
+    maxTokens: local ? 6144 : 1400,
+    temperature: 0.1,
+  });
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = repairLLMJson(raw) as Record<string, unknown>;
+  } catch {
+    const fixerPrompt = `Fix this into valid JSON with keys {name,url,description,selectors,actions,schemas}.
+Invalid:
+${raw}
+RESPOND WITH ONLY VALID JSON. No explanation, no markdown, no code fences.`;
+    const fixedRaw = await callLLM(fixerPrompt, {
+      feature: 'generate',
+      timeoutMs: getTimeoutForFeature('generate'),
+      responseFormatJson: true,
+      maxTokens: local ? 6144 : 1400,
+      temperature: 0,
+      systemPrompt: 'Return valid JSON only. RESPOND WITH ONLY VALID JSON. No explanation, no markdown, no code fences.',
+    });
+    parsed = repairLLMJson(fixedRaw) as Record<string, unknown>;
+  }
+
+  parsed = normalizeAppSpec(enforceAppName(parsed, expectedName), input, expectedName);
+
+  if (local && isDegenerateAppSpec(parsed)) {
+    const retryPrompt = `${buildFewShotPrompt(input, expectedName)}
+
+Your previous output was too generic or empty. Retry now with concrete selectors/actions/schemas from the DOM context. Output JSON only.`;
+    const retryRaw = await callLLM(retryPrompt, {
+      feature: 'generate',
+      systemPrompt: promptDef.system,
+      timeoutMs: getTimeoutForFeature('generate'),
+      responseFormatJson: true,
+      maxTokens: 6144,
+      temperature: 0,
+    });
+
+    try {
+      const retried = repairLLMJson(retryRaw) as Record<string, unknown>;
+      parsed = normalizeAppSpec(enforceAppName(retried, expectedName), input, expectedName);
+    } catch {
+      // Keep initial parsed output if retry parse fails.
+    }
+  }
+
+  return normalizeAppSpec(parsed, input, expectedName);
 }

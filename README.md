@@ -1,22 +1,31 @@
 # PingOS
 
-**Browser automation OS — control any website through a REST API.**
+**Turn Any Website into a Reliable API in 5 Minutes.**
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)
 ![Node](https://img.shields.io/badge/Node-20+-green)
 ![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-yellow)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-## PingOS in 60 Seconds
+## Why PingOS?
+Instead of brittle scraping scripts or expensive LLM token burns on every click, PingOS uses **ahead-of-time compilation** with a smart Chrome Bridge. It analyzes a website once, generates a robust API with self-healing CSS selectors, and lets you interact via deterministic REST calls with zero AI runtime cost.
+
+### 🌟 New: Zero-Config CLI Onboarding
+Experience the magic instantly.
 
 ```bash
 git clone <repo-url> pingos && cd pingos
 npm install && npm run build
-npx pingos up          # starts gateway + opens Chrome with extension
-# Share a tab → Extract data → Build automations
+
+# 1. Start the Gateway and Browser
+npx pingos up
+
+# 2. Share any open tab (e.g., Hacker News) via the extension
+# 3. Watch PingOS magically extract structured data!
+npx pingos demo
 ```
 
-[Full Quick Start Guide →](docs/QUICKSTART.md) | [Entry Points for Your Use Case →](docs/ENTRY-POINTS.md)
+[Full 5-Minute Quickstart →](docs/QUICKSTART.md) | [Step-by-Step Tutorials →](docs/TUTORIAL.md)
 
 ---
 
@@ -72,11 +81,17 @@ npx pingos up
 ```bash
 # Check what's connected
 npx pingos status
+curl -s http://localhost:3500/v1/devices | jq
 
-# Extract data from a shared tab
-curl -X POST http://localhost:3500/v1/dev/chrome-{tabId}/extract \
+# Use the returned deviceId (example: chrome-123456789)
+curl -s -X POST http://localhost:3500/v1/dev/chrome-123456789/extract \
   -H "Content-Type: application/json" \
-  -d '{"query": "extract all headlines"}'
+  -d '{"query":"extract all headlines"}' | jq
+
+# Function calls use /v1/functions/:app/call (not /v1/functions/invoke)
+curl -s -X POST http://localhost:3500/v1/functions/amazon/call \
+  -H "Content-Type: application/json" \
+  -d '{"function":"search","params":{"query":"mechanical keyboard"}}' | jq
 
 # Or run the interactive demo
 npx pingos demo

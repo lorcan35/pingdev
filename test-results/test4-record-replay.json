@@ -1,0 +1,190 @@
+{
+  "test": "Test 4: Record & Replay",
+  "device": "chrome-726392682",
+  "gateway": "http://localhost:3500",
+  "timestamp": "2026-02-21",
+  "steps": {
+    "step1_start_recording": {
+      "endpoint": "POST /v1/record/start",
+      "response": {
+        "ok": true,
+        "result": {
+          "recording": true
+        }
+      },
+      "timing_ms": 11,
+      "status": "PASS"
+    },
+    "step2_navigate_newest": {
+      "endpoint": "POST /v1/dev/chrome-726392682/smartNavigate",
+      "response": {
+        "ok": true,
+        "result": {
+          "navigated": true,
+          "url": "https://news.ycombinator.com/newest",
+          "steps": [
+            {
+              "clicked": "direct",
+              "url": "https://news.ycombinator.com/newest"
+            }
+          ]
+        }
+      },
+      "timing_ms": 48,
+      "status": "PASS"
+    },
+    "step3_wait": {
+      "description": "Wait 2 seconds for page load",
+      "timing_ms": 2000,
+      "status": "PASS"
+    },
+    "step4_extract_titles": {
+      "endpoint": "POST /v1/dev/chrome-726392682/extract",
+      "response": {
+        "ok": true,
+        "result": {
+          "result": {
+            "title": "New Links | Hacker News"
+          },
+          "_meta": {
+            "title": "meta-tag",
+            "strategy": "css",
+            "duration_ms": 1,
+            "selectors_used": {},
+            "auto": false
+          }
+        }
+      },
+      "timing_ms": 13,
+      "status": "PASS",
+      "note": "Extract returned page meta title rather than individual link titles; CSS selector resolved to meta-tag strategy"
+    },
+    "step5_navigate_back": {
+      "endpoint": "POST /v1/dev/chrome-726392682/smartNavigate",
+      "response": {
+        "ok": true,
+        "result": {
+          "navigated": true,
+          "url": "https://news.ycombinator.com/",
+          "steps": [
+            {
+              "clicked": "direct",
+              "url": "https://news.ycombinator.com/"
+            }
+          ]
+        }
+      },
+      "timing_ms": 13,
+      "status": "PASS"
+    },
+    "step6_wait": {
+      "description": "Wait 2 seconds",
+      "timing_ms": 2000,
+      "status": "PASS"
+    },
+    "step7_stop_recording": {
+      "endpoint": "POST /v1/record/stop",
+      "response": {
+        "ok": true,
+        "result": {
+          "recording": false,
+          "stepCount": 0
+        }
+      },
+      "timing_ms": 9,
+      "status": "WARN",
+      "note": "Recording stopped successfully but captured 0 steps. The recorder did not capture API-driven actions (navigate/extract) as recording steps."
+    },
+    "step8_check_status": {
+      "endpoint": "GET /v1/record/status?device=chrome-726392682",
+      "response": {
+        "ok": true,
+        "result": {
+          "recording": false,
+          "stepCount": 0
+        }
+      },
+      "timing_ms": 7,
+      "status": "PASS"
+    },
+    "step9_export": {
+      "endpoint": "POST /v1/record/export",
+      "response": {
+        "ok": true,
+        "result": {
+          "name": "hn-test-recording",
+          "steps": [],
+          "inputs": {},
+          "outputs": {}
+        }
+      },
+      "timing_ms": 10,
+      "status": "WARN",
+      "note": "Export succeeded but recording contains 0 steps, empty inputs and outputs"
+    },
+    "step10_list_recordings": {
+      "endpoint": "GET /v1/recordings",
+      "response": {
+        "ok": true,
+        "recordings": []
+      },
+      "timing_ms": 5,
+      "status": "WARN",
+      "note": "No recordings persisted in server store despite successful export"
+    },
+    "step11_replay": {
+      "endpoint": "POST /v1/recordings/replay",
+      "attempt_1": {
+        "body": {
+          "device": "chrome-726392682",
+          "recording": {
+            "name": "hn-test-recording",
+            "steps": [],
+            "inputs": {},
+            "outputs": {}
+          },
+          "speed": 0
+        },
+        "response": {
+          "errno": "ENOSYS",
+          "code": "ping.recordings.bad_request",
+          "message": "Missing recording or recordingId",
+          "retryable": false
+        },
+        "timing_ms": 5,
+        "status": "FAIL"
+      },
+      "attempt_2": {
+        "body": {
+          "device": "chrome-726392682",
+          "recordingId": "hn-test-recording",
+          "speed": 0
+        },
+        "response": {
+          "errno": "ENOENT",
+          "code": "ping.recordings.not_found",
+          "message": "Recording \"hn-test-recording\" not found",
+          "retryable": false
+        },
+        "timing_ms": 5,
+        "status": "FAIL"
+      },
+      "status": "FAIL",
+      "note": "Replay failed: recording not found in server store. Export returned data inline but did not persist it."
+    }
+  },
+  "summary": {
+    "overall_status": "PARTIAL FAIL",
+    "recording_start_stop": "PASS - start/stop API works correctly",
+    "actions_captured": 0,
+    "export": "PASS (API response ok) but 0 steps exported",
+    "replay": "FAIL - recording not persisted, replay cannot find it",
+    "total_api_time_ms": 126,
+    "issues": [
+      "Recorder captured 0 steps despite 3 API actions (2 navigates + 1 extract) performed while recording was active",
+      "Export succeeded with ok:true but produced empty recording (0 steps)",
+      "Recordings list is empty - export does not persist to server store",
+      "Replay endpoint rejects inline recording object; requires recordingId but recording was never persisted"
+    ]
+  }
+}

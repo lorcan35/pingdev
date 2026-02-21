@@ -10,6 +10,7 @@
  */
 
 import type { PageType, DiscoverResult, DiscoveredSchema, SchemaField } from './types.js';
+import { truncateDom } from './local-mode.js';
 
 // ---------------------------------------------------------------------------
 // Heuristic classifiers
@@ -24,6 +25,19 @@ interface DomSnapshot {
   tables?: TableInfo[];                  // detected <table> structures
   forms?: FormInfo[];                    // detected <form> structures
   repeatedGroups?: RepeatedGroup[];      // groups of similar sibling elements
+}
+
+/** Build a compact, local-model-friendly summary of discovered elements for selector synthesis. */
+export function buildDiscoverSummaryForLLM(
+  snapshot: Record<string, unknown>,
+  elementLimit = 30,
+  maxChars = 5000,
+): string {
+  const elements = ((snapshot.elements as Array<Record<string, unknown>>) || []).slice(0, elementLimit);
+  const summary = elements.map((e) =>
+    `<${e.tag}${e.id ? ` id=\"${e.id}\"` : ''}${e.ariaLabel ? ` aria-label=\"${e.ariaLabel}\"` : ''}${e.selector ? ` selector=\"${e.selector}\"` : ''}>${(e.text as string || '').slice(0, 40)}</${e.tag}>`,
+  ).join('\n');
+  return truncateDom(summary, maxChars);
 }
 
 interface DomElement {

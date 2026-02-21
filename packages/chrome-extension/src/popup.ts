@@ -11,6 +11,7 @@ const statusText = document.getElementById('statusText')!;
 const gatewayUrl = document.getElementById('gatewayUrl')!;
 const tabCountEl = document.getElementById('tabCount')!;
 const versionText = document.getElementById('versionText')!;
+const onboardingBanner = document.getElementById('onboardingBanner')!;
 
 interface TabListItem {
   tabId: number;
@@ -78,6 +79,12 @@ async function loadTabs() {
 
     const sharedCount = tabs.filter(t => t.shared).length;
     tabCountEl.textContent = `${sharedCount} tab${sharedCount !== 1 ? 's' : ''} shared`;
+
+    if (sharedCount === 0) {
+      onboardingBanner.style.display = 'block';
+    } else {
+      onboardingBanner.style.display = 'none';
+    }
   } catch (err) {
     console.error('[Popup] Error loading tabs:', err);
     tabList.innerHTML = '<div class="info-text">Error loading tabs</div>';
@@ -102,6 +109,14 @@ function renderTabs(tabs: TabListItem[]) {
     const title = document.createElement('div');
     title.className = 'tab-title';
     title.textContent = tab.title;
+
+    if (tab.shared) {
+      item.classList.add('shared');
+      const badge = document.createElement('span');
+      badge.className = 'shared-badge';
+      badge.textContent = 'Connected';
+      title.appendChild(badge);
+    }
     
     const url = document.createElement('div');
     url.className = 'tab-url';
