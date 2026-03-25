@@ -45,6 +45,45 @@ async function waitForAliExpressPrices(gateway: string, deviceId: string, timeou
   );
 }
 
+/**
+ * Navigate only if the tab isn't already on the target URL.
+ * After navigation, waits for the content script to reconnect.
+ */
+async function navigateIfNeeded(
+  gateway: string,
+  deviceId: string,
+  targetUrl: string,
+  waitSelector: string,
+  fallbackMs = 4000,
+  timeoutMs = 12_000,
+): Promise<void> {
+  // Check current URL
+  try {
+    const current = await deviceOp(gateway, deviceId, 'eval', { expression: 'window.location.href' });
+    const currentUrl = current?.result || '';
+    // If already on the right page, just wait for selector
+    if (currentUrl === targetUrl || currentUrl === targetUrl + '/') {
+      return;
+    }
+    // For same-origin, check if only path differs
+    if (currentUrl.startsWith(targetUrl.replace(/\/$/, ''))) {
+      return;
+    }
+  } catch {
+    // Content script may be dead — navigate anyway
+  }
+
+  // Navigate
+  try {
+    await deviceOp(gateway, deviceId, 'eval', { expression: `window.location.href = ${JSON.stringify(targetUrl)}` });
+  } catch {
+    // Navigation kills content script — this error is expected
+  }
+
+  // Wait for page to load with increased timeout for ARM devices
+  await waitForPageLoad(gateway, deviceId, waitSelector, fallbackMs, timeoutMs);
+}
+
 async function extractWithRetries<T>(
   gateway: string,
   deviceId: string,
@@ -2020,10 +2059,12 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findHNDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Hacker News tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://news.ycombinator.com/"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '.athing', 2000);
+    await navigateIfNeeded(gatewayUrl, deviceId, 'https://news.ycombinator.com/', '.athing');
 
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.hnStories });
+    const result = await extractWithRetries<any[]>(
+      gatewayUrl, deviceId, EXTRACTORS.hnStories,
+      (stories) => Array.isArray(stories) && stories.length > 0,
+    );
     return { ok: true, action: 'front', stories: result?.result || [], deviceId };
   });
 
@@ -2032,10 +2073,12 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findHNDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Hacker News tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://news.ycombinator.com/newest"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '.athing', 2000);
+    await navigateIfNeeded(gatewayUrl, deviceId, 'https://news.ycombinator.com/newest', '.athing');
 
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.hnStories });
+    const result = await extractWithRetries<any[]>(
+      gatewayUrl, deviceId, EXTRACTORS.hnStories,
+      (stories) => Array.isArray(stories) && stories.length > 0,
+    );
     return { ok: true, action: 'new', stories: result?.result || [], deviceId };
   });
 
@@ -2046,8 +2089,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findHNDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Hacker News tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://news.ycombinator.com/item?id=${id}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '.comtr, .comment-tree', 2000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://news.ycombinator.com/item?id=${id}`, '.comtr, .comment-tree');
 
     const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.hnComments });
     return { ok: true, action: 'comments', data: result?.result || {}, deviceId };
@@ -2058,10 +2100,12 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findHNDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Hacker News tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://news.ycombinator.com/ask"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '.athing', 2000);
+    await navigateIfNeeded(gatewayUrl, deviceId, 'https://news.ycombinator.com/ask', '.athing');
 
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.hnStories });
+    const result = await extractWithRetries<any[]>(
+      gatewayUrl, deviceId, EXTRACTORS.hnStories,
+      (stories) => Array.isArray(stories) && stories.length > 0,
+    );
     return { ok: true, action: 'ask', stories: result?.result || [], deviceId };
   });
 
@@ -2070,10 +2114,12 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findHNDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Hacker News tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://news.ycombinator.com/show"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '.athing', 2000);
+    await navigateIfNeeded(gatewayUrl, deviceId, 'https://news.ycombinator.com/show', '.athing');
 
-    const result = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.hnStories });
+    const result = await extractWithRetries<any[]>(
+      gatewayUrl, deviceId, EXTRACTORS.hnStories,
+      (stories) => Array.isArray(stories) && stories.length > 0,
+    );
     return { ok: true, action: 'show', stories: result?.result || [], deviceId };
   });
 
@@ -2272,8 +2318,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No YouTube tab open' });
 
     const encoded = encodeURIComponent(String(query));
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://www.youtube.com/results?search_query=${encoded}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, 'ytd-video-renderer, ytd-rich-item-renderer', 3000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://www.youtube.com/results?search_query=${encoded}`, 'ytd-video-renderer, ytd-rich-item-renderer');
 
     const result = await extractWithRetries<any[]>(
       gatewayUrl, deviceId, EXTRACTORS.youtubeSearch,
@@ -2287,9 +2332,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findYouTubeDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No YouTube tab open' });
 
-    // /feed/trending redirects to home in some regions; /feed/explore is the reliable alternative
-    await deviceOp(gatewayUrl, deviceId, 'navigate', { url: 'https://www.youtube.com/feed/explore' });
-    await waitForPageLoad(gatewayUrl, deviceId, 'yt-lockup-view-model, ytd-video-renderer, ytd-rich-item-renderer', 5000, 12_000);
+    await navigateIfNeeded(gatewayUrl, deviceId, 'https://www.youtube.com/feed/explore', 'yt-lockup-view-model, ytd-video-renderer, ytd-rich-item-renderer', 5000, 12_000);
 
     const result = await extractWithRetries<any[]>(
       gatewayUrl, deviceId, EXTRACTORS.youtubeSearch,
@@ -2305,8 +2348,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findYouTubeDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No YouTube tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://www.youtube.com/watch?v=${id}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '#title h1, h1.ytd-watch-metadata, #info-strings', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://www.youtube.com/watch?v=${id}`, '#title h1, h1.ytd-watch-metadata, #info-strings');
 
     const result = await extractWithRetries<Record<string, unknown>>(
       gatewayUrl, deviceId, EXTRACTORS.youtubeVideo,
@@ -2484,8 +2526,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findRedditDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Reddit tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://www.reddit.com/"` });
-    await waitForPageLoad(gatewayUrl, deviceId, 'shreddit-post, [data-testid="post-container"], article', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, 'https://www.reddit.com/', 'shreddit-post, [data-testid="post-container"], article');
 
     const result = await extractWithRetries<any[]>(
       gatewayUrl, deviceId, EXTRACTORS.redditFeed,
@@ -2502,8 +2543,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Reddit tab open' });
 
     const sub = String(name).replace(/^r\//, '');
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://www.reddit.com/r/${sub}/"` });
-    await waitForPageLoad(gatewayUrl, deviceId, 'shreddit-post, [data-testid="post-container"], article', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://www.reddit.com/r/${sub}/`, 'shreddit-post, [data-testid="post-container"], article');
 
     const result = await extractWithRetries<any[]>(
       gatewayUrl, deviceId, EXTRACTORS.redditFeed,
@@ -2519,8 +2559,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findRedditDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Reddit tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "${String(url)}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, 'shreddit-post, [data-testid="post-container"], shreddit-comment', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, String(url), 'shreddit-post, [data-testid="post-container"], shreddit-comment');
 
     const result = await extractWithRetries<Record<string, unknown>>(
       gatewayUrl, deviceId, EXTRACTORS.redditPost,
@@ -2546,8 +2585,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
 
     const encoded = encodeURIComponent(String(query));
     const searchType = String(type).toLowerCase();
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://github.com/search?q=${encoded}&type=${searchType}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '.repo-list-item, [data-testid="results-list"], .search-title', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://github.com/search?q=${encoded}&type=${searchType}`, '.repo-list-item, [data-testid="results-list"], .search-title');
 
     const result = await extractWithRetries<any[]>(
       gatewayUrl, deviceId, EXTRACTORS.githubSearch,
@@ -2563,8 +2601,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findGitHubDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No GitHub tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://github.com/${owner}/${name}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, '[itemprop="name"], .AppHeader-context-item-label, #readme', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://github.com/${owner}/${name}`, '[itemprop="name"], .AppHeader-context-item-label, #readme');
 
     const result = await extractWithRetries<Record<string, unknown>>(
       gatewayUrl, deviceId, EXTRACTORS.githubRepo,
@@ -2580,8 +2617,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No GitHub tab open' });
 
     const langPath = language ? `/${encodeURIComponent(String(language).toLowerCase())}` : '';
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `window.location.href = "https://github.com/trending${langPath}"` });
-    await waitForPageLoad(gatewayUrl, deviceId, 'article.Box-row, .Box-row', 4000);
+    await navigateIfNeeded(gatewayUrl, deviceId, `https://github.com/trending${langPath}`, 'article.Box-row, .Box-row');
 
     const result = await extractWithRetries<any[]>(
       gatewayUrl, deviceId, EXTRACTORS.githubTrending,
