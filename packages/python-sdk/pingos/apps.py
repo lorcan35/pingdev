@@ -134,6 +134,112 @@ def _execute_browser_op(step_tab, op, resolved):
         return step_tab.screenshot()
     elif op == 'eval':
         return step_tab.eval(resolved['expression'])
+    elif op == 'fill':
+        return step_tab.fill(resolved['fields'])
+    elif op == 'wait_for':
+        return step_tab.wait_for(
+            resolved['condition'],
+            selector=resolved.get('selector'),
+            text=resolved.get('text'),
+            timeout=resolved.get('timeout'),
+        )
+    elif op == 'table':
+        return step_tab.table(
+            selector=resolved.get('selector'),
+            index=resolved.get('index'),
+        )
+    elif op == 'dialog':
+        return step_tab.dialog(
+            action=resolved.get('action', 'detect'),
+            text=resolved.get('text'),
+        )
+    elif op == 'paginate':
+        return step_tab.paginate(
+            action=resolved.get('action', 'detect'),
+            page=resolved.get('page'),
+        )
+    elif op == 'select_option':
+        return step_tab.select_option(
+            resolved['selector'],
+            value=resolved.get('value'),
+            text=resolved.get('text'),
+            search=resolved.get('search'),
+            values=resolved.get('values'),
+        )
+    elif op == 'smart_navigate':
+        return step_tab.smart_navigate(resolved['to'])
+    elif op == 'hover':
+        return step_tab.hover(
+            resolved['selector'],
+            duration_ms=resolved.get('duration_ms', 500),
+        )
+    elif op == 'assert_page':
+        return step_tab.assert_page(resolved['assertions'])
+    elif op == 'network':
+        return step_tab.network(
+            resolved['action'],
+            filter=resolved.get('filter'),
+        )
+    elif op == 'storage':
+        return step_tab.storage(
+            resolved['action'],
+            resolved['store'],
+            key=resolved.get('key'),
+            value=resolved.get('value'),
+        )
+    elif op == 'capture':
+        return step_tab.capture(format=resolved.get('format', 'dom'))
+    elif op == 'upload':
+        return step_tab.upload(resolved['selector'], resolved['file_path'])
+    elif op == 'download':
+        return step_tab.download(
+            url=resolved.get('url'),
+            selector=resolved.get('selector'),
+            save_path=resolved.get('save_path'),
+        )
+    elif op == 'annotate':
+        return step_tab.annotate(resolved['annotations'])
+    elif op == 'discover':
+        return step_tab.discover()
+    elif op == 'suggest':
+        return step_tab.suggest(
+            resolved['question'],
+            context=resolved.get('context'),
+        )
+    elif op == 'query':
+        return step_tab.query(resolved['question'])
+    elif op == 'watch':
+        return step_tab.watch(
+            resolved['selector'],
+            fields=resolved.get('fields'),
+            interval=resolved.get('interval', 5000),
+        )
+    elif op == 'diff':
+        return step_tab.diff(resolved['schema'])
+    elif op == 'extract_semantic':
+        return step_tab.extract_semantic(
+            resolved['query'],
+            limit=resolved.get('limit'),
+        )
+    elif op == 'learn_template':
+        return step_tab.learn_template(resolved['schema'])
+    elif op == 'record_start':
+        return step_tab.record_start()
+    elif op == 'record_stop':
+        return step_tab.record_stop()
+    elif op == 'export_recording':
+        return step_tab.export_recording(name=resolved.get('name', 'recording'))
+    elif op == 'replay':
+        return step_tab.replay(
+            resolved['recording'],
+            speed=resolved.get('speed', 0),
+            timeout=resolved.get('timeout', 10000),
+        )
+    elif op == 'generate_pingapp':
+        return step_tab.generate_pingapp(
+            resolved['recording'],
+            name=resolved.get('name'),
+        )
     else:
         return {'error': f'Unknown op: {op}'}
 

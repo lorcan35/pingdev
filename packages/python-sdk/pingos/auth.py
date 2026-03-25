@@ -185,3 +185,67 @@ def load_credentials(app_name=None):
                 creds[key] = val
 
     return creds
+
+
+# ---------------------------------------------------------------------------
+# Universal Google OAuth flow
+# ---------------------------------------------------------------------------
+
+def google_auth(tab, email=None, timeout_s=30):
+    """Run Google OAuth sign-in on the current page.
+
+    Detects a "Sign in with Google" button, clicks it, handles the
+    Google account picker (choosing `email` if provided), handles
+    consent screens, and waits for the redirect back.
+
+    Args:
+        tab: Tab instance (must expose eval, click, type, act, wait)
+        email: preferred Google account email (optional)
+        timeout_s: max seconds to wait for the flow (default 30)
+
+    Returns:
+        dict with {ok, final_url, selected_email, detail, error}
+    """
+    import requests
+
+    gw = tab._gateway_url if hasattr(tab, '_gateway_url') else 'http://localhost:3500'
+    device_id = tab._device_id if hasattr(tab, '_device_id') else getattr(tab, 'device_id', None)
+
+    if not device_id:
+        return {'ok': False, 'error': 'Cannot determine device ID from tab'}
+
+    payload = {'deviceId': device_id}
+    if email:
+        payload['email'] = email
+    if timeout_s:
+        payload['timeoutMs'] = timeout_s * 1000
+
+    try:
+        resp = requests.post(f'{gw}/v1/auth/google', json=payload, timeout=timeout_s + 5)
+        return resp.json()
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+def check_google_auth(tab):
+    """Check if the current page is authenticated via Google.
+
+    Args:
+        tab: Tab instance
+
+    Returns:
+        dict with {authenticated, email, detail}
+    """
+    import requests
+
+    gw = tab._gateway_url if hasattr(tab, '_gateway_url') else 'http://localhost:3500'
+    device_id = tab._device_id if hasattr(tab, '_device_id') else getattr(tab, 'device_id', None)
+
+    if not device_id:
+        return {'authenticated': False, 'error': 'Cannot determine device ID'}
+
+    try:
+        resp = requests.post(f'{gw}/v1/auth/google/check', json={'deviceId': device_id}, timeout=10)
+        return resp.json()
+    except Exception as e:
+        return {'authenticated': False, 'error': str(e)}

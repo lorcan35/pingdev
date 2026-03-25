@@ -428,6 +428,122 @@ async function handleDeviceRequest(request: DeviceRequest) {
     }
   }
 
+  // Special handling for 'capture' with format pdf/mhtml/har — use CDP
+  if (command.type === 'capture' && (command as any).format && (command as any).format !== 'dom') {
+    const format = (command as any).format as string;
+    if (format === 'har') {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: 'HAR capture requires network recording first. Use the network op to start/stop recording, then export.',
+      });
+      return;
+    }
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      try {
+        if (format === 'pdf') {
+          const result = await chrome.debugger.sendCommand(
+            { tabId },
+            'Page.printToPDF',
+            { printBackground: true },
+          ) as Record<string, any>;
+          await chrome.debugger.detach({ tabId });
+          sendDeviceResponse(requestId, {
+            success: true,
+            data: {
+              format: 'pdf',
+              content: result.data,
+              timestamp: Date.now(),
+            },
+          });
+        } else if (format === 'mhtml') {
+          const result = await chrome.debugger.sendCommand(
+            { tabId },
+            'Page.captureSnapshot',
+            { format: 'mhtml' },
+          ) as Record<string, any>;
+          await chrome.debugger.detach({ tabId });
+          sendDeviceResponse(requestId, {
+            success: true,
+            data: {
+              format: 'mhtml',
+              content: result.data,
+              timestamp: Date.now(),
+            },
+          });
+        } else {
+          await chrome.debugger.detach({ tabId });
+          sendDeviceResponse(requestId, {
+            success: false,
+            error: `Unsupported capture format: ${format}`,
+          });
+        }
+        return;
+      } catch (debugErr) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        throw debugErr;
+      }
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : `${format} capture failed`,
+      });
+      return;
+    }
+  }
+
+  // Special handling for 'upload' — use CDP DOM.setFileInputFiles
+  if (command.type === 'upload') {
+    const selector = (command as any).selector as string;
+    const filePath = (command as any).filePath;
+    if (!selector || !filePath) {
+      sendDeviceResponse(requestId, { success: false, error: 'Missing selector or filePath' });
+      return;
+    }
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      try {
+        await chrome.debugger.sendCommand({ tabId }, 'DOM.enable', {});
+        const doc = await chrome.debugger.sendCommand(
+          { tabId },
+          'DOM.getDocument',
+          { depth: 0 },
+        ) as Record<string, any>;
+        const queryResult = await chrome.debugger.sendCommand(
+          { tabId },
+          'DOM.querySelector',
+          { nodeId: doc.root.nodeId, selector },
+        ) as Record<string, any>;
+        if (!queryResult.nodeId || queryResult.nodeId === 0) {
+          await chrome.debugger.detach({ tabId });
+          sendDeviceResponse(requestId, { success: false, error: `Element not found: ${selector}` });
+          return;
+        }
+        const filePaths = Array.isArray(filePath) ? filePath : [filePath];
+        await chrome.debugger.sendCommand(
+          { tabId },
+          'DOM.setFileInputFiles',
+          { nodeId: queryResult.nodeId, files: filePaths },
+        );
+        await chrome.debugger.detach({ tabId });
+        sendDeviceResponse(requestId, {
+          success: true,
+          data: { selector, files: filePaths, fileCount: filePaths.length },
+        });
+        return;
+      } catch (debugErr) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        throw debugErr;
+      }
+    } catch (err) {
+      sendDeviceResponse(requestId, {
+        success: false,
+        error: err instanceof Error ? err.message : 'CDP upload failed',
+      });
+      return;
+    }
+  }
+
   // Special handling for 'eval' — use chrome.debugger CDP to bypass CSP completely
   if (command.type === 'eval') {
     try {
@@ -769,6 +885,148 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // CDP capture — content script routes pdf/mhtml/har captures here
+  if (message.type === 'cdp_capture') {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ success: false, error: 'No tab ID' });
+      return true;
+    }
+    const format = message.format as string;
+    (async () => {
+      try {
+        if (format === 'har') {
+          sendResponse({
+            success: false,
+            error: 'HAR capture requires network recording first. Use the network op to start/stop recording, then export.',
+          });
+          return;
+        }
+        await chrome.debugger.attach({ tabId }, '1.3');
+        try {
+          if (format === 'pdf') {
+            const result = await chrome.debugger.sendCommand(
+              { tabId },
+              'Page.printToPDF',
+              { printBackground: true },
+            ) as Record<string, any>;
+            await chrome.debugger.detach({ tabId });
+            sendResponse({
+              success: true,
+              data: {
+                format: 'pdf',
+                content: result.data, // base64-encoded PDF
+                url: sender.tab?.url || '',
+                title: sender.tab?.title || '',
+                timestamp: Date.now(),
+              },
+            });
+          } else if (format === 'mhtml') {
+            const result = await chrome.debugger.sendCommand(
+              { tabId },
+              'Page.captureSnapshot',
+              { format: 'mhtml' },
+            ) as Record<string, any>;
+            await chrome.debugger.detach({ tabId });
+            sendResponse({
+              success: true,
+              data: {
+                format: 'mhtml',
+                content: result.data,
+                url: sender.tab?.url || '',
+                title: sender.tab?.title || '',
+                timestamp: Date.now(),
+              },
+            });
+          } else {
+            await chrome.debugger.detach({ tabId });
+            sendResponse({ success: false, error: `Unsupported capture format: ${format}` });
+          }
+        } catch (debugErr) {
+          await chrome.debugger.detach({ tabId }).catch(() => {});
+          throw debugErr;
+        }
+      } catch (err) {
+        sendResponse({
+          success: false,
+          error: err instanceof Error ? err.message : `${format} capture failed`,
+        });
+      }
+    })();
+    return true;
+  }
+
+  // CDP upload — content script routes file uploads here
+  if (message.type === 'cdp_upload') {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ success: false, error: 'No tab ID' });
+      return true;
+    }
+    const selector = message.selector as string;
+    const filePath = message.filePath as string;
+    if (!selector || !filePath) {
+      sendResponse({ success: false, error: 'Missing selector or filePath' });
+      return true;
+    }
+    (async () => {
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        try {
+          // Enable DOM domain
+          await chrome.debugger.sendCommand({ tabId }, 'DOM.enable', {});
+
+          // Get document root
+          const doc = await chrome.debugger.sendCommand(
+            { tabId },
+            'DOM.getDocument',
+            { depth: 0 },
+          ) as Record<string, any>;
+
+          // Find the file input node
+          const queryResult = await chrome.debugger.sendCommand(
+            { tabId },
+            'DOM.querySelector',
+            { nodeId: doc.root.nodeId, selector },
+          ) as Record<string, any>;
+
+          if (!queryResult.nodeId || queryResult.nodeId === 0) {
+            await chrome.debugger.detach({ tabId });
+            sendResponse({ success: false, error: `Element not found: ${selector}` });
+            return;
+          }
+
+          // Set the file(s) on the input
+          const filePaths = Array.isArray(filePath) ? filePath : [filePath];
+          await chrome.debugger.sendCommand(
+            { tabId },
+            'DOM.setFileInputFiles',
+            { nodeId: queryResult.nodeId, files: filePaths },
+          );
+
+          await chrome.debugger.detach({ tabId });
+          sendResponse({
+            success: true,
+            data: {
+              selector,
+              files: filePaths,
+              fileCount: filePaths.length,
+            },
+          });
+        } catch (debugErr) {
+          await chrome.debugger.detach({ tabId }).catch(() => {});
+          throw debugErr;
+        }
+      } catch (err) {
+        sendResponse({
+          success: false,
+          error: err instanceof Error ? err.message : 'CDP upload failed',
+        });
+      }
+    })();
+    return true;
+  }
+
   // CDP key dispatch — content scripts use this for trusted keyboard events
   // that canvas apps (Google Sheets) require (isTrusted: true).
   if (message.type === 'cdp_keys') {
@@ -882,15 +1140,52 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// MV3 Keepalive — chrome.alarms ensures the service worker wakes up
+// periodically to check the WebSocket connection and reconnect if needed.
+// Without this, Chrome kills the worker after ~30s of inactivity and all
+// setTimeout/setInterval-based reconnect timers die with it.
+// ---------------------------------------------------------------------------
+
+const KEEPALIVE_ALARM = 'pingos-keepalive';
+const KEEPALIVE_INTERVAL_MIN = 0.4; // ~25 seconds (minimum Chrome allows is 0.5 in prod, but dev mode accepts lower)
+
+function ensureKeepaliveAlarm() {
+  chrome.alarms.get(KEEPALIVE_ALARM, (existing) => {
+    if (!existing) {
+      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_INTERVAL_MIN });
+      console.log('[Background] Keepalive alarm created');
+    }
+  });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+
+  // Check WebSocket health and reconnect if needed
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    console.log('[Background] Keepalive: WebSocket dead, reconnecting');
+    connState = 'disconnected';
+    ws = null;
+    reconnectAttempt = 0; // Reset backoff since this is an alarm-driven wake
+    connect();
+  } else if (ws.readyState === WebSocket.OPEN) {
+    // Send a ping to keep the connection alive and verify gateway is responsive
+    safeSend({ type: 'ping', t: Date.now() });
+  }
+});
+
 // Initialize on startup
 console.log('[Background] Service worker started');
 
 chrome.runtime.onStartup?.addListener(() => {
+  ensureKeepaliveAlarm();
   void syncSharedTabsWithAllTabs({ inject: true, notify: true });
   connect();
 });
 
 chrome.runtime.onInstalled?.addListener(() => {
+  ensureKeepaliveAlarm();
   void syncSharedTabsWithAllTabs({ inject: true, notify: true });
   connect();
 });

@@ -30,20 +30,26 @@ async function startSSE(port: number): Promise<void> {
   const http = await import('node:http');
   const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
 
-  const server = new McpServer(
-    { name: 'pingos', version: '0.2.0' },
-    {
-      capabilities: {
-        tools: {},
-        resources: {},
+  // Map of sessionId -> { server, transport } to support multiple concurrent SSE clients
+  const sessions = new Map<string, {
+    server: McpServer;
+    transport: InstanceType<typeof SSEServerTransport>;
+  }>();
+
+  function createServer(): McpServer {
+    const server = new McpServer(
+      { name: 'pingos', version: '0.2.0' },
+      {
+        capabilities: {
+          tools: {},
+          resources: {},
+        },
       },
-    },
-  );
-
-  registerTools(server);
-  registerResources(server);
-
-  let transport: InstanceType<typeof SSEServerTransport> | null = null;
+    );
+    registerTools(server);
+    registerResources(server);
+    return server;
+  }
 
   const httpServer = http.createServer(async (req, res) => {
     // CORS headers for web clients
@@ -60,20 +66,33 @@ async function startSSE(port: number): Promise<void> {
     const url = new URL(req.url || '/', `http://localhost:${port}`);
 
     if (url.pathname === '/sse' && req.method === 'GET') {
-      // SSE connection endpoint
-      transport = new SSEServerTransport('/messages', res);
+      // Create a new MCP server + transport per SSE client
+      const transport = new SSEServerTransport('/messages', res);
+      const server = createServer();
+      const sessionId = transport.sessionId;
+      sessions.set(sessionId, { server, transport });
+
+      // Clean up session when the client disconnects
+      res.on('close', () => {
+        sessions.delete(sessionId);
+        process.stderr.write(`[pingos-mcp] SSE client disconnected: ${sessionId}\n`);
+      });
+
       await server.connect(transport);
+      process.stderr.write(`[pingos-mcp] SSE client connected: ${sessionId} (${sessions.size} active)\n`);
       return;
     }
 
     if (url.pathname === '/messages' && req.method === 'POST') {
-      if (!transport) {
+      const sessionId = url.searchParams.get('sessionId');
+      if (!sessionId || !sessions.has(sessionId)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'No SSE connection established. GET /sse first.' }));
+        res.end(JSON.stringify({ error: 'Invalid or missing sessionId. GET /sse first to establish a session.' }));
         return;
       }
+      const session = sessions.get(sessionId)!;
       try {
-        await transport.handlePostMessage(req, res);
+        await session.transport.handlePostMessage(req, res);
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `MCP message handling failed: ${String(err)}` }));
@@ -84,7 +103,7 @@ async function startSSE(port: number): Promise<void> {
     // Health check
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', transport: 'sse', port }));
+      res.end(JSON.stringify({ status: 'ok', transport: 'sse', port, activeSessions: sessions.size }));
       return;
     }
 

@@ -9,7 +9,7 @@ PINGOS_LOCAL_MODE=true \
 PINGOS_LLM_BASE_URL=http://localhost:1234/v1 \
 PINGOS_LLM_MODEL=nvidia/nemotron-3-nano \
 PINGOS_LLM_API_KEY=local \
-pingos up
+pingdev up
 ```
 
 ## Setup

@@ -9,9 +9,9 @@ Different paths for different developers. Pick the one that fits your workflow.
 Start PingOS and interact via curl.
 
 ```bash
-npx pingos up                    # start gateway + Chrome
-npx pingos status                # check what's connected
-npx pingos demo                  # run a quick extract demo
+npx pingdev up                    # start gateway + Chrome
+npx pingdev status                # check what's connected
+npx pingdev demo                  # run a quick extract demo
 
 curl http://localhost:3500/v1/devices | jq '.devices[].id'
 curl -X POST http://localhost:3500/v1/dev/chrome-{tabId}/extract \
@@ -91,7 +91,7 @@ The dashboard shows:
 - Try Extract — test extractions from the UI
 - Active watches and recordings
 
-Start the gateway first (`npx pingos up`), then open the dashboard URL.
+Start the gateway first (`npx pingdev up`), then open the dashboard URL.
 
 ---
 

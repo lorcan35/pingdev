@@ -5,20 +5,20 @@ PingOS turns any website into an API. No scraping code, no maintenance, just dat
 In this 5-minute guide, we will connect PingOS, extract data from a live webpage, and generate your first API wrapper.
 
 ## Prerequisites
-- Node.js 18+
+- Node.js 20+
 - Google Chrome
 
 ## Step 1: Install & Start
 
 1. **Install PingOS** (Assuming you are in the project folder):
    ```bash
-   pnpm install
-   pnpm build
+   npm install
+   npm run build
    ```
 
 2. **Start the Gateway**:
    ```bash
-   pingos up
+   pingdev up
    ```
    *This starts the PingOS Gateway on \`localhost:3500\` and launches a managed Chrome browser with the PingOS extension loaded.*
 
@@ -36,7 +36,7 @@ PingOS works by bridging a real browser tab into your terminal/API.
 Now that the tab is connected, let PingOS analyze and extract data from it automatically. Open a new terminal and run:
 
 ```bash
-pingos demo
+pingdev demo
 ```
 
 PingOS will automatically:
@@ -50,7 +50,7 @@ PingOS will automatically:
 Want to make a dedicated API for this site? Use the Smart App Wizard:
 
 ```bash
-pingos init
+pingdev init
 ```
 
 The wizard will guide you through:
@@ -60,7 +60,7 @@ The wizard will guide you through:
 
 You can then serve it as a persistent local API:
 ```bash
-pingos serve ./pingapp
+pingdev serve ./pingapp
 ```
 
 Now you have a local API for Hacker News running instantly!

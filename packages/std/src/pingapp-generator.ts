@@ -88,7 +88,7 @@ Rules:
 - selectors must include REAL CSS selectors from the page context.
 - actions must be concrete and executable (op + selector/value).
 - schemas must include at least one extraction schema with non-empty fields.
-- Return JSON only with keys: name,url,description,selectors,actions,schemas
+- Return JSON only with keys: name,url,description,selectors,actions,schemas,selectorMap,auth
 
 Good example:
 {
@@ -116,7 +116,16 @@ Good example:
         "url": "ul.repo-list li h3 a[href]"
       }
     }
-  ]
+  ],
+  "selectorMap": {
+    "title": "ul.repo-list li h3 a",
+    "description": "ul.repo-list li p.mb-1"
+  },
+  "auth": {
+    "type": "element-check",
+    "check": { "selector": "" },
+    "google": { "enabled": false }
+  }
 }
 
 Now generate for this target.
@@ -207,6 +216,36 @@ function normalizeAppSpec(
   if (!Array.isArray(app.actions)) app.actions = [];
   if (!app.selectors || typeof app.selectors !== 'object') app.selectors = {};
 
+  // Auto-generate selectorMap for self-heal if not already present
+  if (!app.selectorMap || isEmptyObject(app.selectorMap)) {
+    const selectorMap: Record<string, string> = {};
+    // From schemas fields
+    const schemas = Array.isArray(app.schemas) ? app.schemas : [];
+    for (const schema of schemas) {
+      const fields = (schema as Record<string, unknown>).fields;
+      if (fields && typeof fields === 'object') {
+        for (const [k, v] of Object.entries(fields as Record<string, unknown>)) {
+          if (typeof v === 'string' && v.trim()) selectorMap[k] = v;
+        }
+      }
+    }
+    // From selectors object
+    const selectors = app.selectors as Record<string, unknown>;
+    for (const [k, v] of Object.entries(selectors)) {
+      if (typeof v === 'string' && v.trim() && !selectorMap[k]) selectorMap[k] = v;
+    }
+    if (Object.keys(selectorMap).length > 0) app.selectorMap = selectorMap;
+  }
+
+  // Auto-generate auth scaffold
+  if (!app.auth) {
+    app.auth = {
+      type: 'element-check',
+      check: { selector: '' },
+      google: { enabled: false, preferredEmail: '{{env.GOOGLE_EMAIL}}' },
+    };
+  }
+
   return app;
 }
 
@@ -230,12 +269,35 @@ export class PingAppGenerator {
 
   /**
    * Serialize a generated PingApp to a flat file map (path → content).
+   * Includes self-heal SELECTOR_MAP and auth scaffolding so new apps
+   * inherit the full PingOS infrastructure out of the box.
    */
   serialize(app: GeneratedPingApp): Record<string, string> {
+    // Build a SELECTOR_MAP from the collected selectors for self-heal integration
+    const selectorMap: Record<string, string> = {};
+    for (const [key, entry] of Object.entries(app.selectors)) {
+      const allSels = [entry.primary, ...entry.fallbacks].filter(Boolean);
+      selectorMap[key] = allSels.join(', ');
+    }
+
+    // Auth config scaffold — sites can override with their specific auth strategy
+    const authConfig = {
+      type: 'element-check',
+      check: { selector: '' },
+      login: { url: '', steps: [] },
+      google: {
+        enabled: false,
+        preferredEmail: '{{env.GOOGLE_EMAIL}}',
+      },
+      _comment: 'Set google.enabled=true to use universal Google OAuth. Fill check.selector with a CSS selector that is visible when NOT logged in.',
+    };
+
     return {
       'manifest.json': JSON.stringify(app.manifest, null, 2),
       [`workflows/${app.workflow.name}.json`]: JSON.stringify(app.workflow, null, 2),
       'selectors.json': JSON.stringify(app.selectors, null, 2),
+      'selector-map.json': JSON.stringify(selectorMap, null, 2),
+      'auth.json': JSON.stringify(authConfig, null, 2),
       [`tests/test_${app.manifest.name}.json`]: JSON.stringify(app.test, null, 2),
     };
   }

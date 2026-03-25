@@ -3,6 +3,17 @@ import { HomePage } from './pages/Home';
 import { AppDetailPage } from './pages/AppDetail';
 import { ReconPage } from './pages/Recon';
 import { LogsPage } from './pages/Logs';
+import { DevicesPage } from './pages/Devices';
+import { ExtractionStudioPage } from './pages/ExtractionStudio';
+import { PingAppsPage } from './pages/PingApps';
+import { PingAppDetailPage } from './pages/PingAppDetail';
+import { AutomationPage } from './pages/Automation';
+import { WatchTowerPage } from './pages/WatchTower';
+import { AuthCenterPage } from './pages/AuthCenter';
+import { SelfHealConsolePage } from './pages/SelfHealConsole';
+import { LLMHub } from './pages/LLMHub';
+import { FunctionsAPI } from './pages/FunctionsAPI';
+import { DevTools } from './pages/DevTools';
 import { CommandBar } from './components/CommandBar';
 import { ActivityProvider } from './components/Activity';
 import { ToastProvider } from './components/Toasts';
@@ -20,6 +31,48 @@ function LogoMark() {
   );
 }
 
+interface NavItem {
+  to: string;
+  label: string;
+  end?: boolean;
+}
+
+const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
+  {
+    title: 'Core',
+    items: [
+      { to: '/', label: 'Dashboard', end: true },
+      { to: '/devices', label: 'Devices' },
+      { to: '/extract', label: 'Extraction' },
+      { to: '/apps', label: 'PingApps' },
+    ],
+  },
+  {
+    title: 'Automation',
+    items: [
+      { to: '/automation', label: 'Workflows' },
+      { to: '/watches', label: 'Watch Tower' },
+      { to: '/recon', label: 'Recon' },
+    ],
+  },
+  {
+    title: 'Intelligence',
+    items: [
+      { to: '/llm', label: 'LLM Hub' },
+      { to: '/heal', label: 'Self-Heal' },
+      { to: '/auth', label: 'Auth Center' },
+    ],
+  },
+  {
+    title: 'Developer',
+    items: [
+      { to: '/functions', label: 'Functions' },
+      { to: '/devtools', label: 'Dev Tools' },
+      { to: '/logs', label: 'Logs' },
+    ],
+  },
+];
+
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="shell">
@@ -34,9 +87,23 @@ function Shell({ children }: { children: React.ReactNode }) {
         </NavLink>
 
         <nav className="nav">
-          <NavLink to="/" end className={({ isActive }) => `navlink ${isActive ? 'active' : ''}`}>Apps</NavLink>
-          <NavLink to="/recon" className={({ isActive }) => `navlink ${isActive ? 'active' : ''}`}>Recon</NavLink>
-          <NavLink to="/logs" className={({ isActive }) => `navlink ${isActive ? 'active' : ''}`}>Logs</NavLink>
+          {NAV_SECTIONS.map((section) => (
+            <div key={section.title}>
+              <div className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-widest text-dim">
+                {section.title}
+              </div>
+              {section.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.end}
+                  className={({ isActive }) => `navlink ${isActive ? 'active' : ''}`}
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
+          ))}
         </nav>
 
         <div className="side-foot">
@@ -50,8 +117,8 @@ function Shell({ children }: { children: React.ReactNode }) {
       <div className="main">
         <header className="top">
           <div className="top-left">
-            <div className="top-title">Dashboard</div>
-            <div className="top-sub">Local-first agents, observable in real time.</div>
+            <div className="top-title">PingOS</div>
+            <div className="top-sub">200+ ops. 14 PingApps. Your browser, now an API.</div>
           </div>
           <div className="top-right">
             <CommandBar />
@@ -71,10 +138,30 @@ export function App() {
         <ActivityProvider>
           <Shell>
             <Routes>
+              {/* Core */}
               <Route path="/" element={<HomePage />} />
-              <Route path="/app/:port" element={<AppDetailPage />} />
+              <Route path="/devices" element={<DevicesPage />} />
+              <Route path="/extract" element={<ExtractionStudioPage />} />
+              <Route path="/apps" element={<PingAppsPage />} />
+              <Route path="/apps/:appName" element={<PingAppDetailPage />} />
+
+              {/* Automation */}
+              <Route path="/automation" element={<AutomationPage />} />
+              <Route path="/watches" element={<WatchTowerPage />} />
               <Route path="/recon" element={<ReconPage />} />
+
+              {/* Intelligence */}
+              <Route path="/llm" element={<LLMHub />} />
+              <Route path="/heal" element={<SelfHealConsolePage />} />
+              <Route path="/auth" element={<AuthCenterPage />} />
+
+              {/* Developer */}
+              <Route path="/functions" element={<FunctionsAPI />} />
+              <Route path="/devtools" element={<DevTools />} />
               <Route path="/logs" element={<LogsPage />} />
+
+              {/* Legacy */}
+              <Route path="/app/:port" element={<AppDetailPage />} />
             </Routes>
           </Shell>
         </ActivityProvider>

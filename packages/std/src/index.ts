@@ -70,6 +70,10 @@ export {
 } from './self-heal.js';
 export type { HealRequest, HealResult, SelfHealConfig } from './self-heal.js';
 
+// Google OAuth auth flow
+export { googleAuth, checkGoogleAuth } from './google-auth.js';
+export type { GoogleAuthOpts, GoogleAuthResult } from './google-auth.js';
+
 // Workflow engine: conditional logic, error recovery
 export { WorkflowEngine, resolveTemplate, resolveValue, evaluateCondition } from './workflow-engine.js';
 export type {
