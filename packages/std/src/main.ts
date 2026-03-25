@@ -95,7 +95,7 @@ if (config.llm?.ollama) {
         llm: true, streaming: true, vision: false, toolCalling: false,
         imageGen: false, search: false, deepResearch: false, thinking: false,
       },
-      priority: 10,
+      priority: 1,  // Local-first: Ollama always preferred over cloud
     }),
   );
   logGateway('[main] registered ollama driver');
