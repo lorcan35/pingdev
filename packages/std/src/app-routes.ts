@@ -2631,15 +2631,16 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
   // ═══════════════════════════════════════════════════════════════════════
 
   // POST /v1/auth/google — trigger Google sign-in flow on any page
-  // Body: { deviceId, email?, timeoutMs? }
+  // Body: { deviceId, email?, password?, timeoutMs? }
   app.post('/v1/auth/google', async (req, reply) => {
-    const { deviceId, email, timeoutMs } = req.body as any;
+    const { deviceId, email, password, timeoutMs } = req.body as any;
     if (!deviceId) return reply.code(400).send({ ok: false, error: 'deviceId required' });
 
     const result = await googleAuth({
       gateway: gatewayUrl,
       deviceId,
       email: email || undefined,
+      password: password || undefined,
       timeoutMs: timeoutMs || 30_000,
     });
 
@@ -2657,10 +2658,10 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
   });
 
   // POST /v1/auth/google/auto — auto-find a device on a site that needs Google auth and run the flow
-  // Body: { domain, email?, timeoutMs? }
+  // Body: { domain, email?, password?, timeoutMs? }
   // Finds the first tab matching `domain`, checks auth, and runs Google sign-in if needed.
   app.post('/v1/auth/google/auto', async (req, reply) => {
-    const { domain, email, timeoutMs } = req.body as any;
+    const { domain, email, password, timeoutMs } = req.body as any;
     if (!domain) return reply.code(400).send({ ok: false, error: 'domain required (e.g. "notion.so")' });
 
     const deviceId = await findDeviceByDomain(gatewayUrl, domain);
@@ -2677,6 +2678,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
       gateway: gatewayUrl,
       deviceId,
       email: email || undefined,
+      password: password || undefined,
       timeoutMs: timeoutMs || 30_000,
     });
 

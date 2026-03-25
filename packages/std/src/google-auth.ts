@@ -22,6 +22,8 @@ export interface GoogleAuthOpts {
   deviceId: string;
   /** Preferred Google account email — used to pick the right account in the chooser */
   email?: string;
+  /** Google account password — needed when not already signed in to Google */
+  password?: string;
   /** Max time (ms) to wait for the entire flow (default 30 s) */
   timeoutMs?: number;
 }
@@ -77,41 +79,66 @@ async function currentUrl(gateway: string, deviceId: string): Promise<string> {
 // Google Sign-In button detection
 // ---------------------------------------------------------------------------
 
+/**
+ * Dispatch a real mouse click on an element — some sites (like Claude) ignore
+ * synthetic .click() calls but respond to proper MouseEvent sequences.
+ */
+const REAL_CLICK_HELPER = `
+function realClick(el) {
+  const rect = el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+  el.dispatchEvent(new PointerEvent('pointerdown', opts));
+  el.dispatchEvent(new MouseEvent('mousedown', opts));
+  el.dispatchEvent(new PointerEvent('pointerup', opts));
+  el.dispatchEvent(new MouseEvent('mouseup', opts));
+  el.dispatchEvent(new MouseEvent('click', opts));
+}`;
+
 /** JS expression that finds and clicks a Google sign-in button on any page. */
 const FIND_AND_CLICK_GOOGLE_SIGNIN = `(() => {
-  // Strategy 1: buttons/links with explicit Google OAuth data attributes
+  ${REAL_CLICK_HELPER}
+
+  // Strategy 1: data-testid (Claude, many modern apps)
+  const testIdBtn = document.querySelector(
+    '[data-testid*="google" i], [data-testid*="login-with-google" i]'
+  );
+  if (testIdBtn) { realClick(testIdBtn); return { clicked: true, strategy: 'data-testid' }; }
+
+  // Strategy 2: buttons/links with explicit Google OAuth data attributes
   const dataBtn = document.querySelector(
     '[data-provider="google"], [data-social="google"], [data-action*="google"], ' +
     'button[class*="google" i], a[class*="google" i], ' +
     '[id*="google-signin" i], [id*="google-login" i], [id*="google-auth" i]'
   );
-  if (dataBtn) { dataBtn.click(); return { clicked: true, strategy: 'data-attr' }; }
+  if (dataBtn) { realClick(dataBtn); return { clicked: true, strategy: 'data-attr' }; }
 
-  // Strategy 2: buttons/links containing a Google logo image
+  // Strategy 3: buttons/links containing a Google logo image
   const googleImgs = document.querySelectorAll('img[src*="google"], img[alt*="Google" i], svg[aria-label*="Google" i]');
   for (const img of googleImgs) {
     const parent = img.closest('button, a, [role="button"]');
-    if (parent) { parent.click(); return { clicked: true, strategy: 'img-parent' }; }
+    if (parent) { realClick(parent); return { clicked: true, strategy: 'img-parent' }; }
   }
 
-  // Strategy 3: text-based — "Sign in with Google", "Continue with Google", "Log in with Google"
+  // Strategy 4: text-based — "Sign in with Google", "Continue with Google", "Log in with Google"
   const textCandidates = document.querySelectorAll('button, a, [role="button"], div[tabindex]');
   for (const el of textCandidates) {
     const t = (el.textContent || '').trim();
     if (/\\b(sign|log|continue|connect)\\s+(in|up|on)?\\s*(with)?\\s*google\\b/i.test(t)) {
-      el.click();
+      realClick(el);
       return { clicked: true, strategy: 'text-match', text: t.substring(0, 60) };
     }
   }
 
-  // Strategy 4: Google's own GSI button (rendered in iframe or custom element)
+  // Strategy 5: Google's own GSI button (rendered in iframe or custom element)
   const gsiBtn = document.querySelector(
     '#credential_picker_container iframe, .g_id_signin, [data-login_uri], ' +
     'div[id="g_id_onload"], .google-sign-in-button'
   );
   if (gsiBtn) {
     const clickable = gsiBtn.closest('[role="button"]') || gsiBtn.querySelector('[role="button"]') || gsiBtn;
-    clickable.click();
+    realClick(clickable);
     return { clicked: true, strategy: 'gsi-widget' };
   }
 
@@ -236,7 +263,7 @@ const HANDLE_CONSENT = `(() => {
 // ---------------------------------------------------------------------------
 
 export async function googleAuth(opts: GoogleAuthOpts): Promise<GoogleAuthResult> {
-  const { gateway, deviceId, email, timeoutMs = 30_000 } = opts;
+  const { gateway, deviceId, email, password, timeoutMs = 30_000 } = opts;
   const deadline = Date.now() + timeoutMs;
   const steps: string[] = [];
 
@@ -318,6 +345,52 @@ export async function googleAuth(opts: GoogleAuthOpts): Promise<GoogleAuthResult
             continue;
           } catch {
             // Fall through to consent handling
+          }
+        }
+
+        // Password entry page — Google shows input[type="password"] after email
+        if (password) {
+          const hasPasswordField = await devOp(gateway, deviceId, 'eval', {
+            expression: `(() => {
+              const pw = document.querySelector('input[type="password"]');
+              if (pw && pw.offsetParent !== null) return { visible: true };
+              return { visible: false };
+            })()`,
+          });
+          const pwData = hasPasswordField?.result ?? hasPasswordField;
+          if (pwData?.visible) {
+            try {
+              // Focus and fill the password field
+              await devOp(gateway, deviceId, 'eval', {
+                expression: `(() => {
+                  const pw = document.querySelector('input[type="password"]');
+                  if (pw) {
+                    pw.focus();
+                    pw.value = '';
+                    const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    nativeSet.call(pw, ${JSON.stringify(password)});
+                    pw.dispatchEvent(new Event('input', { bubbles: true }));
+                    pw.dispatchEvent(new Event('change', { bubbles: true }));
+                    return { filled: true };
+                  }
+                  return { filled: false };
+                })()`,
+              });
+              await sleep(500);
+              // Click the "Next" button on the password page
+              await devOp(gateway, deviceId, 'eval', {
+                expression: `(() => {
+                  const next = document.querySelector('#passwordNext button, #passwordNext, button[jsname="LgbsSe"]');
+                  if (next) { next.click(); return { clicked: true }; }
+                  return { clicked: false };
+                })()`,
+              });
+              steps.push('typed-password');
+              await sleep(3000);
+              continue;
+            } catch {
+              steps.push('password-entry-failed');
+            }
           }
         }
 
