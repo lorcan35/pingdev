@@ -9,12 +9,18 @@ export default defineConfig({
             '^/api/\\d+': {
                 target: 'http://localhost:3456',
                 changeOrigin: true,
-                router: (req) => {
-                    const url = req.url ?? '';
-                    const m = url.match(/^\/api\/(\d+)/);
-                    return m ? `http://localhost:${m[1]}` : 'http://localhost:3456';
+                router: function (req) {
+                    var _a;
+                    var url = (_a = req.url) !== null && _a !== void 0 ? _a : '';
+                    var m = url.match(/^\/api\/(\d+)/);
+                    return m ? "http://localhost:".concat(m[1]) : 'http://localhost:3456';
                 },
-                rewrite: (path) => path.replace(/^\/api\/\d+/, ''),
+                rewrite: function (path) { return path.replace(/^\/api\/\d+/, ''); },
+            },
+            '/gw': {
+                target: 'http://localhost:3500',
+                changeOrigin: true,
+                rewrite: function (path) { return path.replace(/^\/gw/, ''); },
             },
         },
     },
@@ -22,4 +28,3 @@ export default defineConfig({
         outDir: 'dist',
     },
 });
-//# sourceMappingURL=vite.config.js.map

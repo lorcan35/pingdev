@@ -122,8 +122,8 @@ Sources: `pingapp-generator.ts`, recording routes in `gateway.ts`
 - `src/scoring/*`: selector/action confidence and health reporting.
 
 ## CLI command surface (`packages/cli/src/index.ts`)
-- Lifecycle: `pingos up|down|status|doctor|demo`
-- App bootstrap: `pingos init`, `pingos app list|install`
+- Lifecycle: `pingdev up|down|status|doctor|demo`
+- App bootstrap: `pingdev init`, `pingdev app list|install`
 - Device ops wrappers: `click|type|read|extract|fill|wait|table|dialog|paginate|select-option|navigate|hover|assert|network|storage|capture|upload|download|annotate|scroll|press|dblclick|select|clean|recon|observe|eval`
 - Higher-level: `query`, `watch`, `diff`, `discover`, `record`, `functions`, `call`, `pipe`, `templates`
 

@@ -280,34 +280,64 @@ async function runHealCommand(argv: string[]) {
 }
 
 async function runServeCommand(argv: string[]) {
-  const appDir = argv.find((a) => !a.startsWith('--'));
-  if (!appDir) {
-    console.error('Usage: pingdev serve <app-dir> [options]');
-    console.error('');
-    console.error('Options:');
-    console.error('  --self-heal  Enable runtime self-healing');
+  const flags = parseFlags(argv);
+  const { spawn } = await import('node:child_process');
+  const { existsSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { resolve, join } = await import('node:path');
+  const { homedir } = await import('node:os');
+
+  const pingosDir = join(homedir(), '.pingos');
+  if (!existsSync(pingosDir)) mkdirSync(pingosDir, { recursive: true });
+
+  const gatewayScript = resolve(__dirname, '../../std/dist/main.js');
+  if (!existsSync(gatewayScript)) {
+    console.error('[serve] Gateway not found at', gatewayScript);
+    console.error('    Run: pnpm build');
     process.exit(1);
   }
 
-  const flags = parseFlags(argv);
-  const { resolve } = await import('node:path');
-  const resolvedDir = resolve(appDir);
+  const port = typeof flags['port'] === 'string' ? flags['port'] : '3500';
 
-  const { PingAppLoader } = require('@pingdev/core') as typeof import('@pingdev/core');
+  console.log(`[serve] Starting PingOS gateway in foreground (port ${port})...`);
+  console.log('[serve] Press Ctrl+C to stop.\n');
 
-  const loader = new PingAppLoader(resolvedDir);
-  const config = loader.load();
+  const gatewayChild = spawn(process.execPath, [gatewayScript], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    env: { ...process.env, PORT: port },
+  });
 
-  console.log('=== PingApp Config ===');
-  console.log(`  Name: ${config.name}`);
-  console.log(`  URL:  ${config.url}`);
-  console.log(`  Selectors: ${Object.keys(config.selectors).length}`);
-  console.log(`  Self-healing: ${flags['self-heal'] === true ? 'enabled' : 'disabled'}`);
-  console.log('');
-  console.log(`Run: node ${resolvedDir}/dist/index.js`);
-  if (flags['self-heal'] === true) {
-    console.log('  (Runtime self-healing is enabled — broken selectors will be auto-repaired)');
-  }
+  const pidFile = join(pingosDir, 'gateway.pid');
+  writeFileSync(pidFile, String(gatewayChild.pid));
+
+  const cleanup = () => {
+    console.log('\n[serve] Shutting down gateway...');
+    try { gatewayChild.kill('SIGTERM'); } catch {}
+    try {
+      const { unlinkSync } = require('node:fs');
+      unlinkSync(pidFile);
+    } catch {}
+    process.exit(0);
+  };
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+
+  gatewayChild.on('error', (err: Error) => {
+    console.error(`[serve] Failed to start gateway: ${err.message}`);
+    process.exit(1);
+  });
+
+  gatewayChild.on('exit', (code: number | null) => {
+    console.log(`[serve] Gateway exited with code ${code}`);
+    try {
+      const { unlinkSync } = require('node:fs');
+      unlinkSync(pidFile);
+    } catch {}
+    process.exit(code ?? 1);
+  });
+
+  // Block forever — gateway stdout/stderr is inherited
+  await new Promise(() => {});
 }
 
 async function runSuggestCommand(argv: string[]) {
@@ -994,7 +1024,20 @@ async function runDownCommand(argv: string[]) {
   }
 
   if (flags['close-chrome'] === true) {
-    console.log('[down] Note: --close-chrome not implemented (close Chrome manually)');
+    const { execSync } = await import('node:child_process');
+    let chromeClosed = false;
+    // Try multiple process names for Chrome/Chromium
+    for (const pattern of ['chromium', 'chrome', 'google-chrome']) {
+      try {
+        execSync(`pkill -f "${pattern}"`, { stdio: 'ignore' });
+        chromeClosed = true;
+      } catch { /* no matching processes */ }
+    }
+    if (chromeClosed) {
+      console.log('[down] Chrome/Chromium processes killed');
+    } else {
+      console.log('[down] No Chrome/Chromium processes found');
+    }
   }
 
   console.log('[down] Done');
@@ -1626,8 +1669,8 @@ async function runAppCommand(argv: string[]) {
         process.exit(1);
       }
 
-      const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
-      const { resolve } = await import('node:path');
+      const { writeFileSync, mkdirSync, existsSync, cpSync, readdirSync } = await import('node:fs');
+      const { resolve, join } = await import('node:path');
       const flags = parseFlags(argv);
       const outputDir = typeof flags['output'] === 'string' ? flags['output'] : './pingapps';
 
@@ -1651,9 +1694,33 @@ async function runAppCommand(argv: string[]) {
       const outputPath = resolve(outputDir, `${app.name}.json`);
       writeFileSync(outputPath, JSON.stringify(config, null, 2));
 
+      // Try to copy actual PingApp implementation if it exists
+      const implCandidates = [
+        `/home/rebelforce/projects/pingapps/${app.name}`,
+        `/home/rebelforce/projects/pingdev/projects/pingapps/${app.name}`,
+      ];
+      let implCopied = false;
+      for (const implDir of implCandidates) {
+        if (existsSync(implDir)) {
+          const destDir = resolve(outputDir, app.name);
+          if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+          try {
+            cpSync(implDir, destDir, { recursive: true });
+            implCopied = true;
+            console.log(`  ${green('Copied implementation from')} ${dim(implDir)}`);
+          } catch (copyErr: any) {
+            console.log(`  ${yellow('Warning:')} Could not copy implementation: ${copyErr.message}`);
+          }
+          break;
+        }
+      }
+
       console.log('');
       console.log(`${green('Installed!')} ${bold(app.displayName)} PingApp`);
       console.log(`  ${dim('Config:')} ${outputPath}`);
+      if (!implCopied) {
+        console.log(`  ${dim('Note:')} Manifest-only install (no implementation found in pingapps/)`)
+      }
       console.log('');
       console.log('Usage:');
       for (const action of app.actions) {
@@ -1740,26 +1807,6 @@ function cliErr(cmd: string) {
     process.exit(1);
   };
 }
-
-
-// First-run experience check
-(async () => {
-  if (!command) return;
-  const { homedir } = await import('node:os');
-  const { join } = await import('node:path');
-  const { existsSync } = await import('node:fs');
-  const pingosDir = join(homedir(), '.pingos');
-  const configPath = join(pingosDir, 'config.json');
-  
-  if (!existsSync(configPath) && !['init', 'demo', 'up', 'down', 'status', 'doctor', 'help'].includes(command)) {
-    console.log('\n\x1b[1m\x1b[36m🚀 Welcome to PingOS!\x1b[0m\x1b[0m');
-    console.log('PingOS turns any website into an API.\n');
-    console.log('It looks like this is your first time. Let\'s get you started:');
-    console.log('  1. Run \x1b[32mpingos demo\x1b[0m for a zero-config test drive.');
-    console.log('  2. Run \x1b[32mpingos init\x1b[0m to automate your first site.');
-    console.log('  3. Read the \x1b[36mdocs/QUICKSTART.md\x1b[0m for a 5-minute guide.\n');
-  }
-})();
 
 
 // First-run experience check
@@ -2159,7 +2206,85 @@ switch (command) {
     runAppCommand(args.slice(1)).catch(cliErr('app'));
     break;
   case 'health':
-    console.log('pingdev health — not yet implemented (Phase 2)');
+    (async () => {
+      const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+      const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+      const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+      const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+      const flagsH = parseFlags(args.slice(1));
+      const host = typeof flagsH['host'] === 'string' ? flagsH['host'] : 'localhost';
+      const port = typeof flagsH['port'] === 'string' ? flagsH['port'] : '3500';
+
+      console.log(bold('PingOS Health Check'));
+      console.log('');
+
+      let allOk = true;
+
+      // 1. Gateway check
+      let gatewayOk = false;
+      try {
+        const res = await fetch(`http://${host}:${port}/v1/health`);
+        if (res.ok) {
+          gatewayOk = true;
+          console.log(`  ${green('PASS')}  Gateway responding on port ${port}`);
+        } else {
+          console.log(`  ${red('FAIL')}  Gateway returned status ${res.status}`);
+          allOk = false;
+        }
+      } catch {
+        console.log(`  ${red('FAIL')}  Gateway not responding on ${host}:${port}`);
+        console.log(`        ${dim('Fix: Run pingos up to start the gateway')}`);
+        allOk = false;
+      }
+
+      // 2. Extension / devices check
+      if (gatewayOk) {
+        try {
+          const res = await fetch(`http://${host}:${port}/v1/devices`);
+          if (res.ok) {
+            const data = await res.json() as any;
+            const devices = data.devices || [];
+            if (devices.length > 0) {
+              console.log(`  ${green('PASS')}  Extension connected  ${dim(`(${devices.length} tab(s))`)}`);
+            } else {
+              console.log(`  ${red('FAIL')}  Extension not connected (0 tabs)`);
+              console.log(`        ${dim('Fix: Open Chrome with PingOS extension and share a tab')}`);
+              allOk = false;
+            }
+          } else {
+            console.log(`  ${red('FAIL')}  Devices endpoint returned ${res.status}`);
+            allOk = false;
+          }
+        } catch {
+          console.log(`  ${red('FAIL')}  Could not reach devices endpoint`);
+          allOk = false;
+        }
+      } else {
+        console.log(`  ${dim('SKIP')}  Extension check  ${dim('(gateway not running)')}`);
+      }
+
+      // 3. LLM endpoint check (optional — never fails the overall check)
+      const llmEndpoint = process.env.PINGDEV_LLM_ENDPOINT || process.env.LLM_ENDPOINT;
+      if (llmEndpoint) {
+        try {
+          const res = await fetch(llmEndpoint, { method: 'GET', signal: AbortSignal.timeout(5000) });
+          console.log(`  ${green('PASS')}  LLM endpoint reachable  ${dim(llmEndpoint)}`);
+        } catch {
+          console.log(`  ${dim('WARN')}  LLM endpoint not reachable  ${dim(llmEndpoint + ' (optional)')}`);
+        }
+      } else {
+        console.log(`  ${dim('SKIP')}  LLM endpoint  ${dim('(PINGDEV_LLM_ENDPOINT not set, optional)')}`);
+      }
+
+      console.log('');
+      if (allOk) {
+        console.log(green('All health checks passed.'));
+      } else {
+        console.log(red('Some checks failed. See suggestions above.'));
+        process.exit(1);
+      }
+    })().catch(cliErr('health'));
     break;
   case 'extract':
     (async () => {

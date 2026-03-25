@@ -226,17 +226,40 @@ async function handleBridgeCommand(command: BridgeCommand): Promise<BridgeRespon
       case 'storage':
         response = await handleStorage(command as any);
         break;
-      case 'capture':
-        response = await handleCapture(command as any);
+      case 'capture': {
+        const captureCmd = command as any;
+        if (captureCmd.format && captureCmd.format !== 'dom') {
+          // pdf/mhtml/har require CDP — route through background script
+          response = await new Promise<BridgeResponse>((resolve) => {
+            chrome.runtime.sendMessage(
+              { type: 'cdp_capture', format: captureCmd.format },
+              (res) => resolve(res || { success: false, error: 'No response from background' }),
+            );
+          });
+        } else {
+          response = await handleCapture(captureCmd);
+        }
         break;
-      case 'upload':
-        response = await handleUpload(command as any);
+      }
+      case 'upload': {
+        const uploadCmd = command as any;
+        // File upload requires CDP — route through background script
+        response = await new Promise<BridgeResponse>((resolve) => {
+          chrome.runtime.sendMessage(
+            { type: 'cdp_upload', selector: uploadCmd.selector, filePath: uploadCmd.filePath },
+            (res) => resolve(res || { success: false, error: 'No response from background' }),
+          );
+        });
         break;
+      }
       case 'download':
         response = await handleDownload(command as any);
         break;
       case 'annotate':
         response = await handleAnnotate(command as any);
+        break;
+      case 'highlight':
+        response = await handleHighlight(command as any);
         break;
       default:
         response = { success: false, error: 'Unknown command type' };
@@ -395,6 +418,84 @@ function findElement(selector: string): Element | null {
     if (result) return result;
   } catch { /* invalid selector syntax */ }
   return deepQuerySelector(document, selector);
+}
+
+async function handleHighlight(command: {
+  selector: string;
+  color?: string;
+  label?: string;
+  duration?: number;
+}): Promise<BridgeResponse> {
+  const { selector, color = 'red', label, duration = 3000 } = command;
+  if (!selector) return { success: false, error: 'Missing selector' };
+
+  const elements = document.querySelectorAll(selector);
+  if (elements.length === 0) return { success: false, error: `No elements found: ${selector}` };
+
+  const overlays: HTMLElement[] = [];
+
+  elements.forEach((el) => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+
+    // Create overlay div
+    const overlay = document.createElement('div');
+    overlay.className = 'pingos-highlight-overlay';
+    overlay.style.cssText = `
+      position: fixed;
+      top: ${rect.top}px;
+      left: ${rect.left}px;
+      width: ${rect.width}px;
+      height: ${rect.height}px;
+      border: 2px solid ${color};
+      background: ${color}20;
+      pointer-events: none;
+      z-index: 2147483647;
+      box-sizing: border-box;
+      transition: opacity 0.3s ease;
+    `;
+
+    if (label) {
+      const tag = document.createElement('span');
+      tag.textContent = label;
+      tag.style.cssText = `
+        position: absolute;
+        top: -20px;
+        left: 0;
+        background: ${color};
+        color: white;
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        white-space: nowrap;
+        font-family: sans-serif;
+      `;
+      overlay.appendChild(tag);
+    }
+
+    document.body.appendChild(overlay);
+    overlays.push(overlay);
+  });
+
+  // Auto-remove after duration
+  if (duration > 0) {
+    setTimeout(() => {
+      overlays.forEach((o) => {
+        o.style.opacity = '0';
+        setTimeout(() => o.remove(), 300);
+      });
+    }, duration);
+  }
+
+  return {
+    success: true,
+    data: {
+      highlighted: overlays.length,
+      selector,
+      color,
+      duration,
+    },
+  };
 }
 
 async function handleClick(selector: string, stealth?: boolean, x?: number, y?: number): Promise<BridgeResponse> {

@@ -341,7 +341,7 @@ The gateway must be running first. See [docs/MCP.md](MCP.md) for full configurat
 
 ## Next Steps
 
-- [API Reference](API.md) — Full endpoint documentation
+- [API Reference](API.md) — Full endpoint documentation (also see [API-REFERENCE.md](API-REFERENCE.md) for a compact source-audited reference)
 - [Architecture](ARCHITECTURE.md) — How the pieces fit together
 - [PingApps Guide](PINGAPPS.md) — Building compiled website drivers
 - [Extract Engine](EXTRACT-ENGINE.md) — Pulling structured data from pages

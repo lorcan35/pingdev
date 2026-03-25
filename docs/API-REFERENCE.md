@@ -1,5 +1,7 @@
 # PingOS API Reference (Source-Audited)
 
+> **Note:** This is a compact, source-audited reference. For the full API documentation with detailed examples, request/response schemas, and curl commands, see [API.md](API.md).
+
 Base URL: `http://localhost:3500`
 
 This doc is generated from:

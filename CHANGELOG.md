@@ -4,12 +4,45 @@ All notable changes to PingOS will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-03-23
+
+### Added
+
+- **MCP Server** (`packages/mcp-server`) — 15 tools and 3 resources for AI assistant integration (Claude Desktop, Cursor); supports stdio and SSE transport modes
+- **Smart Extract (Levels 1–10)** — 10-level extraction pipeline with progressive fallback: basic CSS (L1), zero-config auto-extract (L2), semantic/LLM (L3), JSON-LD/Schema.org (L4), multi-page pagination (L5), nested/recursive (L6), type-aware parsing (L7), Shadow DOM pierce (L8), visual/screenshot extraction (L9), template learning (L10)
+- **Act Engine** — natural language browser control; parses compound instructions into typed steps with fuzzy element matching, ordinal selectors, and CDP trusted events
+- **Natural Language Query** (`POST /v1/dev/:device/query`) — ask questions about a live page in plain English; LLM generates CSS selectors, results are cached by question hash
+- **Live Data Streams / Watch** (`POST /v1/dev/:device/watch`, managed watch lifecycle via `WatchManager`) — SSE-based real-time change monitoring with MutationObserver detection and polling fallback
+- **Differential Extraction** (`POST /v1/dev/:device/diff`) — field-level change detection between successive extractions with baseline snapshot tracking
+- **Schema Auto-Discovery** (`GET /v1/dev/:device/discover`) — heuristic page classification (product, search, article, feed, table, form, chat) with auto-generated extraction schemas; no LLM required, runs in under 100ms
+- **PingApp Generator** (`POST /v1/apps/generate`) — LLM-powered PingApp scaffolding from URL and description, with optional live DOM context for higher accuracy
+- **Cross-Tab Pipelines** (`POST /v1/pipelines/run`, `/validate`, `/save`, `/pipe`) — chain operations across multiple browser tabs with variable interpolation and pipe shorthand syntax
+- **Tab-as-a-Function** (`/v1/functions/*`) — expose PingApp actions as callable functions with batch execution support
+- **Recordings system** (`/v1/record/*`, `/v1/recordings/*`) — record browser interactions, replay them, and generate PingApps from recordings
+- **Template Learning** (`/v1/templates/*`) — persistent per-domain extraction templates with hit counts, success rates, import/export, and automatic fallback selector promotion
+- **CDP Fallback** — automatic Chrome DevTools Protocol fallback when extension content script communication fails (CSP restrictions, bfcache eviction, disconnected port)
+- **Self-Heal system** (`/v1/heal/*`) — LLM-powered automatic CSS selector repair on element-not-found errors, with caching and statistics tracking
+- **PingApps: AliExpress** — search, product detail, cart management, orders, wishlist, and recon endpoints
+- **PingApps: Amazon** — search, product detail, cart, orders, deals, and recon endpoints
+- **PingApps: Claude** — chat, conversations, model switching, projects, artifacts, upload, and search endpoints
+- **Local Mode** — fully local LLM/vision inference via LM Studio or Ollama; per-feature model overrides and timeout configuration
+- **Dashboard** (`packages/dashboard`) — web UI for gateway management, device inspection, and interactive extraction testing
+- **Visual Extract engine** — screenshot-first extraction via vision model with text fallback
+- **Paginate Extract engine** — iterative extract+paginate with deduplication and content-script reconnect handling
+- **Additional device operations**: `scroll`, `navigate`, `press`, `dblclick`, `select`, `screenshot`, `waitFor`, `getUrl`, `clean`, `record_api_action`
+- **Expanded CLI commands**: `query`, `watch`, `diff`, `discover`, `record`, `functions`, `call`, `pipe`, `templates`, `fill`, `wait`, `table`, `dialog`, `paginate`, `select-option`, `hover`, `assert`, `network`, `storage`, `capture`, `upload`, `download`, `annotate`, `act`, `serve`, `heal`, `doctor`, `up`, `down`
+- **DGX Spark documentation** — setup guide for NVIDIA DGX Spark with 128 GB unified memory
+
+### Changed
+- CLI command name standardized to `pingdev` across all documentation (the `pingos` alias still works)
+- Package manager standardized to npm in documentation
+
 ## [0.2.0] — 2026-02-17
 
 ### Added
 - `observe` op in chrome extension — answers "What can I do on this page?" with human-readable action list
-- `observe` CLI command: `pingos observe [DEVICE]` with colored output
-- `read` CLI command: `pingos read SELECTOR [DEVICE]`
+- `observe` CLI command: `pingdev observe [DEVICE]` with colored output
+- `read` CLI command: `pingdev read SELECTOR [DEVICE]`
 - Python SDK: `Tab.observe()`, `Tab.wait()`, `Browser.find()` methods
 - Python SDK: `Tab.__repr__` for nicer debugging output
 - Python SDK: full README with API reference

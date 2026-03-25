@@ -5,10 +5,30 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 const GATEWAY_URL = process.env.PINGOS_GATEWAY_URL || 'http://localhost:3500';
 
 async function gw(path: string, method: string = 'GET', body?: unknown): Promise<unknown> {
-  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(`${GATEWAY_URL}${path}`, opts);
-  return res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const opts: RequestInit = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const res = await fetch(`${GATEWAY_URL}${path}`, opts);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return { error: true, status: res.status, message: text || `Gateway returned ${res.status}` };
+    }
+    return await res.json();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('abort')) {
+      return { error: true, message: `Gateway request timed out after 10s: ${method} ${path}` };
+    }
+    return { error: true, message: `Gateway request failed: ${msg}` };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function textResult(data: unknown) {
@@ -213,16 +233,15 @@ export function registerTools(server: McpServer): void {
   // 17. pingos_watch_start — Start server-side watch stream descriptor
   server.tool(
     'pingos_watch_start',
-    'Start change watching for a schema and return watch metadata (watchId, stream URL)',
+    'Start change watching for a CSS selector and return watch metadata (watchId, stream URL)',
     {
       device: z.string().describe('Device ID'),
-      schema: z.record(z.string(), z.string()).describe('Field-to-selector schema'),
-      interval_ms: z.number().optional().describe('Polling interval in milliseconds'),
-      threshold: z.number().optional().describe('Optional diff threshold'),
-      max_events: z.number().optional().describe('Optional max event count'),
+      selector: z.string().describe('CSS selector to watch for changes'),
+      fields: z.record(z.string(), z.string()).optional().describe('Optional field-to-selector map for structured extraction'),
+      interval: z.number().optional().describe('Polling interval in milliseconds'),
     },
-    async ({ device, schema, interval_ms, threshold, max_events }) =>
-      textResult(await gw(`/v1/dev/${device}/watch/start`, 'POST', { schema, interval_ms, threshold, max_events })),
+    async ({ device, selector, fields, interval }) =>
+      textResult(await gw(`/v1/dev/${device}/watch/start`, 'POST', { selector, fields, interval })),
   );
 
   // 18. pingos_templates — List learned extraction templates
@@ -243,5 +262,29 @@ export function registerTools(server: McpServer): void {
       body: z.record(z.string(), z.unknown()).optional().describe('Optional JSON body for non-GET requests'),
     },
     async ({ path, method, body }) => textResult(await gw(path, method || 'GET', body)),
+  );
+
+  // 20. pingos_google_auth — Run Google OAuth sign-in on a tab
+  server.tool(
+    'pingos_google_auth',
+    'Sign in with Google on any page. Detects the Google sign-in button, handles account picker and consent, waits for redirect back.',
+    {
+      device: z.string().describe('Device/tab ID to run auth on'),
+      email: z.string().optional().describe('Preferred Google account email to select in the account picker'),
+      timeout_ms: z.number().optional().describe('Max time in ms for the flow (default 30000)'),
+    },
+    async ({ device, email, timeout_ms }) =>
+      textResult(await gw('/v1/auth/google', 'POST', { deviceId: device, email, timeoutMs: timeout_ms })),
+  );
+
+  // 21. pingos_google_auth_check — Check if current tab is authenticated via Google
+  server.tool(
+    'pingos_google_auth_check',
+    'Check whether the current page is authenticated via Google (looks for signed-in indicators vs sign-in buttons).',
+    {
+      device: z.string().describe('Device/tab ID to check'),
+    },
+    async ({ device }) =>
+      textResult(await gw('/v1/auth/google/check', 'POST', { deviceId: device })),
   );
 }

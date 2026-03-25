@@ -5,6 +5,7 @@
   "description": "Chrome extension bridge for PingOS gateway device operations",
   "permissions": [
     "activeTab",
+    "alarms",
     "debugger",
     "scripting",
     "storage",

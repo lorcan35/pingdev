@@ -7,7 +7,7 @@ If you run into issues, follow this guide to identify and fix the most common pr
 Whenever things go wrong, your first step should be to run the built-in diagnostic tool:
 
 ```bash
-pingos doctor
+pingdev doctor
 ```
 
 This command will check your Node.js version, gateway status, port availability, Chrome installation, and extension connectivity. It will explicitly tell you **what failed** and **how to fix it**.
@@ -17,11 +17,11 @@ This command will check your Node.js version, gateway status, port availability,
 ## Common Issues & Fixes
 
 ### 1. "Port 3500 is in use"
-**Symptom:** Running `pingos up` fails because the port is already bound.
+**Symptom:** Running `pingdev up` fails because the port is already bound.
 **Fix:**
 Another PingOS instance or a different app is using port 3500. Run:
 ```bash
-pingos down
+pingdev down
 ```
 If that doesn't work, manually kill the process:
 ```bash
@@ -29,9 +29,9 @@ lsof -ti :3500 | xargs kill -9
 ```
 
 ### 2. "No tabs connected yet"
-**Symptom:** You run `pingos demo` or an API call, but get an error that no devices are connected.
+**Symptom:** You run `pingdev demo` or an API call, but get an error that no devices are connected.
 **Fix:**
-1. Make sure you opened the browser using `pingos up`.
+1. Make sure you opened the browser using `pingdev up`.
 2. Ensure you navigated to a standard website (not a `chrome://` page).
 3. **Crucial:** Click the PingOS extension icon and make sure the toggle next to your tab is green (Connected). 
 
@@ -40,11 +40,11 @@ lsof -ti :3500 | xargs kill -9
 **Fix:**
 The gateway isn't running in the background. Start it:
 ```bash
-pingos up --daemon
+pingdev up --daemon
 ```
 
 ### 4. "Extension dist not found"
-**Symptom:** `pingos doctor` complains about the extension build missing.
+**Symptom:** `pingdev doctor` complains about the extension build missing.
 **Fix:**
 You need to compile the Chrome extension before running the gateway.
 ```bash
@@ -57,11 +57,11 @@ npm run build
 **Fix:**
 Run the PingApp with self-healing enabled:
 ```bash
-pingos serve ./pingapp --self-heal
+pingdev serve ./pingapp --self-heal
 ```
 Or manually heal the app:
 ```bash
-pingos heal ./pingapp
+pingdev heal ./pingapp
 ```
 
 ---

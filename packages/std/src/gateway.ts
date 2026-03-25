@@ -955,6 +955,11 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
     },
   );
 
+  // ---- GET /v1/apps — List registered PingApps ----
+  app.get('/v1/apps', async (_request, reply) => {
+    return reply.send({ ok: true, apps: PINGAPP_FUNCTION_DEFS });
+  });
+
   // ---- POST /v1/apps/generate — PingApp generator ----
   app.post<{ Body: { url: string; description: string } }>(
     '/v1/apps/generate',
@@ -1590,7 +1595,7 @@ export async function createGateway(opts: GatewayOptions): Promise<FastifyInstan
             selfHealCfg.enabled &&
             selector &&
             isElementNotFoundError(err) &&
-            (op === 'read' || op === 'click' || op === 'type' || op === 'waitFor')
+            (op === 'read' || op === 'click' || op === 'type' || op === 'waitFor' || op === 'extract')
           ) {
             healStats.attempts++;
 

@@ -37,7 +37,8 @@ export type BridgeCommand =
   | { type: 'capture'; format: 'pdf' | 'mhtml' | 'har' | 'dom'; stealth?: boolean }
   | { type: 'upload'; selector: string; filePath: string; stealth?: boolean }
   | { type: 'download'; url?: string; selector?: string; savePath?: string; stealth?: boolean }
-  | { type: 'annotate'; annotations: Array<{ selector: string; label?: string; color?: string; style?: 'box' | 'highlight' | 'arrow' }>; stealth?: boolean };
+  | { type: 'annotate'; annotations: Array<{ selector: string; label?: string; color?: string; style?: 'box' | 'highlight' | 'arrow' }>; stealth?: boolean }
+  | { type: 'highlight'; selector: string; color?: string; label?: string; duration?: number; stealth?: boolean };
 
 export interface BridgeResponse {
   success: boolean;

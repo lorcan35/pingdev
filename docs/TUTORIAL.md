@@ -11,20 +11,20 @@ Ready to see what PingOS can do? Here are three real-world walkthroughs showing 
 1. **Start PingOS:**
    Ensure your gateway and browser are running:
    ```bash
-   pingos up
+   pingdev up
    ```
 2. **Connect the Tab:**
    Navigate to `https://news.ycombinator.com` in the opened Chrome window. Click the PingOS extension icon and toggle the switch to connect the tab.
 3. **Run Smart Discovery & Extract:**
    You don't need to specify CSS selectors. Just ask PingOS to discover and extract:
    ```bash
-   pingos demo
+   pingdev demo
    ```
    *PingOS will intelligently figure out the structure of Hacker News and give you a JSON array of the top stories, authors, and points.*
 
 **Pro-Tip:** Want to save this as a permanent API?
 ```bash
-pingos init https://news.ycombinator.com
+pingdev init https://news.ycombinator.com
 # Follow the wizard to generate a persistent "PingApp" wrapper!
 ```
 
@@ -38,13 +38,13 @@ pingos init https://news.ycombinator.com
    Open a specific Amazon product page in the managed Chrome browser. Open the PingOS extension and connect the tab.
 2. **Find the Device ID:**
    ```bash
-   pingos status
+   pingdev status
    ```
    *(Note your device ID, e.g., `chrome-123`)*
 3. **Start Watching the Price:**
    We can tell PingOS to watch a specific selector (or let it auto-discover).
    ```bash
-   pingos watch chrome-123 --schema '{"price": ".a-price-whole"}' --interval 10000
+   pingdev watch chrome-123 --schema '{"price": ".a-price-whole"}' --interval 10000
    ```
    *PingOS will now stream price changes to your terminal every 10 seconds!*
 
@@ -60,15 +60,15 @@ pingos init https://news.ycombinator.com
    Instead of writing a complex Playwright script, simply issue REST calls or CLI commands to interact:
    ```bash
    # Type into the search box
-   pingos type chrome-123 "Best mechanical keyboards" --selector "input[name='q']"
+   pingdev type chrome-123 "Best mechanical keyboards" --selector "input[name='q']"
    
    # Click the search button
-   pingos click chrome-123 "button[type='submit']"
+   pingdev click chrome-123 "button[type='submit']"
    ```
 3. **Advanced: The `act` Command**
    Don't know the selectors? Use the `act` command and let PingOS figure it out!
    ```bash
-   pingos act chrome-123 "Type 'Best mechanical keyboards' into the search bar and press Enter"
+   pingdev act chrome-123 "Type 'Best mechanical keyboards' into the search bar and press Enter"
    ```
 
 ---

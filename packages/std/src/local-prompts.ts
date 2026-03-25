@@ -50,12 +50,12 @@ export function getGeneratePrompt(local: boolean): PromptTemplate {
   if (!local) {
     return {
       system: `Return JSON only using the required keys. ${JSON_ONLY}`,
-      userTemplate: `Generate PingApp JSON.\nurl: {{url}}\ndescription: {{description}}\n{{domContext}}\n\nReturn JSON only with keys:\n{name,url,description,selectors,actions,schemas}\nUse a domain-specific app name (for example: github-app, amazon-app), never generic site-app.\nExample:\n{"name":"github-app","url":"https://github.com","description":"Search repositories","selectors":{"search_input":"input[name='q']"},"actions":[{"name":"search","op":"type","selector":"input[name='q']","value":"{{query}}"}],"schemas":[{"name":"results","fields":{"title":"h3 a"}}]}\n${JSON_ONLY}`,
+      userTemplate: `Generate PingApp JSON.\nurl: {{url}}\ndescription: {{description}}\n{{domContext}}\n\nReturn JSON only with keys:\n{name,url,description,selectors,actions,schemas,selectorMap,auth}\nUse a domain-specific app name (for example: github-app, amazon-app), never generic site-app.\nselectorMap: maps field names to CSS selectors for self-healing (when a selector breaks, PingOS can auto-repair it).\nauth: { type: "element-check"|"cookie-check"|"url-check", check: { selector: "css-for-login-button" }, google: { enabled: true/false, preferredEmail: "{{env.GOOGLE_EMAIL}}" } }\nExample:\n{"name":"github-app","url":"https://github.com","description":"Search repositories","selectors":{"search_input":"input[name='q']"},"actions":[{"name":"search","op":"type","selector":"input[name='q']","value":"{{query}}"}],"schemas":[{"name":"results","fields":{"title":"h3 a"}}],"selectorMap":{"title":"h3 a","description":"p.mb-1"},"auth":{"type":"element-check","check":{"selector":""},"google":{"enabled":false}}}\n${JSON_ONLY}`,
     };
   }
   return {
     system: `Return JSON only. ${JSON_ONLY}`,
-    userTemplate: `Build PingApp spec for url={{url}} desc={{description}}\n{{domContext}}\nUse a domain-specific app name like github-app, never site-app.\nReturn: {"name":"github-app","url":"https://...","description":"...","selectors":{"key":"css"},"actions":[{"name":"search","op":"type","selector":"input[name='q']","value":"{{query}}"}],"schemas":[{"name":"main","fields":{"title":"h3 a"}}]}\n${JSON_ONLY}`,
+    userTemplate: `Build PingApp spec for url={{url}} desc={{description}}\n{{domContext}}\nUse a domain-specific app name like github-app, never site-app.\nInclude selectorMap (field→CSS for self-heal) and auth config.\nReturn: {"name":"github-app","url":"https://...","description":"...","selectors":{"key":"css"},"actions":[{"name":"search","op":"type","selector":"input[name='q']","value":"{{query}}"}],"schemas":[{"name":"main","fields":{"title":"h3 a"}}],"selectorMap":{"title":"h3 a"},"auth":{"type":"element-check","check":{"selector":""},"google":{"enabled":false}}}\n${JSON_ONLY}`,
   };
 }
 
