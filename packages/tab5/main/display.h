@@ -26,3 +26,9 @@ void tab5_display_show_status(const char *msg);
 
 /** Show DSI test pattern (0=off, 1=vertical bars, 2=horizontal bars, 3=color bar). */
 void tab5_display_test_pattern(int type);
+
+/** Initialize hardware JPEG decoder (call once after display init). */
+esp_err_t tab5_display_jpeg_init(void);
+
+/** Decode a JPEG buffer and draw it to the DPI framebuffer. */
+esp_err_t tab5_display_draw_jpeg(const uint8_t *jpeg_data, uint32_t jpeg_size);

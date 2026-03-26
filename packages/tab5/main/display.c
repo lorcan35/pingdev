@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_cache.h"
+#include "driver/jpeg_decode.h"
 
 static const char *TAG = "tab5_display";
 
@@ -36,6 +37,7 @@ static esp_lcd_dsi_bus_handle_t s_dsi_bus = NULL;
 static esp_lcd_panel_io_handle_t s_panel_io = NULL;
 static esp_lcd_panel_handle_t s_panel = NULL;
 static bool s_initialized = false;
+static jpeg_decoder_handle_t s_jpeg_decoder = NULL;
 
 #define LCD_LEDC_CH LEDC_CHANNEL_1
 
@@ -293,4 +295,51 @@ void tab5_display_test_pattern(int type)
     }
     esp_err_t ret = esp_lcd_dpi_panel_set_pattern(s_panel, pat);
     ESP_LOGI(TAG, "Test pattern %d: %s", type, esp_err_to_name(ret));
+}
+
+// ---------------------------------------------------------------------------
+// Hardware JPEG decoder
+// ---------------------------------------------------------------------------
+esp_err_t tab5_display_jpeg_init(void)
+{
+    jpeg_decode_engine_cfg_t cfg = {
+        .timeout_ms = 100,
+    };
+    ESP_RETURN_ON_ERROR(jpeg_new_decoder_engine(&cfg, &s_jpeg_decoder), TAG, "JPEG decoder init failed");
+    ESP_LOGI(TAG, "Hardware JPEG decoder initialized");
+    return ESP_OK;
+}
+
+esp_err_t tab5_display_draw_jpeg(const uint8_t *jpeg_data, uint32_t jpeg_size)
+{
+    if (!s_initialized || !s_panel || !s_jpeg_decoder) return ESP_ERR_INVALID_STATE;
+
+    // Get DPI framebuffer — decode directly into it
+    void *fb = NULL;
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &fb),
+        TAG, "Get framebuffer failed");
+
+    size_t fb_size = TAB5_DISPLAY_WIDTH * TAB5_DISPLAY_HEIGHT * sizeof(uint16_t);
+
+    jpeg_decode_cfg_t decode_cfg = {
+        .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+        .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+    };
+
+    uint32_t out_size = 0;
+    esp_err_t ret = jpeg_decoder_process(
+        s_jpeg_decoder,
+        &decode_cfg,
+        jpeg_data,
+        jpeg_size,
+        (uint8_t *)fb,
+        fb_size,
+        &out_size);
+
+    if (ret != ESP_OK) return ret;
+
+    // Flush CPU cache → PSRAM so DPI DMA sees the decoded pixels
+    esp_cache_msync(fb, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    return ESP_OK;
 }
