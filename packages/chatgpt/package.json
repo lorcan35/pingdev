@@ -1,0 +1,19 @@
+{
+  "name": "@pingdev/chatgpt",
+  "version": "0.1.0",
+  "description": "PingApp shim for https://chatgpt.com",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pingdev/core": "file:../core"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  }
+}

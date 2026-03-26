@@ -1,0 +1,39 @@
+{
+  "name": "amazon",
+  "displayName": "Amazon UAE",
+  "version": "0.1.0",
+  "description": "Amazon.ae shopping automation — search, browse, cart, orders, deals",
+  "baseUrl": "https://www.amazon.ae",
+  "auth": {
+    "method": "manual",
+    "note": "Login via browser, session persists in cookies"
+  },
+  "actions": {
+    "search": {
+      "description": "Search for products",
+      "params": { "query": "string" },
+      "url": "https://www.amazon.ae/s?k={query}"
+    },
+    "product": {
+      "description": "Get product details by ASIN",
+      "params": { "asin": "string" },
+      "url": "https://www.amazon.ae/dp/{asin}"
+    },
+    "addToCart": {
+      "description": "Add current product to cart",
+      "selector": "#add-to-cart-button"
+    },
+    "viewCart": {
+      "description": "View shopping cart",
+      "url": "https://www.amazon.ae/gp/cart/view.html"
+    },
+    "viewOrders": {
+      "description": "View order history",
+      "url": "https://www.amazon.ae/gp/your-account/order-history"
+    },
+    "deals": {
+      "description": "View today's deals",
+      "url": "https://www.amazon.ae/deals"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=PingOS Anthropic Proxy
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /home/rebelforce/projects/pingos-anthropic-proxy/src/server.js
+WorkingDirectory=/home/rebelforce/projects/pingos-anthropic-proxy
+Restart=always
+User=rebelforce
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

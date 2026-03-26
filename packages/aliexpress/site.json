@@ -1,0 +1,70 @@
+{
+  "name": "aliexpress",
+  "displayName": "AliExpress",
+  "version": "0.1.0",
+  "description": "AliExpress shopping automation — search, browse, cart, orders, wishlist",
+  "baseUrl": "https://www.aliexpress.com",
+  "auth": {
+    "method": "google-oauth",
+    "account": "therobogeeksters@gmail.com",
+    "loginUrl": "https://login.aliexpress.com/",
+    "captcha": "slider",
+    "checkSelector": "[class*=account], [class*=user-name]"
+  },
+  "locale": {
+    "cookies": {
+      "aep_usuc_f": "site=glo&c_tp=USD&region=AE&b_locale=en_US",
+      "intl_locale": "en_US"
+    }
+  },
+  "actions": {
+    "search": {
+      "description": "Search for products",
+      "params": { "query": "string" },
+      "steps": [
+        { "op": "navigate", "url": "https://www.aliexpress.com/w/wholesale-{query}.html" },
+        { "op": "clean", "mode": "full" },
+        { "op": "extract", "name": "products" }
+      ]
+    },
+    "product": {
+      "description": "Get product details by URL or ID",
+      "params": { "id": "string" },
+      "url": "https://www.aliexpress.com/item/{id}.html"
+    },
+    "addToCart": {
+      "description": "Add current product to cart",
+      "selector": "text=Add to cart",
+      "stealth": true
+    },
+    "removeFromCart": {
+      "description": "Remove item from cart by index (0-based)",
+      "params": { "index": "number" }
+    },
+    "viewCart": {
+      "description": "View shopping cart",
+      "url": "https://www.aliexpress.com/p/shoppingcart/index.html"
+    },
+    "viewOrders": {
+      "description": "View order history",
+      "url": "https://www.aliexpress.com/p/order/index.html"
+    },
+    "trackOrder": {
+      "description": "Track a specific order",
+      "params": { "orderId": "string" },
+      "url": "https://www.aliexpress.com/p/order/detail.html?orderId={orderId}"
+    },
+    "viewWishlist": {
+      "description": "View wishlist",
+      "url": "https://www.aliexpress.com/p/wishlist/index.html"
+    },
+    "addToWishlist": {
+      "description": "Add current product to wishlist",
+      "selector": "[class*=wish], [class*=Wish], [aria-label*=wish]"
+    },
+    "account": {
+      "description": "View account overview",
+      "url": "https://www.aliexpress.com/p/account/index.html"
+    }
+  }
+}

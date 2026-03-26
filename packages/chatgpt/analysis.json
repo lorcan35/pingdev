@@ -1,0 +1,276 @@
+{
+  "name": "chatgpt",
+  "url": "https://chatgpt.com",
+  "purpose": "AI-powered chatbot for conversational interactions, problem-solving, learning, and content creation",
+  "category": "chat",
+  "selectors": {
+    "promptInput": {
+      "name": "promptInput",
+      "tiers": [
+        "#prompt-textarea",
+        "textarea[contenteditable]"
+      ]
+    },
+    "messageOutput": {
+      "name": "messageOutput",
+      "tiers": [
+        ".message-content",
+        ".wcDTda_fallbackTextarea"
+      ]
+    },
+    "loadingSpinner": {
+      "name": "loadingSpinner",
+      "tiers": [
+        ".spinner-overlay",
+        "[role='status']"
+      ]
+    },
+    "skip-to-content": {
+      "name": "skip-to-content",
+      "tiers": [
+        "a.interactive-bg-secondary.behavior-btn.interactive-label-secondary.rounded-2xl.px-4.py-2.text-base.print\\:hidden",
+        "//a[contains(text(),\"Skip to content\")]"
+      ]
+    },
+    "link-1": {
+      "name": "link-1",
+      "tiers": [
+        "a.hover\\:bg-token-bg-tertiary.group.touch\\:h-10.flex.aspect-square.h-9.items-center.justify-center.rounded-\\[10px\\]"
+      ]
+    },
+    "model-selector-current-model-is-5-2": {
+      "name": "model-selector-current-model-is-5-2",
+      "tiers": [
+        "#radix-_R_76nqp33ih6kcm_",
+        "//*[@id=\"radix-_R_76nqp33ih6kcm_\"]"
+      ]
+    },
+    "login-button": {
+      "name": "login-button",
+      "tiers": [
+        "[data-testid=\"login-button\"]",
+        "//button[contains(text(),\"Log in\")]"
+      ]
+    },
+    "signup-button": {
+      "name": "signup-button",
+      "tiers": [
+        "[data-testid=\"signup-button\"]",
+        "//button[contains(text(),\"Sign up for free\")]"
+      ]
+    },
+    "open-profile-menu": {
+      "name": "open-profile-menu",
+      "tiers": [
+        "#radix-_R_kqdmnqp33ih6kcm_",
+        "//*[@id=\"radix-_R_kqdmnqp33ih6kcm_\"]"
+      ]
+    },
+    "file-6": {
+      "name": "file-6",
+      "tiers": [
+        "input[type=\"file\"]"
+      ]
+    },
+    "ask-anything": {
+      "name": "ask-anything",
+      "tiers": [
+        "textarea.wcDTda_fallbackTextarea"
+      ]
+    },
+    "prompt-textarea": {
+      "name": "prompt-textarea",
+      "tiers": [
+        "#prompt-textarea",
+        "//*[@id=\"prompt-textarea\"]"
+      ]
+    },
+    "add-photos": {
+      "name": "add-photos",
+      "tiers": [
+        "button[aria-label=\"Add photos\"]",
+        "//button[@aria-label=\"Add photos\"]"
+      ]
+    },
+    "search": {
+      "name": "search",
+      "tiers": [
+        "[data-testid=\"composer-button-search\"]",
+        "//button[@aria-label=\"Search\"]"
+      ]
+    },
+    "create-image": {
+      "name": "create-image",
+      "tiers": [
+        "[data-testid=\"composer-button-create-image\"]",
+        "//button[@aria-label=\"Create image\"]"
+      ]
+    },
+    "start-voice": {
+      "name": "start-voice",
+      "tiers": [
+        "[data-testid=\"composer-speech-button\"]",
+        "//button[@aria-label=\"Start Voice\"]"
+      ]
+    },
+    "upload-photos": {
+      "name": "upload-photos",
+      "tiers": [
+        "#upload-photos",
+        "//*[@id=\"upload-photos\"]"
+      ]
+    },
+    "upload-camera": {
+      "name": "upload-camera",
+      "tiers": [
+        "#upload-camera",
+        "//*[@id=\"upload-camera\"]"
+      ]
+    },
+    "terms": {
+      "name": "terms",
+      "tiers": [
+        "a.text-token-text-primary.decoration-token-text-primary.underline",
+        "//a[contains(text(),\"Terms\")]"
+      ]
+    },
+    "privacy-policy": {
+      "name": "privacy-policy",
+      "tiers": [
+        "a.text-token-text-primary.decoration-token-text-primary.underline",
+        "//a[contains(text(),\"Privacy Policy\")]"
+      ]
+    }
+  },
+  "actions": [
+    {
+      "name": "sendMessage",
+      "description": "Send a text message to the AI assistant",
+      "inputSelector": "#prompt-textarea",
+      "submitTrigger": "keyboard: Enter",
+      "outputSelector": ".message-content",
+      "completionSignal": "selector_stability:.message-content",
+      "isPrimary": true
+    },
+    {
+      "name": "createImage",
+      "description": "Generate an image using AI based on text prompt",
+      "inputSelector": "#prompt-textarea",
+      "submitTrigger": "[data-testid=\"composer-button-create-image\"]",
+      "outputSelector": ".image-generation-result",
+      "completionSignal": "network_idle",
+      "isPrimary": false
+    },
+    {
+      "name": "startVoice",
+      "description": "Initiate voice input for message creation",
+      "inputSelector": "[data-testid=\"composer-speech-button\"]",
+      "outputSelector": "#prompt-textarea",
+      "completionSignal": "text_change:#prompt-textarea",
+      "isPrimary": false
+    },
+    {
+      "name": "addPhotos",
+      "description": "Upload image files for analysis or context",
+      "inputSelector": "[aria-label=\"Add photos\"]",
+      "submitTrigger": "#upload-photos",
+      "outputSelector": ".image-preview-container",
+      "completionSignal": "selector_presence:.image-preview-container",
+      "isPrimary": false
+    }
+  ],
+  "states": [
+    {
+      "name": "idle",
+      "detectionMethod": "attribute",
+      "indicatorSelector": "#prompt-textarea",
+      "transitions": [
+        "loading",
+        "generating"
+      ]
+    },
+    {
+      "name": "loading",
+      "detectionMethod": "selector",
+      "indicatorSelector": ".spinner-overlay",
+      "transitions": [
+        "generating",
+        "error"
+      ]
+    },
+    {
+      "name": "generating",
+      "detectionMethod": "text",
+      "indicatorSelector": "#live-region-assertive",
+      "transitions": [
+        "done",
+        "error"
+      ]
+    },
+    {
+      "name": "done",
+      "detectionMethod": "selector",
+      "indicatorSelector": ".message-content:empty",
+      "transitions": [
+        "idle"
+      ]
+    },
+    {
+      "name": "error",
+      "detectionMethod": "text",
+      "indicatorSelector": "#live-region-assertive",
+      "transitions": [
+        "idle"
+      ]
+    }
+  ],
+  "features": [
+    {
+      "name": "ImageGeneration",
+      "description": "Create images from text descriptions using AI",
+      "activationMethod": "[data-testid=\"composer-button-create-image\"]"
+    },
+    {
+      "name": "VoiceInput",
+      "description": "Use voice-to-text for message input",
+      "activationMethod": "[data-testid=\"composer-speech-button\"]"
+    },
+    {
+      "name": "FileUpload",
+      "description": "Analyze uploaded image files in conversations",
+      "activationMethod": "[aria-label=\"Add photos\"]"
+    },
+    {
+      "name": "TermsAgreement",
+      "description": "View service terms and privacy policy",
+      "activationMethod": "[href=\"/terms\"]"
+    }
+  ],
+  "completion": {
+    "method": "network_idle",
+    "pollMs": 500,
+    "stableCount": 3,
+    "maxWaitMs": 60000
+  },
+  "stateTransitions": {
+    "idle": [
+      "loading",
+      "generating"
+    ],
+    "loading": [
+      "generating",
+      "error"
+    ],
+    "generating": [
+      "done",
+      "error"
+    ],
+    "done": [
+      "idle"
+    ],
+    "error": [
+      "idle"
+    ]
+  },
+  "docsSummary": "No documentation found"
+}
