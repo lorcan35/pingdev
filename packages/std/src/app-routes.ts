@@ -1726,7 +1726,11 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
       });
     }
 
-    return { ok: true, action: 'setModel', model: data.after || model, previous: data.before };
+    // Read model after a short delay — the selector button updates asynchronously
+    await delay(1200);
+    const after = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
+
+    return { ok: true, action: 'setModel', model: after?.result || data.text || model, previous: data.before };
   });
 
   // GET /v1/app/claude/projects
