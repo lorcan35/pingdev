@@ -1617,49 +1617,40 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findClaudeDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
 
-    // Open the dropdown
-    await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
-    await delay(500);
-
-    // Click "More models" to expand the full list
-    await deviceOp(gatewayUrl, deviceId, 'eval', {
-      expression: `(() => {
-        const items = document.querySelectorAll('[role="menuitem"]');
-        for (const el of items) {
-          if (el.textContent.includes('More models')) { el.click(); return true; }
-        }
-        return false;
-      })()`,
-    });
-    await delay(500);
-
-    // Read all model options
+    // Open dropdown, expand "More models", read list, close — all in one eval
     const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
-      expression: `(() => {
-        const items = document.querySelectorAll('[role="menuitem"]');
+      expression: `(async () => {
+        const btn = document.querySelector('[data-testid="model-selector-dropdown"]');
+        if (!btn) return { error: 'no-selector' };
+        const current = btn.textContent.trim().replace(/\\s+/g, ' ');
+        btn.click();
+        await new Promise(r => setTimeout(r, 400));
+
+        // Expand "More models"
+        const items1 = document.querySelectorAll('[role="menuitem"]');
+        for (const el of items1) {
+          if (el.textContent.includes('More models')) { el.click(); break; }
+        }
+        await new Promise(r => setTimeout(r, 400));
+
+        // Read all models
+        const items2 = document.querySelectorAll('[role="menuitem"]');
         const models = [];
-        for (const el of items) {
+        for (const el of items2) {
           const text = (el.textContent || '').trim().replace(/\\s+/g, ' ');
           if (!text || text.length > 100 || text === 'More models') continue;
-          // Extract just the model name (before the description)
           const name = text.replace(/(Most efficient|Think longer|Best for|Fastest|Older model).*$/i, '').trim();
           models.push({ name, fullText: text });
         }
-        return models;
+
+        // Close dropdown
+        document.body.click();
+        return { current, models };
       })()`,
     });
 
-    // Close the dropdown
-    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `document.body.click()` });
-
-    // Get current model
-    const current = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
-
-    return {
-      ok: true,
-      current: current?.result || 'unknown',
-      models: result?.result || [],
-    };
+    const data = result?.result ?? result;
+    return { ok: true, current: data?.current || 'unknown', models: data?.models || [] };
   });
 
   // POST /v1/app/claude/model { model } — switch model
@@ -1673,57 +1664,20 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
 
     const modelText = String(model).toLowerCase().trim();
 
-    // Special case: "extended" = Extended thinking toggle
-    if (modelText === 'extended' || modelText === 'extended thinking') {
-      await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
-      await delay(500);
-      const picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
-        expression: `(() => {
-          const items = document.querySelectorAll('[role="menuitem"]');
-          for (const el of items) {
-            if ((el.textContent || '').includes('Extended thinking')) { el.click(); return { picked: true, model: 'Extended thinking' }; }
-          }
-          return { picked: false };
-        })()`,
-      });
-      await delay(800);
-      const after = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
-      return { ok: !!(picked?.result?.picked), action: 'setModel', model: after?.result || 'Extended thinking' };
-    }
-
-    // Open dropdown
-    await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
-    await delay(500);
-
-    // First try top-level items
-    let picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
-      expression: `(() => {
+    // All-in-one: open dropdown, expand if needed, find and click target, verify
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(async () => {
         const target = ${JSON.stringify(modelText)};
-        const items = document.querySelectorAll('[role="menuitem"]');
-        for (const el of items) {
-          const t = (el.textContent || '').toLowerCase();
-          if (t.includes(target)) { el.click(); return { picked: true, text: el.textContent.trim() }; }
-        }
-        return { picked: false };
-      })()`,
-    });
+        const btn = document.querySelector('[data-testid="model-selector-dropdown"]');
+        if (!btn) return { picked: false, error: 'no-selector' };
+        const before = btn.textContent.trim().replace(/\\s+/g, ' ');
 
-    // If not found at top level, expand "More models" and try again
-    if (!picked?.result?.picked) {
-      await deviceOp(gatewayUrl, deviceId, 'eval', {
-        expression: `(() => {
-          const items = document.querySelectorAll('[role="menuitem"]');
-          for (const el of items) {
-            if (el.textContent.includes('More models')) { el.click(); return true; }
-          }
-          return false;
-        })()`,
-      });
-      await delay(500);
+        // Open dropdown
+        btn.click();
+        await new Promise(r => setTimeout(r, 400));
 
-      picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
-        expression: `(() => {
-          const target = ${JSON.stringify(modelText)};
+        // Try to find and click target in top-level items
+        function tryClick() {
           const items = document.querySelectorAll('[role="menuitem"]');
           for (const el of items) {
             const t = (el.textContent || '').toLowerCase();
@@ -1732,27 +1686,47 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
               return { picked: true, text: el.textContent.trim() };
             }
           }
-          return { picked: false };
-        })()`,
-      });
-    }
+          return null;
+        }
 
-    await delay(800);
+        let result = tryClick();
+        if (result) {
+          await new Promise(r => setTimeout(r, 600));
+          const after = document.querySelector('[data-testid="model-selector-dropdown"]')?.textContent?.trim()?.replace(/\\s+/g, ' ') || '';
+          return { ...result, before, after };
+        }
 
-    // Verify the switch
-    const after = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
+        // Expand "More models"
+        const items = document.querySelectorAll('[role="menuitem"]');
+        for (const el of items) {
+          if (el.textContent.includes('More models')) { el.click(); break; }
+        }
+        await new Promise(r => setTimeout(r, 400));
 
-    if (!picked?.result?.picked) {
-      // Close dropdown if still open
-      await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `document.body.click()` });
+        result = tryClick();
+        if (result) {
+          await new Promise(r => setTimeout(r, 600));
+          const after = document.querySelector('[data-testid="model-selector-dropdown"]')?.textContent?.trim()?.replace(/\\s+/g, ' ') || '';
+          return { ...result, before, after };
+        }
+
+        // Not found — close dropdown
+        document.body.click();
+        return { picked: false, before };
+      })()`,
+    });
+
+    const data = result?.result ?? result;
+
+    if (!data?.picked) {
       return reply.code(400).send({
         ok: false,
-        error: `Model "${model}" not found. Use GET /v1/app/claude/models to see available options.`,
-        current: after?.result || 'unknown',
+        error: `Model "${model}" not found. Try: sonnet, opus, haiku, extended, or full names like "Opus 4.6"`,
+        current: data?.before || 'unknown',
       });
     }
 
-    return { ok: true, action: 'setModel', model: after?.result || model, previous: model };
+    return { ok: true, action: 'setModel', model: data.after || model, previous: data.before };
   });
 
   // GET /v1/app/claude/projects
