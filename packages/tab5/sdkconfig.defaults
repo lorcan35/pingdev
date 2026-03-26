@@ -1,0 +1,22 @@
+# TinkerClaw Tab5 — ESP32-P4 defaults (Phase 1)
+
+# Target
+CONFIG_IDF_TARGET="esp32p4"
+
+# PSRAM — needed for framebuffer (800x480x2 = 768KB)
+CONFIG_SPIRAM=y
+
+# Larger main task stack
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Log level
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# FreeRTOS tick rate
+CONFIG_FREERTOS_HZ=1000
+
+# Partition table
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# USB console (JTAG/serial)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
