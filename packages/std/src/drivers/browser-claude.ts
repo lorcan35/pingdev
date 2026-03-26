@@ -123,17 +123,19 @@ export class BrowserClaudeAdapter implements Driver {
     const start = Date.now();
     const timeoutMs = request.timeout_ms ?? this.responseTimeoutMs;
 
-    // 1. Start a new chat for clean context (unless conversation_id given)
-    if (!request.conversation_id) {
-      await gwPost(`${this.gateway}/v1/app/claude/chat/new`, {});
-      await sleep(1000);
+    const deviceId = await this.findClaudeDevice();
+    if (!deviceId) {
+      return {
+        text: '[Browser Claude error: No Claude tab open]',
+        driver: this.registration.id,
+        durationMs: Date.now() - start,
+      };
     }
 
-    // 2. Get the "before" response snapshot so we can detect new output
-    const beforeRes = await gwFetch(`${this.gateway}/v1/app/claude/chat/read`);
-    const beforeText = beforeRes?.response || '';
+    // 1. Count existing response messages so we can detect the new one
+    const beforeCount = await this.getResponseCount(deviceId);
 
-    // 3. Send the message
+    // 2. Extract the prompt
     const prompt = request.prompt || (
       typeof request.messages?.at(-1)?.content === 'string'
         ? request.messages.at(-1)!.content as string
@@ -144,6 +146,7 @@ export class BrowserClaudeAdapter implements Driver {
       return { text: '', driver: this.registration.id, durationMs: Date.now() - start };
     }
 
+    // 3. Send the message via PingApp route
     const sendRes = await gwPost(`${this.gateway}/v1/app/claude/chat`, { message: prompt }, 30_000);
     if (!sendRes?.ok) {
       return {
@@ -153,59 +156,91 @@ export class BrowserClaudeAdapter implements Driver {
       };
     }
 
-    // 4. Poll for response — wait until text changes and Claude stops typing
+    // 4. Poll until a NEW response appears and Claude stops typing
     const deadline = Date.now() + timeoutMs;
-    let lastResponse = '';
+    let lastText = '';
     let stableCount = 0;
 
+    // Wait a bit for Claude to start generating
+    await sleep(2000);
+
     while (Date.now() < deadline) {
-      await sleep(this.pollIntervalMs);
+      // Read the latest response directly from the DOM
+      const readData = await this.readLatestResponse(deviceId, beforeCount);
 
-      const readRes = await gwFetch(`${this.gateway}/v1/app/claude/chat/read`);
-      const currentText = readRes?.response || '';
-
-      // No new text yet
-      if (currentText === beforeText || !currentText) {
+      if (!readData.text) {
+        // No new response yet — keep waiting
+        await sleep(this.pollIntervalMs);
         continue;
       }
 
-      // Text is changing — Claude is still typing
-      if (currentText !== lastResponse) {
-        lastResponse = currentText;
+      // Got text — check if it's still changing
+      if (readData.text !== lastText) {
+        lastText = readData.text;
         stableCount = 0;
+        await sleep(this.pollIntervalMs);
         continue;
       }
 
-      // Text hasn't changed since last poll — might be done
+      // Text stable — check if Claude is done
       stableCount++;
-
-      // Also check if Claude's "stop" button has disappeared (typing indicator gone)
       if (stableCount >= 2) {
-        // Double-check: is Claude still generating?
         const stillTyping = await this.isStillTyping();
-        if (!stillTyping) {
-          break;
-        }
-        // Reset stable count if still typing
+        if (!stillTyping) break;
         stableCount = 0;
       }
+      await sleep(this.pollIntervalMs);
     }
 
     const durationMs = Date.now() - start;
 
-    // 5. Read final response
-    const finalRes = await gwFetch(`${this.gateway}/v1/app/claude/chat/read`);
-    const responseText = finalRes?.response || lastResponse || '';
+    // 5. Final read
+    if (!lastText) {
+      const finalRead = await this.readLatestResponse(deviceId, beforeCount);
+      lastText = finalRead.text;
+    }
 
     // 6. Get model info
-    const modelRes = await gwFetch(`${this.gateway}/v1/app/claude/model`);
+    const modelRes = await gwFetch(`${this.gateway}/v1/app/claude/model`).catch(() => null);
 
     return {
-      text: responseText,
+      text: lastText || '[No response from Claude]',
       driver: this.registration.id,
       model: modelRes?.model || 'claude-web',
       durationMs,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Read helpers — work directly with deviceId to avoid navigation issues
+  // -------------------------------------------------------------------------
+
+  private async getResponseCount(deviceId: string): Promise<number> {
+    try {
+      const res = await gwPost(`${this.gateway}/v1/dev/${deviceId}/eval`, {
+        expression: `document.querySelectorAll('.font-claude-response').length`,
+      });
+      return typeof res?.result === 'number' ? res.result : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async readLatestResponse(deviceId: string, beforeCount: number): Promise<{ text: string }> {
+    try {
+      const res = await gwPost(`${this.gateway}/v1/dev/${deviceId}/eval`, {
+        expression: `(() => {
+          const msgs = document.querySelectorAll('.font-claude-response');
+          if (msgs.length <= ${beforeCount}) return { text: '' };
+          const last = msgs[msgs.length - 1];
+          return { text: last?.textContent?.trim()?.substring(0, 10000) || '' };
+        })()`,
+      });
+      const data = res?.result ?? res;
+      return { text: data?.text || '' };
+    } catch {
+      return { text: '' };
+    }
   }
 
   // -------------------------------------------------------------------------
