@@ -235,23 +235,22 @@ export class BrowserClaudeAdapter implements Driver {
           const last = msgs[msgs.length - 1];
           if (!last) return { text: '' };
 
-          // Clone the node and remove thinking indicators before reading text
-          const clone = last.cloneNode(true);
+          // Claude's response uses a CSS grid with row-start-1 (thinking status)
+          // and row-start-2 (actual response content). Extract from row-start-2.
+          const contentRow = last.querySelector('[class*="row-start-2"]');
+          if (contentRow) {
+            const text = contentRow.textContent?.trim() || '';
+            // Extract thinking summary from row-start-1
+            const thinkingRow = last.querySelector('[class*="row-start-1"]');
+            const thinking = thinkingRow?.textContent?.trim() || undefined;
+            return { text: text.substring(0, 10000), thinking };
+          }
 
-          // Remove "Thought for Xs" indicators and thinking blocks
-          clone.querySelectorAll('[class*="thinking"], [class*="Thinking"], [data-thinking]').forEach(el => el.remove());
-
-          let text = clone.textContent?.trim() || '';
-
-          // Strip common thinking prefix patterns: "Thought for Xs", "Thinking..."
+          // Fallback: strip thinking patterns from full text
+          let text = last.textContent?.trim() || '';
           text = text.replace(/^(Thought for \\d+s\\s*)+/gi, '').trim();
-          text = text.replace(/^Thinking\\.{0,3}\\s*/gi, '').trim();
-
-          // Also extract thinking separately if present
-          const thinkingEls = last.querySelectorAll('[class*="thinking"], [class*="Thinking"]');
-          const thinking = Array.from(thinkingEls).map(el => el.textContent?.trim()).filter(Boolean).join('\\n');
-
-          return { text: text.substring(0, 10000), thinking: thinking || undefined };
+          text = text.replace(/^(Synthesized|Analyzed|Considered|Evaluated|Processing).*?(?=\\n)/gi, '').trim();
+          return { text: text.substring(0, 10000) };
         })()`,
       });
       const data = res?.result ?? res;
