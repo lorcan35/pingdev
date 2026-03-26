@@ -1856,6 +1856,275 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     return { ok: true, action: 'recon', recon: result?.result || {} };
   });
 
+  // POST /v1/app/claude/retry — regenerate the last response
+  app.post('/v1/app/claude/retry', async (req, reply) => {
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        // Find the last retry button (action-bar-retry)
+        const btns = document.querySelectorAll('[data-testid="action-bar-retry"]');
+        const last = btns[btns.length - 1];
+        if (last) { last.click(); return { retried: true }; }
+        // Fallback: aria-label
+        const retryBtns = document.querySelectorAll('button[aria-label="Retry"]');
+        const lastRetry = retryBtns[retryBtns.length - 1];
+        if (lastRetry) { lastRetry.click(); return { retried: true, via: 'aria' }; }
+        return { retried: false };
+      })()`,
+    });
+    return { ok: !!(result?.result?.retried), action: 'retry' };
+  });
+
+  // POST /v1/app/claude/copy — copy the last response to clipboard
+  app.post('/v1/app/claude/copy', async (req, reply) => {
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const btns = document.querySelectorAll('[data-testid="action-bar-copy"]');
+        const last = btns[btns.length - 1];
+        if (last) { last.click(); return { copied: true }; }
+        return { copied: false };
+      })()`,
+    });
+    return { ok: !!(result?.result?.copied), action: 'copy' };
+  });
+
+  // POST /v1/app/claude/feedback { type: "positive" | "negative" }
+  app.post('/v1/app/claude/feedback', async (req, reply) => {
+    const { type } = req.body as any;
+    if (!type || !['positive', 'negative'].includes(type)) {
+      return reply.code(400).send({ ok: false, error: 'type required: "positive" or "negative"' });
+    }
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    const ariaLabel = type === 'positive' ? 'Give positive feedback' : 'Give negative feedback';
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const btns = document.querySelectorAll('button[aria-label="${ariaLabel}"]');
+        const last = btns[btns.length - 1];
+        if (last) { last.click(); return { clicked: true }; }
+        return { clicked: false };
+      })()`,
+    });
+    return { ok: !!(result?.result?.clicked), action: 'feedback', type };
+  });
+
+  // POST /v1/app/claude/edit { message } — edit the last user message
+  app.post('/v1/app/claude/edit', async (req, reply) => {
+    const { message } = req.body as any;
+    if (!message) return reply.code(400).send({ ok: false, error: 'message required' });
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    // Click the edit button on the last user message
+    const editClick = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const userMsgs = document.querySelectorAll('[data-testid="user-message"]');
+        const last = userMsgs[userMsgs.length - 1];
+        if (!last) return { found: false };
+        // Hover to reveal edit button, then click it
+        const editBtn = last.closest('[class]')?.querySelector('button[aria-label="Edit"]');
+        if (editBtn) { editBtn.click(); return { found: true, via: 'direct' }; }
+        // Try finding edit button near the message
+        const parent = last.parentElement;
+        const btns = parent?.querySelectorAll('button') || [];
+        for (const b of btns) {
+          if ((b.ariaLabel || '').includes('Edit') || (b.textContent || '').includes('Edit')) {
+            b.click(); return { found: true, via: 'parent-scan' };
+          }
+        }
+        return { found: false };
+      })()`,
+    });
+
+    if (!editClick?.result?.found) {
+      return reply.code(400).send({ ok: false, error: 'Could not find edit button' });
+    }
+
+    await delay(500);
+
+    // Replace the text in the edit textarea and submit
+    const msgText = String(message).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+    await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const editArea = document.querySelector('[contenteditable="true"]');
+        if (!editArea) return 'no-edit-area';
+        editArea.focus();
+        const range = document.createRange();
+        range.selectNodeContents(editArea);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        document.execCommand('insertText', false, '${msgText}');
+        return 'replaced';
+      })()`,
+    });
+
+    await delay(300);
+
+    // Click the save/submit button
+    await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        // Look for a Save or Send button that appeared after edit
+        const btns = document.querySelectorAll('button');
+        for (const b of btns) {
+          const t = (b.textContent || '').trim().toLowerCase();
+          const a = (b.ariaLabel || '').toLowerCase();
+          if (t === 'save' || t === 'send' || a.includes('send') || a.includes('save')) {
+            b.click(); return 'submitted';
+          }
+        }
+        // Fallback: press Enter
+        const editArea = document.querySelector('[contenteditable="true"]');
+        if (editArea) {
+          editArea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+          return 'enter-sent';
+        }
+        return 'no-submit-button';
+      })()`,
+    });
+
+    return { ok: true, action: 'edit', message };
+  });
+
+  // GET /v1/app/claude/history — full chat history of current conversation
+  app.get('/v1/app/claude/history', async (req, reply) => {
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const messages = [];
+        // User messages
+        document.querySelectorAll('[data-testid="user-message"]').forEach((el, i) => {
+          messages.push({ role: 'user', index: i, text: el.textContent?.trim()?.substring(0, 2000) || '' });
+        });
+        // Claude responses
+        document.querySelectorAll('.font-claude-response').forEach((el, i) => {
+          const contentRow = el.querySelector('[class*="row-start-2"]');
+          const text = contentRow ? contentRow.textContent?.trim() : el.textContent?.trim();
+          messages.push({ role: 'assistant', index: i, text: (text || '').substring(0, 2000) });
+        });
+        // Sort by DOM position
+        const allNodes = Array.from(document.querySelectorAll('[data-testid="user-message"], .font-claude-response'));
+        const ordered = allNodes.map((node, domIndex) => {
+          const isUser = node.hasAttribute('data-testid');
+          const text = isUser ? node.textContent?.trim() : (node.querySelector('[class*="row-start-2"]')?.textContent?.trim() || node.textContent?.trim());
+          return { role: isUser ? 'user' : 'assistant', text: (text || '').substring(0, 2000), domIndex };
+        });
+        return { messages: ordered, url: location.href, title: document.title };
+      })()`,
+    });
+
+    const data = result?.result ?? result;
+    return { ok: true, action: 'history', ...data };
+  });
+
+  // POST /v1/app/claude/delete { conversationId } — delete a conversation
+  app.post('/v1/app/claude/delete', async (req, reply) => {
+    const { conversationId } = req.body as any;
+    if (!conversationId) return reply.code(400).send({ ok: false, error: 'conversationId required' });
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    // Find the conversation in the sidebar and click its "More options" menu
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(async () => {
+        const link = document.querySelector('a[href*="/chat/${conversationId}"]');
+        if (!link) return { deleted: false, error: 'conversation not found in sidebar' };
+
+        // Find the "More options" button near this conversation
+        const container = link.closest('li, div[class]');
+        if (!container) return { deleted: false, error: 'no container' };
+
+        const moreBtn = container.querySelector('button[aria-label*="More options"]');
+        if (!moreBtn) return { deleted: false, error: 'no more-options button' };
+
+        moreBtn.click();
+        await new Promise(r => setTimeout(r, 500));
+
+        // Look for "Delete" in the menu
+        const menuItems = document.querySelectorAll('[role="menuitem"], button');
+        for (const item of menuItems) {
+          if ((item.textContent || '').toLowerCase().includes('delete')) {
+            item.click();
+            await new Promise(r => setTimeout(r, 500));
+            // Confirm deletion if dialog appears
+            const confirmBtns = document.querySelectorAll('button');
+            for (const cb of confirmBtns) {
+              if ((cb.textContent || '').toLowerCase().includes('delete')) {
+                cb.click();
+                return { deleted: true };
+              }
+            }
+            return { deleted: true, note: 'no confirmation dialog' };
+          }
+        }
+        document.body.click();
+        return { deleted: false, error: 'delete option not found in menu' };
+      })()`,
+    });
+
+    const data = result?.result ?? result;
+    return { ok: !!data?.deleted, action: 'delete', ...data };
+  });
+
+  // GET /v1/app/claude/settings — get account/settings info
+  app.get('/v1/app/claude/settings', async (req, reply) => {
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const userBtn = document.querySelector('[data-testid="user-menu-button"]');
+        const model = document.querySelector('[data-testid="model-selector-dropdown"]')?.textContent?.trim() || '';
+        const title = document.title;
+        const url = location.href;
+        const convCount = document.querySelectorAll('a[href*="/chat/"]').length;
+        return {
+          model,
+          currentPage: url,
+          title,
+          conversationCount: convCount,
+          accountButton: !!userBtn,
+        };
+      })()`,
+    });
+
+    return { ok: true, action: 'settings', ...(result?.result ?? result) };
+  });
+
+  // POST /v1/app/claude/share — share current conversation
+  app.post('/v1/app/claude/share', async (req, reply) => {
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(async () => {
+        const shareBtn = document.querySelector('[data-testid="wiggle-controls-actions-share"]');
+        if (!shareBtn) return { shared: false, error: 'no share button' };
+        shareBtn.click();
+        await new Promise(r => setTimeout(r, 1500));
+        // Look for a share link or copy button in the dialog
+        const dialog = document.querySelector('[role="dialog"]');
+        if (!dialog) return { shared: true, note: 'share dialog may have opened' };
+        const copyBtn = dialog.querySelector('button[aria-label*="Copy"], button');
+        const linkInput = dialog.querySelector('input');
+        const shareUrl = linkInput?.value || '';
+        if (copyBtn) copyBtn.click();
+        return { shared: true, url: shareUrl };
+      })()`,
+    });
+
+    const data = result?.result ?? result;
+    return { ok: true, action: 'share', ...data };
+  });
+
   // =============================================
   // CHATGPT PingApp
   // =============================================
