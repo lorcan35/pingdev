@@ -1,1 +1,0 @@
-{"version":3,"file":"healing-log.d.ts","sourceRoot":"","sources":["healing-log.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,eAAe,EAAE,MAAM,YAAY,CAAC;AAElD,qBAAa,UAAU;IACT,OAAO,CAAC,QAAQ;gBAAR,QAAQ,EAAE,MAAM;IAQpC,gDAAgD;IAChD,MAAM,CAAC,KAAK,EAAE,eAAe,GAAG,IAAI;IAIpC,sCAAsC;IACtC,IAAI,IAAI,eAAe,EAAE;IAczB,0BAA0B;IAC1B,KAAK,IAAI,IAAI;CAGd"}
