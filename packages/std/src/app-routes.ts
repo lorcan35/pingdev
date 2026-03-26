@@ -1576,18 +1576,19 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
         const last = msgs[msgs.length - 1];
         if (!last) return { text: '' };
 
-        // Clone and strip thinking indicators
-        const clone = last.cloneNode(true);
-        clone.querySelectorAll('[class*="thinking"], [class*="Thinking"], [data-thinking]').forEach(el => el.remove());
-        let text = clone.textContent?.trim() || '';
+        // Claude uses CSS grid: row-start-2 = response, row-start-1 = thinking status
+        const contentRow = last.querySelector('[class*="row-start-2"]');
+        if (contentRow) {
+          const text = contentRow.textContent?.trim() || '';
+          const thinkingRow = last.querySelector('[class*="row-start-1"]');
+          const thinking = thinkingRow?.textContent?.trim() || undefined;
+          return { text: text.substring(0, 5000), thinking };
+        }
+
+        // Fallback for non-thinking responses
+        let text = last.textContent?.trim() || '';
         text = text.replace(/^(Thought for \\d+s\\s*)+/gi, '').trim();
-        text = text.replace(/^Thinking\\.{0,3}\\s*/gi, '').trim();
-
-        // Extract thinking separately
-        const thinkingEls = last.querySelectorAll('[class*="thinking"], [class*="Thinking"]');
-        const thinking = Array.from(thinkingEls).map(el => el.textContent?.trim()).filter(Boolean).join('\\n');
-
-        return { text: text.substring(0, 5000), thinking: thinking || undefined };
+        return { text: text.substring(0, 5000) };
       })()`,
     });
 
