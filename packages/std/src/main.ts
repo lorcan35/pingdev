@@ -11,6 +11,7 @@ import { OpenAICompatAdapter } from './drivers/openai-compat.js';
 import { AnthropicAdapter } from './drivers/anthropic.js';
 import { OpenAIAdapter } from './drivers/openai.js';
 import { LMStudioAdapter } from './drivers/lmstudio.js';
+import { BrowserClaudeAdapter } from './drivers/browser-claude.js';
 import { getLocalConfig, isLocalMode } from './local-mode.js';
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,19 @@ if (openaiApiKey) {
     }),
   );
   logGateway('[main] registered lmstudio driver');
+}
+
+// Browser Claude — uses Claude's web UI via PingApp as a free LLM engine (Tier 3)
+// Always registered; health check determines if a Claude tab is actually available.
+{
+  const browserClaudePriority = config.llm?.browserClaude?.priority ?? 3;
+  registry.register(
+    new BrowserClaudeAdapter({
+      gateway: `http://localhost:${port}`,
+      priority: browserClaudePriority,
+    }),
+  );
+  logGateway('[main] registered browser-claude driver', { priority: browserClaudePriority });
 }
 
 // Dedicated local-mode OpenAI-compatible route (highest priority, local only)

@@ -49,6 +49,9 @@ export interface LLMProviderConfig {
     baseUrl: string;
     model: string;
   };
+  browserClaude?: {
+    priority?: number;
+  };
 }
 
 export interface PingOSConfig {
