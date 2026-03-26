@@ -1,13 +1,13 @@
-# TinkerClaw Tab5 — ESP32-P4 defaults (Phase 1)
+# TinkerClaw Tab5 — ESP32-P4 defaults (Phase 1.5)
 
 # Target
 CONFIG_IDF_TARGET="esp32p4"
 
-# PSRAM — needed for framebuffer (800x480x2 = 768KB)
+# PSRAM — needed for framebuffer and DMA buffers
 CONFIG_SPIRAM=y
 
-# Larger main task stack
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Larger main task stack (display init needs room)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # Log level
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
@@ -20,3 +20,6 @@ CONFIG_PARTITION_TABLE_SINGLE_APP=y
 
 # USB console (JTAG/serial)
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# MIPI DSI support
+CONFIG_SOC_MIPI_DSI_SUPPORTED=y

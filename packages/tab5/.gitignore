@@ -5,3 +5,7 @@ sdkconfig
 sdkconfig.old
 *.bin
 
+managed_components/
+build/
+sdkconfig
+sdkconfig.old
