@@ -17,3 +17,6 @@ export type { LMStudioAdapterOptions } from './lmstudio.js';
 
 export { OpenAIAdapter } from './openai.js';
 export type { OpenAIAdapterOptions } from './openai.js';
+
+export { BrowserClaudeAdapter } from './browser-claude.js';
+export type { BrowserClaudeOptions } from './browser-claude.js';
