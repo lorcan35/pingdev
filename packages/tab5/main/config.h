@@ -7,24 +7,25 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// Display — MIPI DSI ILI9881C 720x1280
+// Display — MIPI DSI ST7123 720x1280
 // ---------------------------------------------------------------------------
 #define TAB5_DISPLAY_WIDTH   720
 #define TAB5_DISPLAY_HEIGHT  1280
-#define TAB5_LCD_BPP         16   // RGB565
+#define TAB5_LCD_BPP         16   // RGB565 (DPI pixel format)
+#define TAB5_LCD_BPP_PANEL   24   // RGB888 (panel dev config)
 
-// MIPI DSI parameters
+// MIPI DSI parameters (ST7123)
 #define TAB5_DSI_LANE_NUM          2
-#define TAB5_DSI_LANE_BITRATE_MBPS 730
-#define TAB5_DSI_DPI_CLK_MHZ       60
+#define TAB5_DSI_LANE_BITRATE_MBPS 965
+#define TAB5_DSI_DPI_CLK_MHZ       70
 
-// MIPI DSI timing
-#define TAB5_DSI_HSYNC_WIDTH  40
-#define TAB5_DSI_HBP          140
+// MIPI DSI timing (ST7123)
+#define TAB5_DSI_HSYNC_WIDTH  2
+#define TAB5_DSI_HBP          40
 #define TAB5_DSI_HFP          40
-#define TAB5_DSI_VSYNC_WIDTH  4
-#define TAB5_DSI_VBP          20
-#define TAB5_DSI_VFP          20
+#define TAB5_DSI_VSYNC_WIDTH  2
+#define TAB5_DSI_VBP          8
+#define TAB5_DSI_VFP          220
 
 // MIPI DSI PHY LDO
 #define TAB5_DSI_PHY_LDO_CHAN       3
