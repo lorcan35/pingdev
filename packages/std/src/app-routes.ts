@@ -1603,7 +1603,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     return { ok: true, action: 'openConversation', id };
   });
 
-  // GET /v1/app/claude/model
+  // GET /v1/app/claude/model — get current model
   app.get('/v1/app/claude/model', async (req, reply) => {
     const deviceId = await findClaudeDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
@@ -1612,7 +1612,58 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     return { ok: true, model: result?.result || 'unknown' };
   });
 
-  // POST /v1/app/claude/model { model }
+  // GET /v1/app/claude/models — list all available models
+  app.get('/v1/app/claude/models', async (req, reply) => {
+    const deviceId = await findClaudeDevice(gatewayUrl);
+    if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
+
+    // Open the dropdown
+    await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
+    await delay(500);
+
+    // Click "More models" to expand the full list
+    await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const items = document.querySelectorAll('[role="menuitem"]');
+        for (const el of items) {
+          if (el.textContent.includes('More models')) { el.click(); return true; }
+        }
+        return false;
+      })()`,
+    });
+    await delay(500);
+
+    // Read all model options
+    const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
+      expression: `(() => {
+        const items = document.querySelectorAll('[role="menuitem"]');
+        const models = [];
+        for (const el of items) {
+          const text = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+          if (!text || text.length > 100 || text === 'More models') continue;
+          // Extract just the model name (before the description)
+          const name = text.replace(/(Most efficient|Think longer|Best for|Fastest|Older model).*$/i, '').trim();
+          models.push({ name, fullText: text });
+        }
+        return models;
+      })()`,
+    });
+
+    // Close the dropdown
+    await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `document.body.click()` });
+
+    // Get current model
+    const current = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
+
+    return {
+      ok: true,
+      current: current?.result || 'unknown',
+      models: result?.result || [],
+    };
+  });
+
+  // POST /v1/app/claude/model { model } — switch model
+  // Accepts: "sonnet", "opus", "haiku", "extended", or full names like "Opus 4.6"
   app.post('/v1/app/claude/model', async (req, reply) => {
     const { model } = req.body as any;
     if (!model) return reply.code(400).send({ ok: false, error: 'model required' });
@@ -1620,22 +1671,88 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const deviceId = await findClaudeDevice(gatewayUrl);
     if (!deviceId) return reply.code(404).send({ ok: false, error: 'No Claude tab open' });
 
-    await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
+    const modelText = String(model).toLowerCase().trim();
 
-    const modelText = String(model);
-    const picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
+    // Special case: "extended" = Extended thinking toggle
+    if (modelText === 'extended' || modelText === 'extended thinking') {
+      await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
+      await delay(500);
+      const picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
+        expression: `(() => {
+          const items = document.querySelectorAll('[role="menuitem"]');
+          for (const el of items) {
+            if ((el.textContent || '').includes('Extended thinking')) { el.click(); return { picked: true, model: 'Extended thinking' }; }
+          }
+          return { picked: false };
+        })()`,
+      });
+      await delay(800);
+      const after = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
+      return { ok: !!(picked?.result?.picked), action: 'setModel', model: after?.result || 'Extended thinking' };
+    }
+
+    // Open dropdown
+    await deviceOp(gatewayUrl, deviceId, 'click', { selector: '[data-testid="model-selector-dropdown"]', stealth: true });
+    await delay(500);
+
+    // First try top-level items
+    let picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
       expression: `(() => {
-        const target = ${JSON.stringify('__MODEL__')}.toLowerCase();
-        const options = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], button, li, div'));
-        const match = options.find(el => (el.textContent || '').trim().toLowerCase().includes(target));
-        if (!match) return false;
-        match.click();
-        return true;
-      })()`.replace('__MODEL__', modelText),
+        const target = ${JSON.stringify(modelText)};
+        const items = document.querySelectorAll('[role="menuitem"]');
+        for (const el of items) {
+          const t = (el.textContent || '').toLowerCase();
+          if (t.includes(target)) { el.click(); return { picked: true, text: el.textContent.trim() }; }
+        }
+        return { picked: false };
+      })()`,
     });
 
+    // If not found at top level, expand "More models" and try again
+    if (!picked?.result?.picked) {
+      await deviceOp(gatewayUrl, deviceId, 'eval', {
+        expression: `(() => {
+          const items = document.querySelectorAll('[role="menuitem"]');
+          for (const el of items) {
+            if (el.textContent.includes('More models')) { el.click(); return true; }
+          }
+          return false;
+        })()`,
+      });
+      await delay(500);
+
+      picked = await deviceOp(gatewayUrl, deviceId, 'eval', {
+        expression: `(() => {
+          const target = ${JSON.stringify(modelText)};
+          const items = document.querySelectorAll('[role="menuitem"]');
+          for (const el of items) {
+            const t = (el.textContent || '').toLowerCase();
+            if (t.includes(target) && !t.includes('more models')) {
+              el.click();
+              return { picked: true, text: el.textContent.trim() };
+            }
+          }
+          return { picked: false };
+        })()`,
+      });
+    }
+
     await delay(800);
-    return { ok: !!picked?.result, action: 'setModel', model: modelText };
+
+    // Verify the switch
+    const after = await deviceOp(gatewayUrl, deviceId, 'eval', { expression: EXTRACTORS.claudeModel });
+
+    if (!picked?.result?.picked) {
+      // Close dropdown if still open
+      await deviceOp(gatewayUrl, deviceId, 'eval', { expression: `document.body.click()` });
+      return reply.code(400).send({
+        ok: false,
+        error: `Model "${model}" not found. Use GET /v1/app/claude/models to see available options.`,
+        current: after?.result || 'unknown',
+      });
+    }
+
+    return { ok: true, action: 'setModel', model: after?.result || model, previous: model };
   });
 
   // GET /v1/app/claude/projects
