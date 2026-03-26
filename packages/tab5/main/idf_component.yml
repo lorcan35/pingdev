@@ -1,1 +1,8 @@
-## no external dependencies — ST7123 driver is local
+dependencies:
+  idf: ">=5.3"
+  esp_lcd_touch_st7123:
+    version: ">=1.0.0"
+  espressif/esp_hosted:
+    version: "1.4.0"
+  espressif/esp_wifi_remote:
+    version: "0.8.5"

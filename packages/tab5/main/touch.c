@@ -1,188 +1,142 @@
 /**
- * TinkerClaw Tab5 — Touch input + WebSocket sender
+ * TinkerTab — ST7123 Touch driver
  *
- * Reads capacitive touch events from the GT911/CST816 controller,
- * translates to screen coordinates, and sends to Dragon via WebSocket.
- *
- * Touch events are sent as JSON:
- *   {"type":"tap","x":400,"y":240}
- *   {"type":"swipe","x1":100,"y1":240,"x2":700,"y2":240,"dx":600,"dy":0}
- *   {"type":"longpress","x":400,"y":240}
- *
- * Dragon translates these to CDP Input.dispatchMouseEvent calls.
+ * Uses esp_lcd_touch_st7123 component to read capacitive touch
+ * from the integrated ST7123 TDDI at I2C 0x55.
  */
 
 #include "touch.h"
 #include "config.h"
 
-#include <string.h>
-#include <stdio.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
 #include "esp_log.h"
-#include "esp_timer.h"
-#include "driver/i2c_master.h"
-#include "esp_websocket_client.h"
+#include "esp_check.h"
+#include "esp_lcd_touch_st7123.h"
+#include "esp_lcd_panel_io.h"
 
 static const char *TAG = "tab5_touch";
 
-static unsigned long s_event_count = 0;
-static QueueHandle_t s_touch_queue = NULL;
+static esp_lcd_touch_handle_t s_touch = NULL;
 
-// Touch event structure
-typedef struct {
-    enum { TOUCH_TAP, TOUCH_SWIPE, TOUCH_LONGPRESS } type;
-    int x, y;          // Current/end position
-    int x_start, y_start; // Start position (for swipe)
-} touch_event_t;
-
-// GT911 I2C address (common on these boards)
-#define GT911_ADDR_1  0x5D
-#define GT911_ADDR_2  0x14
-
-// Touch state tracking
-static int s_last_x = -1, s_last_y = -1;
-static int64_t s_touch_start_time = 0;
-static bool s_touching = false;
-static int s_touch_start_x = 0, s_touch_start_y = 0;
-
-#define LONGPRESS_THRESHOLD_MS  500
-#define SWIPE_THRESHOLD_PX      30
-
-/**
- * Touch polling task — reads I2C touch controller.
- *
- * Note: The actual I2C init and touch controller setup depends on the
- * specific board. This is a placeholder that will be adapted once we
- * identify the exact touch controller on our Tab5 board.
- */
-static void touch_read_task(void *arg)
+esp_err_t tab5_touch_init(i2c_master_bus_handle_t i2c_bus)
 {
-    ESP_LOGI(TAG, "Touch read task started");
+    ESP_LOGI(TAG, "Initializing ST7123 touch (I2C 0x55, INT=GPIO%d)", TAB5_TOUCH_INT_GPIO);
 
-    // TODO Phase 1: Identify the touch controller via I2C scan
-    // For now, we'll scan for known addresses
-    ESP_LOGI(TAG, "Scanning for touch controller...");
+    // Create I2C panel IO for touch controller
+    esp_lcd_panel_io_handle_t tp_io = NULL;
+    esp_lcd_panel_io_i2c_config_t tp_io_config = {
+        .dev_addr = 0x55,
+        .control_phase_bytes = 1,
+        .dc_bit_offset = 0,
+        .lcd_cmd_bits = 16,
+        .flags = {
+            .disable_control_phase = 1,
+        },
+        .scl_speed_hz = TAB5_I2C_FREQ_HZ,
+    };
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_new_panel_io_i2c_v2(i2c_bus, &tp_io_config, &tp_io),
+        TAG, "Touch panel IO create failed");
 
-    // Placeholder: touch events will be fed once we identify the controller
-    // The factory firmware clearly has touch working (we saw the diagnostic UI)
-    // so the hardware is there — we just need the right driver.
-
-    while (1) {
-        // Read touch data from controller
-        // Phase 1: poll-based at ~60Hz
-        vTaskDelay(pdMS_TO_TICKS(16));
-
-        // TODO: Read actual touch data from I2C
-        // When a touch is detected:
-        // 1. On touch down: record start position and time
-        // 2. On touch up: classify as tap, swipe, or longpress
-        // 3. Push to queue for the sender task
-    }
-}
-
-/**
- * WebSocket sender task — forwards touch events to Dragon.
- */
-static void touch_sender_task(void *arg)
-{
-    ESP_LOGI(TAG, "Touch sender task started");
-
-    char ws_url[128];
-    snprintf(ws_url, sizeof(ws_url), "ws://%s:%d%s",
-             TAB5_DRAGON_HOST, TAB5_DRAGON_PORT, TAB5_TOUCH_WS_PATH);
-
-    esp_websocket_client_config_t ws_config = {
-        .uri = ws_url,
-        .reconnect_timeout_ms = 2000,
-        .network_timeout_ms = 5000,
+    // Touch controller config
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = TAB5_DISPLAY_WIDTH,
+        .y_max = TAB5_DISPLAY_HEIGHT,
+        .rst_gpio_num = -1,  // Reset via IO expander (already done)
+        .int_gpio_num = TAB5_TOUCH_INT_GPIO,
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = 0,
+            .mirror_x = 0,
+            .mirror_y = 0,
+        },
     };
 
-    esp_websocket_client_handle_t ws_client = esp_websocket_client_init(&ws_config);
-    if (!ws_client) {
-        ESP_LOGE(TAG, "WebSocket client init failed");
-        vTaskDelete(NULL);
-        return;
-    }
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_touch_new_i2c_st7123(tp_io, &tp_cfg, &s_touch),
+        TAG, "ST7123 touch create failed");
 
-    esp_err_t ret = esp_websocket_client_start(ws_client);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "WebSocket start failed: %s", esp_err_to_name(ret));
-        esp_websocket_client_destroy(ws_client);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "WebSocket connected to %s", ws_url);
-
-    touch_event_t event;
-    char json_buf[256];
-
-    while (1) {
-        if (xQueueReceive(s_touch_queue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
-            int len = 0;
-            switch (event.type) {
-                case TOUCH_TAP:
-                    len = snprintf(json_buf, sizeof(json_buf),
-                        "{\"type\":\"tap\",\"x\":%d,\"y\":%d}", event.x, event.y);
-                    break;
-                case TOUCH_SWIPE:
-                    len = snprintf(json_buf, sizeof(json_buf),
-                        "{\"type\":\"swipe\",\"x1\":%d,\"y1\":%d,\"x2\":%d,\"y2\":%d,\"dx\":%d,\"dy\":%d}",
-                        event.x_start, event.y_start, event.x, event.y,
-                        event.x - event.x_start, event.y - event.y_start);
-                    break;
-                case TOUCH_LONGPRESS:
-                    len = snprintf(json_buf, sizeof(json_buf),
-                        "{\"type\":\"longpress\",\"x\":%d,\"y\":%d}", event.x, event.y);
-                    break;
-            }
-
-            if (len > 0 && esp_websocket_client_is_connected(ws_client)) {
-                esp_websocket_client_send_text(ws_client, json_buf, len, pdMS_TO_TICKS(1000));
-                s_event_count++;
-            }
-        }
-    }
-}
-
-esp_err_t tab5_touch_init(void)
-{
-    s_touch_queue = xQueueCreate(32, sizeof(touch_event_t));
-    if (!s_touch_queue) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Start touch read task on core 0
-    xTaskCreatePinnedToCore(
-        touch_read_task,
-        "touch_read",
-        4096,
-        NULL,
-        4,      // Medium-high priority
-        NULL,
-        0       // Core 0
-    );
-
-    ESP_LOGI(TAG, "Touch initialized");
+    ESP_LOGI(TAG, "ST7123 touch initialized (0--%d x 0--%d)", TAB5_DISPLAY_WIDTH, TAB5_DISPLAY_HEIGHT);
     return ESP_OK;
 }
 
-void tab5_touch_start_sender(void)
+bool tab5_touch_read(tab5_touch_point_t *points, uint8_t *count)
 {
-    xTaskCreatePinnedToCore(
-        touch_sender_task,
-        "touch_send",
-        4096,
-        NULL,
-        3,      // Medium priority
-        NULL,
-        0       // Core 0
-    );
+    if (!s_touch || !points || !count) return false;
+
+    *count = 0;
+
+    esp_err_t ret = esp_lcd_touch_read_data(s_touch);
+    if (ret != ESP_OK) return false;
+
+    uint16_t x[TAB5_TOUCH_MAX_POINTS];
+    uint16_t y[TAB5_TOUCH_MAX_POINTS];
+    uint16_t strength[TAB5_TOUCH_MAX_POINTS];
+    uint8_t cnt = 0;
+
+    bool pressed = esp_lcd_touch_get_coordinates(
+        s_touch, x, y, strength, &cnt, TAB5_TOUCH_MAX_POINTS);
+
+    if (pressed && cnt > 0) {
+        *count = cnt;
+        for (int i = 0; i < cnt; i++) {
+            points[i].x = x[i];
+            points[i].y = y[i];
+            points[i].strength = strength[i];
+        }
+        return true;
+    }
+
+    return false;
 }
 
-unsigned long tab5_touch_get_event_count(void)
+int tab5_touch_diag(void)
 {
-    return s_event_count;
+    if (!s_touch) {
+        ESP_LOGE(TAG, "Touch not initialized");
+        return -1;
+    }
+
+    // Read adv_info register
+    uint8_t adv_info = 0;
+    esp_err_t ret = esp_lcd_panel_io_rx_param(s_touch->io, 0x0010, &adv_info, 1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "DIAG: Failed to read reg 0x0010: %s", esp_err_to_name(ret));
+        return -2;
+    }
+    ESP_LOGI(TAG, "DIAG: adv_info=0x%02X with_coord=%d", adv_info, (adv_info >> 3) & 1);
+
+    // Read max_touches from reg 0x0009
+    uint8_t max_touches = 0;
+    ret = esp_lcd_panel_io_rx_param(s_touch->io, 0x0009, &max_touches, 1);
+    ESP_LOGI(TAG, "DIAG: max_touches=%d (reg 0x0009)", max_touches);
+
+    // Read raw touch report bytes from 0x0014 (7 bytes per report, up to max_touches)
+    if (max_touches > 0 && max_touches <= 10) {
+        uint8_t raw[70];  // 10 * 7 bytes max
+        uint8_t read_len = max_touches * 7;
+        ret = esp_lcd_panel_io_rx_param(s_touch->io, 0x0014, raw, read_len);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "DIAG: Raw report (%d bytes):", read_len);
+            for (int i = 0; i < max_touches && i < 3; i++) {
+                uint8_t *r = &raw[i * 7];
+                ESP_LOGI(TAG, "  [%d] %02X %02X %02X %02X %02X %02X %02X (valid=%d x=%d y=%d)",
+                         i, r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                         (r[0] >> 7) & 1,
+                         ((r[0] & 0x3F) << 8) | r[1],
+                         (r[2] << 8) | r[3]);
+            }
+        } else {
+            ESP_LOGE(TAG, "DIAG: Failed to read report: %s", esp_err_to_name(ret));
+        }
+    }
+
+    // Try a full driver read cycle
+    ret = esp_lcd_touch_read_data(s_touch);
+    ESP_LOGI(TAG, "DIAG: read_data ret=%s, cached_points=%d",
+             esp_err_to_name(ret), s_touch->data.points);
+
+    return (int)adv_info;
 }
