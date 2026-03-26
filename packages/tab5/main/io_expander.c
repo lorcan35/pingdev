@@ -126,12 +126,20 @@ void tab5_set_touch_reset(bool active)
 void tab5_reset_display_and_touch(void)
 {
     ESP_LOGI(TAG, "Resetting LCD and touch");
-    // Assert reset
-    tab5_set_lcd_reset(true);
-    tab5_set_touch_reset(true);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    // Release reset
-    tab5_set_lcd_reset(false);
-    tab5_set_touch_reset(false);
-    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Read-modify-write both reset bits simultaneously (matching BSP behavior)
+    if (!s_pi4ioe1) return;
+    uint8_t val = pi4io_read(s_pi4ioe1, PI4IO_REG_OUT_SET);
+
+    // Assert reset: clear P4 (LCD_RST) and P5 (TP_RST)
+    val &= ~((1 << 4) | (1 << 5));
+    pi4io_write(s_pi4ioe1, PI4IO_REG_OUT_SET, val);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Release reset: set P4 and P5 back high
+    val |= ((1 << 4) | (1 << 5));
+    pi4io_write(s_pi4ioe1, PI4IO_REG_OUT_SET, val);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "LCD and touch reset complete");
 }

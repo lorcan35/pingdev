@@ -1,16 +1,27 @@
 # TinkerClaw Tab5 — ESP32-P4 defaults (Phase 1.5)
+# Matched to M5Stack Tab5 BSP sdkconfig
 
 # Target
 CONFIG_IDF_TARGET="esp32p4"
 
-# PSRAM — needed for framebuffer and DMA buffers
+# Flash — Tab5 has 16MB QIO flash
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Compiler — performance optimized
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# PSRAM — 200MHz, XIP enabled (critical for MIPI DSI framebuffer DMA)
 CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+# L2 Cache — 256KB with 128-byte lines (needed for DSI video streaming)
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
 # Larger main task stack (display init needs room)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
-
-# Log level
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # FreeRTOS tick rate
 CONFIG_FREERTOS_HZ=1000
@@ -21,5 +32,5 @@ CONFIG_PARTITION_TABLE_SINGLE_APP=y
 # USB console (JTAG/serial)
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
-# MIPI DSI support
-CONFIG_SOC_MIPI_DSI_SUPPORTED=y
+# Experimental features (required for some MIPI DSI APIs)
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y

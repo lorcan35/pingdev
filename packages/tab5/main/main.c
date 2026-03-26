@@ -76,6 +76,14 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "I2C initialized");
 
+        // Scan I2C bus to detect devices
+        ESP_LOGI(TAG, "Scanning I2C bus...");
+        for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+            if (i2c_master_probe(s_i2c_bus, addr, 50) == ESP_OK) {
+                ESP_LOGI(TAG, "  I2C device found at 0x%02X", addr);
+            }
+        }
+
         // Initialize IO expanders
         ret = tab5_io_expander_init(s_i2c_bus);
         if (ret != ESP_OK) {
@@ -83,6 +91,21 @@ void app_main(void)
         } else {
             // Reset LCD and touch via IO expander
             tab5_reset_display_and_touch();
+            // BSP has ~500ms of other init between reset and display — stabilize
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
+
+        // Detect display type (BSP method: probe touch controller)
+        // GT911 at 0x14 or 0x5D → ILI9881C/ST7703 panel
+        // Touch at 0x55 → ST7123 panel
+        if (i2c_master_probe(s_i2c_bus, 0x55, 50) == ESP_OK) {
+            ESP_LOGW(TAG, "*** DETECTED: ST7123 touch at 0x55 — need ST7123 display driver! ***");
+        }
+        if (i2c_master_probe(s_i2c_bus, 0x5D, 50) == ESP_OK) {
+            ESP_LOGI(TAG, "DETECTED: GT911 touch at 0x5D — ILI9881C display driver OK");
+        }
+        if (i2c_master_probe(s_i2c_bus, 0x14, 50) == ESP_OK) {
+            ESP_LOGI(TAG, "DETECTED: GT911 touch at 0x14 — ILI9881C display driver OK");
         }
     }
 
@@ -140,13 +163,32 @@ void app_main(void)
                     } else if (strcmp(cmd_buf, "black") == 0) {
                         tab5_display_fill_color(0x0000);
                         printf("Display: black\n");
+                    } else if (strcmp(cmd_buf, "scan") == 0) {
+                        printf("Scanning I2C bus...\n");
+                        for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+                            if (i2c_master_probe(s_i2c_bus, addr, 50) == ESP_OK) {
+                                printf("  Device at 0x%02X\n", addr);
+                            }
+                        }
+                        printf("Scan complete.\n");
                     } else if (strncmp(cmd_buf, "bright ", 7) == 0) {
                         int val = atoi(cmd_buf + 7);
                         tab5_display_set_brightness(val);
                         printf("Brightness: %d%%\n", val);
+                    } else if (strncmp(cmd_buf, "pattern ", 8) == 0) {
+                        int val = atoi(cmd_buf + 8);
+                        tab5_display_test_pattern(val);
+                        printf("Pattern: %d\n", val);
+                    } else if (strcmp(cmd_buf, "pattern") == 0) {
+                        tab5_display_test_pattern(1);
+                        printf("Pattern: vertical bars\n");
+                    } else if (strcmp(cmd_buf, "reboot") == 0) {
+                        printf("Rebooting...\n");
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                        esp_restart();
                     } else {
                         printf("Unknown: %s\n", cmd_buf);
-                        printf("Commands: info, heap, red, green, blue, white, black, bright <0-100>\n");
+                        printf("Commands: info, heap, red, green, blue, white, black, bright <0-100>, pattern [0-3], reboot, scan\n");
                     }
                 }
                 pos = 0;
