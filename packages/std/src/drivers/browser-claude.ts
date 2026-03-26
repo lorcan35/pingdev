@@ -21,7 +21,7 @@ export interface BrowserClaudeOptions {
   priority?: number;
   /** Max ms to wait for Claude to finish responding. Default: 120_000 */
   responseTimeoutMs?: number;
-  /** Poll interval when waiting for response. Default: 2_000 */
+  /** Poll interval when waiting for response. Default: 1_500 */
   pollIntervalMs?: number;
 }
 
@@ -63,7 +63,7 @@ export class BrowserClaudeAdapter implements Driver {
   constructor(opts: BrowserClaudeOptions = {}) {
     this.gateway = (opts.gateway ?? 'http://localhost:3500').replace(/\/$/, '');
     this.responseTimeoutMs = opts.responseTimeoutMs ?? 120_000;
-    this.pollIntervalMs = opts.pollIntervalMs ?? 2_000;
+    this.pollIntervalMs = opts.pollIntervalMs ?? 1_500;
 
     this.registration = {
       id: 'browser-claude',
@@ -255,12 +255,20 @@ export class BrowserClaudeAdapter implements Driver {
       const res = await gwPost(`${this.gateway}/v1/dev/${deviceId}/eval`, {
         expression: `(() => {
           // Claude shows a stop button while generating
-          const stopBtn = document.querySelector('button[aria-label="Stop Response"]');
+          const stopBtn = document.querySelector('button[aria-label="Stop Response"], button[aria-label="Stop"]');
           if (stopBtn) return { typing: true, indicator: 'stop-button' };
 
-          // Pulsing cursor dot
-          const cursor = document.querySelector('.animate-pulse, [class*="cursor"]');
-          if (cursor) return { typing: true, indicator: 'cursor' };
+          // Streaming indicator — the last response block might have a cursor
+          const responses = document.querySelectorAll('.font-claude-response');
+          const last = responses[responses.length - 1];
+          if (last) {
+            const cursor = last.querySelector('.animate-pulse, [class*="cursor"], .blinking-cursor');
+            if (cursor) return { typing: true, indicator: 'cursor' };
+          }
+
+          // Check if there's a "Thinking" or loading spinner visible
+          const thinking = document.querySelector('[class*="thinking"], [class*="Thinking"]');
+          if (thinking && thinking.offsetParent !== null) return { typing: true, indicator: 'thinking' };
 
           return { typing: false };
         })()`,
