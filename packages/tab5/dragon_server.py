@@ -92,6 +92,15 @@ async def cdp_connect():
     # Bring tab to front (screencast only works on visible tabs)
     await send_cdp("Page.bringToFront")
 
+    # Force browser viewport to match Tab5 portrait display (720x1280)
+    await send_cdp("Emulation.setDeviceMetricsOverride", {
+        "width": SCREENCAST_MAX_W,
+        "height": SCREENCAST_MAX_H,
+        "deviceScaleFactor": 1,
+        "mobile": True,
+    })
+    print(f"[CDP] Browser viewport set to {SCREENCAST_MAX_W}x{SCREENCAST_MAX_H} (portrait)")
+
     # Start screencast
     await send_cdp("Page.startScreencast", {
         "format": "jpeg",
@@ -222,6 +231,17 @@ async def touch_ws_handler(request):
         msg_id += 1
 
     last_touch = None
+    last_touch_time = 0
+    release_task = None
+
+    async def auto_release():
+        """Auto-release mouse if no touch for 150ms (Tab5 doesn't send release events)."""
+        nonlocal last_touch
+        await asyncio.sleep(0.15)
+        if last_touch:
+            await dispatch_mouse(last_touch[0], last_touch[1], "mouseReleased")
+            print(f"[TOUCH] Auto-release at ({last_touch[0]},{last_touch[1]})")
+            last_touch = None
 
     async for msg in ws:
         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -229,7 +249,9 @@ async def touch_ws_handler(request):
                 data = json.loads(msg.data)
                 touches = data.get('t', [])
                 if not touches:
-                    # Touch release
+                    # Explicit touch release
+                    if release_task:
+                        release_task.cancel()
                     if last_touch:
                         await dispatch_mouse(last_touch[0], last_touch[1], "mouseReleased")
                         last_touch = None
@@ -243,6 +265,10 @@ async def touch_ws_handler(request):
                 bx = int(tx * bw / SCREENCAST_MAX_W)
                 by = int(ty * bh / SCREENCAST_MAX_H)
 
+                # Cancel pending auto-release
+                if release_task:
+                    release_task.cancel()
+
                 if last_touch is None:
                     # Touch down
                     await dispatch_mouse(bx, by, "mousePressed")
@@ -251,6 +277,10 @@ async def touch_ws_handler(request):
                     await dispatch_mouse(bx, by, "mouseMoved")
 
                 last_touch = (bx, by)
+
+                # Schedule auto-release (fires if no more touch events arrive)
+                release_task = asyncio.create_task(auto_release())
+
                 print(f"[TOUCH] Tab5({tx},{ty}) → Browser({bx},{by})")
 
             except json.JSONDecodeError:
