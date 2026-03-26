@@ -226,18 +226,36 @@ export class BrowserClaudeAdapter implements Driver {
     }
   }
 
-  private async readLatestResponse(deviceId: string, beforeCount: number): Promise<{ text: string }> {
+  private async readLatestResponse(deviceId: string, beforeCount: number): Promise<{ text: string; thinking?: string }> {
     try {
       const res = await gwPost(`${this.gateway}/v1/dev/${deviceId}/eval`, {
         expression: `(() => {
           const msgs = document.querySelectorAll('.font-claude-response');
           if (msgs.length <= ${beforeCount}) return { text: '' };
           const last = msgs[msgs.length - 1];
-          return { text: last?.textContent?.trim()?.substring(0, 10000) || '' };
+          if (!last) return { text: '' };
+
+          // Clone the node and remove thinking indicators before reading text
+          const clone = last.cloneNode(true);
+
+          // Remove "Thought for Xs" indicators and thinking blocks
+          clone.querySelectorAll('[class*="thinking"], [class*="Thinking"], [data-thinking]').forEach(el => el.remove());
+
+          let text = clone.textContent?.trim() || '';
+
+          // Strip common thinking prefix patterns: "Thought for Xs", "Thinking..."
+          text = text.replace(/^(Thought for \\d+s\\s*)+/gi, '').trim();
+          text = text.replace(/^Thinking\\.{0,3}\\s*/gi, '').trim();
+
+          // Also extract thinking separately if present
+          const thinkingEls = last.querySelectorAll('[class*="thinking"], [class*="Thinking"]');
+          const thinking = Array.from(thinkingEls).map(el => el.textContent?.trim()).filter(Boolean).join('\\n');
+
+          return { text: text.substring(0, 10000), thinking: thinking || undefined };
         })()`,
       });
       const data = res?.result ?? res;
-      return { text: data?.text || '' };
+      return { text: data?.text || '', thinking: data?.thinking };
     } catch {
       return { text: '' };
     }
