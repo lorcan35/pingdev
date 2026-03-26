@@ -1574,11 +1574,25 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
       expression: `(() => {
         const msgs = document.querySelectorAll('.font-claude-response');
         const last = msgs[msgs.length - 1];
-        return last?.textContent?.trim()?.substring(0, 5000) || '';
+        if (!last) return { text: '' };
+
+        // Clone and strip thinking indicators
+        const clone = last.cloneNode(true);
+        clone.querySelectorAll('[class*="thinking"], [class*="Thinking"], [data-thinking]').forEach(el => el.remove());
+        let text = clone.textContent?.trim() || '';
+        text = text.replace(/^(Thought for \\d+s\\s*)+/gi, '').trim();
+        text = text.replace(/^Thinking\\.{0,3}\\s*/gi, '').trim();
+
+        // Extract thinking separately
+        const thinkingEls = last.querySelectorAll('[class*="thinking"], [class*="Thinking"]');
+        const thinking = Array.from(thinkingEls).map(el => el.textContent?.trim()).filter(Boolean).join('\\n');
+
+        return { text: text.substring(0, 5000), thinking: thinking || undefined };
       })()`,
     });
 
-    return { ok: true, action: 'read', response: result?.result || '' };
+    const data = result?.result ?? result;
+    return { ok: true, action: 'read', response: data?.text || data || '', thinking: data?.thinking };
   });
 
   // GET /v1/app/claude/conversations
