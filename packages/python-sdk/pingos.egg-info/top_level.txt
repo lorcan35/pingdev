@@ -1,2 +1,0 @@
-pingos
-tests

@@ -2,6 +2,7 @@
   "name": "@pingdev/chatgpt",
   "version": "0.1.0",
   "description": "PingApp shim for https://chatgpt.com",
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "commonjs",

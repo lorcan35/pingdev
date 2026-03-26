@@ -19,3 +19,17 @@ docs/audit-checkpoint.json
 docs/LOCAL-MODE-FIXES.md
 docs/LOCAL-MODEL-AUDIT.md
 docs/PROMPT-OPTIMIZATION-CHANGELOG.md
+
+# Compiled TypeScript output in source dirs
+*.d.ts
+*.d.ts.map
+*.js.map
+!src/**/*.js
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Lockfile (using npm)
+pnpm-lock.yaml

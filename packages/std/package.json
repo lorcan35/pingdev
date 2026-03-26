@@ -1,7 +1,8 @@
 {
   "name": "@pingdev/std",
   "version": "0.1.0",
-  "description": "PingOS standard library — shared types, errors, and config for the POSIX device layer",
+  "description": "PingOS standard library \u2014 shared types, errors, and config for the POSIX device layer",
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",

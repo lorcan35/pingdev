@@ -2,7 +2,8 @@
   "name": "@pingdev/chrome-extension",
   "version": "0.1.0",
   "private": true,
-  "description": "PingOS Chrome Extension — Auth Bridge + passive driver generator",
+  "description": "PingOS Chrome Extension \u2014 Auth Bridge + passive driver generator",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",

@@ -1,7 +1,8 @@
 {
   "name": "@pingdev/core",
   "version": "0.1.0",
-  "description": "Core framework for building PingApps — browser automation shims as REST APIs",
+  "description": "Core framework for building PingApps \u2014 browser automation shims as REST APIs",
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "commonjs",
@@ -23,6 +24,14 @@
   "devDependencies": {
     "@types/uuid": "^10.0.0"
   },
-  "files": ["dist/**/*"],
-  "keywords": ["pingdev", "browser-automation", "api-shim", "playwright", "cdp"]
+  "files": [
+    "dist/**/*"
+  ],
+  "keywords": [
+    "pingdev",
+    "browser-automation",
+    "api-shim",
+    "playwright",
+    "cdp"
+  ]
 }
