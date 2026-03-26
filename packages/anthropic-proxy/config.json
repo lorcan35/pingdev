@@ -1,0 +1,14 @@
+{
+  "port": 8765,
+  "anthropic_base_url": "https://api.anthropic.com",
+  "cc_headers": {
+    "x-anthropic-billing-header": "cc_version=2.1.49; cc_entrypoint=cli; cch=00000;",
+    "x-app": "cli",
+    "user-agent": "Claude/2.1.49 (cli; arm64)"
+  },
+  "jitter_min_ms": 80,
+  "jitter_max_ms": 300,
+  "max_requests_per_2s": 3,
+  "cli_path": "claude",
+  "log_level": "info"
+}

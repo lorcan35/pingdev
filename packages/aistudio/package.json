@@ -1,0 +1,21 @@
+{
+  "name": "@pingdev/aistudio",
+  "version": "0.1.0",
+  "description": "PingApp shim for Google AI Studio (https://aistudio.google.com)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pingdev/core": "file:../core"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "vitest": "^1.6.1"
+  }
+}
