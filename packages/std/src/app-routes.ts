@@ -1624,14 +1624,14 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
         if (!btn) return { error: 'no-selector' };
         const current = btn.textContent.trim().replace(/\\s+/g, ' ');
         btn.click();
-        await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 1500));
 
         // Expand "More models"
         const items1 = document.querySelectorAll('[role="menuitem"]');
         for (const el of items1) {
           if (el.textContent.includes('More models')) { el.click(); break; }
         }
-        await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 1000));
 
         // Read all models
         const items2 = document.querySelectorAll('[role="menuitem"]');
@@ -1665,6 +1665,7 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
     const modelText = String(model).toLowerCase().trim();
 
     // All-in-one: open dropdown, expand if needed, find and click target, verify
+    // Note: ARM devices need ~1-1.5s for dropdown render; desktop needs ~300ms
     const result = await deviceOp(gatewayUrl, deviceId, 'eval', {
       expression: `(async () => {
         const target = ${JSON.stringify(modelText)};
@@ -1672,9 +1673,9 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
         if (!btn) return { picked: false, error: 'no-selector' };
         const before = btn.textContent.trim().replace(/\\s+/g, ' ');
 
-        // Open dropdown
+        // Open dropdown — wait for render (ARM needs ~1s)
         btn.click();
-        await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 1500));
 
         // Try to find and click target in top-level items
         function tryClick() {
@@ -1690,25 +1691,17 @@ export function registerAppRoutes(app: FastifyInstance, gatewayUrl: string) {
         }
 
         let result = tryClick();
-        if (result) {
-          await new Promise(r => setTimeout(r, 600));
-          const after = document.querySelector('[data-testid="model-selector-dropdown"]')?.textContent?.trim()?.replace(/\\s+/g, ' ') || '';
-          return { ...result, before, after };
-        }
+        if (result) return { ...result, before };
 
         // Expand "More models"
         const items = document.querySelectorAll('[role="menuitem"]');
         for (const el of items) {
           if (el.textContent.includes('More models')) { el.click(); break; }
         }
-        await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 1000));
 
         result = tryClick();
-        if (result) {
-          await new Promise(r => setTimeout(r, 600));
-          const after = document.querySelector('[data-testid="model-selector-dropdown"]')?.textContent?.trim()?.replace(/\\s+/g, ' ') || '';
-          return { ...result, before, after };
-        }
+        if (result) return { ...result, before };
 
         // Not found — close dropdown
         document.body.click();
